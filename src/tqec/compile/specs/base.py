@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from tqec.compile.blocks.block import Block
 from tqec.compile.specs.enums import SpatialArms
@@ -12,6 +12,9 @@ from tqec.templates.base import RectangularTemplate
 from tqec.utils.exceptions import TQECError
 from tqec.utils.position import Direction3D
 from tqec.utils.scale import LinearFunction
+
+if TYPE_CHECKING:
+    from tqec.computation.correlation import CorrelationSurface
 
 
 @dataclass(frozen=True)
@@ -37,6 +40,7 @@ class CubeSpec:
     kind: CubeKind
     spatial_arms: SpatialArms = SpatialArms.NONE
     has_spatial_up_or_down_pipe_in_timeslice: bool = False
+    condition: "CorrelationSurface | None" = None
 
     def __post_init__(self) -> None:
         if self.spatial_arms != SpatialArms.NONE:
@@ -65,9 +69,15 @@ class CubeSpec:
             return CubeSpec(
                 cube.kind,
                 has_spatial_up_or_down_pipe_in_timeslice=has_spatial_up_or_down_pipe_in_timeslice,
+                condition=cube.condition,
             )
         spatial_arms = SpatialArms.from_cube_in_graph(cube, graph)
-        return CubeSpec(cube.kind, spatial_arms, has_spatial_up_or_down_pipe_in_timeslice)
+        return CubeSpec(
+            cube.kind,
+            spatial_arms,
+            has_spatial_up_or_down_pipe_in_timeslice,
+            condition=cube.condition,
+        )
 
     @property
     def pipe_dimensions(self) -> frozenset[Literal[Direction3D.X, Direction3D.Y]]:
