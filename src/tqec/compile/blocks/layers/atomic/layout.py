@@ -225,7 +225,17 @@ class LayoutLayer(BaseLayer):
         if reschedule_measurements:
             self.reschedule_measurements()
         template, plaquettes = self.to_template_and_plaquettes()
-        scheduled_circuit = generate_circuit(template, k, plaquettes)
+        # Reverse-map global plaquette indices back to their owning cube
+        # BlockPosition2D so the Canonical Emission Order pass downstream can
+        # group targets by template-of-origin.
+        plaquette_to_block: dict[int, BlockPosition2D] = {
+            global_idx: pos
+            for pos, local_to_global in template.get_indices_map_for_instantiation().items()
+            for global_idx in local_to_global.values()
+        }
+        scheduled_circuit = generate_circuit(
+            template, k, plaquettes, plaquette_to_block=plaquette_to_block
+        )
         # Shift the qubits of the returned scheduled circuit
         mincube, _ = self.bounds
         eshape = self.element_shape.to_shape_2d(k)

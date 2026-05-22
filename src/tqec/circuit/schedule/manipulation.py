@@ -21,7 +21,7 @@ import functools
 import itertools
 import operator
 import warnings
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 
 import stim
 
@@ -31,6 +31,7 @@ from tqec.circuit.qubit_map import QubitMap
 from tqec.circuit.schedule.circuit import ScheduledCircuit
 from tqec.circuit.schedule.schedule import Schedule
 from tqec.utils.exceptions import TQECError, TQECWarning
+from tqec.utils.position import BlockPosition2D
 
 
 class _ScheduledCircuits:
@@ -140,6 +141,70 @@ def _sort_target_groups(
     return sorted(targets, key=_sort_key)
 
 
+def _emit_moment_with_ceo(
+    merged_instructions: list[stim.CircuitInstruction],
+    qubit_to_block: Mapping[GridQubit, BlockPosition2D],
+    global_i2q: Mapping[int, GridQubit],
+    circuit: stim.Circuit,
+) -> None:
+    """Emit moment instructions under Canonical Emission Order.
+
+    For every instruction whose targets are all qubit targets and whose owning
+    blocks are all known, the target groups are split out, sorted by
+    ``(block.y, block.x, qubit-idx-tuple)``, and same-``(name, args)`` runs in
+    the sorted sequence are collapsed back into single instructions.  All
+    other instructions (e.g. ``DETECTOR``, ``QUBIT_COORDS``, or any instruction
+    referencing a qubit with no block ownership) pass through unchanged, in
+    their pre-CEO order, before the CEO-sorted block.
+    """
+    passthrough: list[stim.CircuitInstruction] = []
+    ceo_entries: list[
+        tuple[BlockPosition2D, tuple[int, ...], str, tuple[float, ...], list[stim.GateTarget]]
+    ] = []
+    for inst in merged_instructions:
+        groups = inst.target_groups()
+        if not groups:
+            passthrough.append(inst)
+            continue
+        if not all(t.qubit_value is not None for grp in groups for t in grp):
+            passthrough.append(inst)
+            continue
+        args = tuple(inst.gate_args_copy())
+        staged: list[
+            tuple[BlockPosition2D, tuple[int, ...], str, tuple[float, ...], list[stim.GateTarget]]
+        ] = []
+        eligible = True
+        for grp in groups:
+            qids = tuple(t.qubit_value for t in grp)
+            first_q = global_i2q.get(qids[0])
+            block_pos = qubit_to_block.get(first_q) if first_q is not None else None
+            if block_pos is None:
+                eligible = False
+                break
+            staged.append((block_pos, qids, inst.name, args, list(grp)))
+        if eligible:
+            ceo_entries.extend(staged)
+        else:
+            passthrough.append(inst)
+
+    for inst in passthrough:
+        circuit.append(inst)
+
+    ceo_entries.sort(key=lambda e: (e[0].y, e[0].x, e[1]))
+
+    i = 0
+    while i < len(ceo_entries):
+        name = ceo_entries[i][2]
+        args = ceo_entries[i][3]
+        flat: list[stim.GateTarget] = []
+        while (
+            i < len(ceo_entries) and ceo_entries[i][2] == name and ceo_entries[i][3] == args
+        ):
+            flat.extend(ceo_entries[i][4])
+            i += 1
+        circuit.append(name, flat, list(args))
+
+
 def remove_duplicate_instructions(
     instructions: list[stim.CircuitInstruction],
     mergeable_instruction_names: frozenset[str],
@@ -242,6 +307,7 @@ def merge_scheduled_circuits(
     circuits: list[ScheduledCircuit],
     global_qubit_map: QubitMap,
     mergeable_instructions: Iterable[str] = (),
+    qubit_to_block: Mapping[GridQubit, BlockPosition2D] | None = None,
 ) -> ScheduledCircuit:
     """Merge several :class:`.ScheduledCircuit` instances into one instance.
 
@@ -263,6 +329,10 @@ def merge_scheduled_circuits(
         mergeable_instructions: a list of instruction names that are considered
             mergeable. Duplicate instructions with a name in this list will be
             merged into a single instruction.
+        qubit_to_block: optional mapping from ``GridQubit`` to owning
+            ``BlockPosition2D`` (cube position in the enclosing ``LayoutLayer``).
+            Plumbed in for the upcoming Canonical Emission Order pass; currently
+            unused. ``None`` preserves baseline behaviour.
 
     Returns:
         a circuit representing the merged scheduled circuits given as input.
@@ -289,11 +359,16 @@ def merge_scheduled_circuits(
         )
         merged_instructions = merge_instructions(deduplicated_instructions)
         circuit = stim.Circuit()
-        for inst in merged_instructions:
-            circuit.append(
-                inst.name,
-                functools.reduce(operator.iadd, _sort_target_groups(inst.target_groups()), []),
-                inst.gate_args_copy(),
+        if qubit_to_block is None:
+            for inst in merged_instructions:
+                circuit.append(
+                    inst.name,
+                    functools.reduce(operator.iadd, _sort_target_groups(inst.target_groups()), []),
+                    inst.gate_args_copy(),
+                )
+        else:
+            _emit_moment_with_ceo(
+                merged_instructions, qubit_to_block, global_i2q.i2q, circuit
             )
         all_moments.append(Moment(circuit))
         all_schedules.append(schedule)

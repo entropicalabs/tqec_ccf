@@ -18,9 +18,12 @@ Note that these methods do not work with ``REPEAT`` instructions.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import numpy
 import numpy.typing as npt
 
+from tqec.circuit.qubit import GridQubit
 from tqec.circuit.schedule import (
     ScheduledCircuit,
     merge_scheduled_circuits,
@@ -29,10 +32,15 @@ from tqec.circuit.schedule import (
 from tqec.plaquette.plaquette import Plaquettes
 from tqec.templates.base import Template
 from tqec.utils.array import to2dlist
-from tqec.utils.position import Shift2D
+from tqec.utils.position import BlockPosition2D, Shift2D
 
 
-def generate_circuit(template: Template, k: int, plaquettes: Plaquettes) -> ScheduledCircuit:
+def generate_circuit(
+    template: Template,
+    k: int,
+    plaquettes: Plaquettes,
+    plaquette_to_block: Mapping[int, BlockPosition2D] | None = None,
+) -> ScheduledCircuit:
     """Generate a quantum circuit from a template and its plaquettes.
 
     This is one of the core methods of the :mod:`tqec` package. It generates a
@@ -70,13 +78,16 @@ def generate_circuit(template: Template, k: int, plaquettes: Plaquettes) -> Sche
     template_plaquettes = template.instantiate(k, _indices)
     increments = template.get_increments()
 
-    return generate_circuit_from_instantiation(template_plaquettes, plaquettes, increments)
+    return generate_circuit_from_instantiation(
+        template_plaquettes, plaquettes, increments, plaquette_to_block=plaquette_to_block
+    )
 
 
 def generate_circuit_from_instantiation(
     plaquette_array: npt.NDArray[numpy.int_],
     plaquettes: Plaquettes,
     increments: Shift2D,
+    plaquette_to_block: Mapping[int, BlockPosition2D] | None = None,
 ) -> ScheduledCircuit:
     """Generate a quantum circuit from an array of plaquette indices and the associated plaquettes.
 
@@ -127,6 +138,13 @@ def generate_circuit_from_instantiation(
     # Generate the ScheduledCircuit instances for each plaquette instantiation
     all_scheduled_circuits: list[ScheduledCircuit] = []
     additional_mergeable_instructions: set[str] = set()
+    # When plaquette_to_block is provided, accumulate GridQubit -> BlockPosition2D
+    # ownership for use by the Canonical Emission Order pass downstream.  First
+    # plaquette to claim a boundary qubit wins (row-major walk -> top-left block
+    # for the typical layout convention).
+    qubit_to_block: dict[GridQubit, BlockPosition2D] | None = (
+        {} if plaquette_to_block is not None else None
+    )
     # The below line is not strictly needed, but makes type checkers happy with
     # type inference. See https://numpy.org/doc/stable/reference/typing.html#d-arrays
     # for more information on why this should be done.
@@ -153,6 +171,11 @@ def generate_circuit_from_instantiation(
                 )
                 all_scheduled_circuits.append(mapped_scheduled_circuit)
                 additional_mergeable_instructions |= plaquette.mergeable_instructions
+                if qubit_to_block is not None and plaquette_to_block is not None:
+                    block_pos = plaquette_to_block.get(plaquette_index)
+                    if block_pos is not None:
+                        for q in mapped_scheduled_circuit.qubits:
+                            qubit_to_block.setdefault(q, block_pos)
 
     # Merge everything, but first make sure that the circuits are compatible.
     # Note that relabel_circuits_qubit_indices guarantees in its documentation
@@ -160,5 +183,8 @@ def generate_circuit_from_instantiation(
     # to not deepcopy the circuits earlier in the function.
     all_scheduled_circuits, qubit_map = relabel_circuits_qubit_indices(all_scheduled_circuits)
     return merge_scheduled_circuits(
-        all_scheduled_circuits, qubit_map, additional_mergeable_instructions
+        all_scheduled_circuits,
+        qubit_map,
+        additional_mergeable_instructions,
+        qubit_to_block=qubit_to_block,
     )
