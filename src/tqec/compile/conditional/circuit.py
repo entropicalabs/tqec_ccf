@@ -132,53 +132,58 @@ def branch_diff(
 ) -> list[CircuitEntry]:
     """Diff two parallel branch circuits into a single entry sequence.
 
-    Walks both circuits instruction-by-instruction.  Identical instructions
-    (same name, args, target list) emit once unconditionally.  Differing
-    instructions get wrapped in a single ``IfBlock`` whose ``condition_rec``
-    selects ``branch_one`` over ``branch_zero``.  Differing runs are
-    collected greedily until the next identical instruction is encountered.
+    Uses ``difflib.SequenceMatcher`` to align the two circuits at the
+    instruction level.  Matching blocks emit once unconditionally; unmatched
+    spans (which may have different lengths in the two branches) collapse
+    into a single ``IfBlock`` whose ``then_body`` carries the ``branch_one``
+    span and ``else_body`` the ``branch_zero`` span.  This handles cases
+    where ``Equal Measurement Count`` holds but branch-only annotations
+    (e.g. boundary detectors) differ in count.
 
-    The two circuits MUST have the same number of top-level instructions
-    (verified by ``ConditionalBlock`` Equal Measurement Count + identical
-    layer count assumptions).  ``REPEAT`` / nested blocks are not supported
-    in this stage.
+    ``REPEAT`` / nested blocks are not supported in this stage.
     """
-    if len(branch_zero) != len(branch_one):
-        raise ValueError(
-            f"branch_diff: instruction count mismatch ({len(branch_zero)} "
-            f"vs {len(branch_one)}).  Equal Measurement Count violated?"
-        )
+    import difflib
 
-    out: list[CircuitEntry] = []
-    pending_zero: list[stim.CircuitInstruction] = []
-    pending_one: list[stim.CircuitInstruction] = []
-
-    def flush() -> None:
-        if not pending_zero and not pending_one:
-            return
-        block = IfBlock(condition_rec=condition_rec)
-        block.then_body = list(pending_one)
-        block.else_body = list(pending_zero)
-        out.append(block)
-        pending_zero.clear()
-        pending_one.clear()
-
-    for inst_zero, inst_one in zip(branch_zero, branch_one):
-        if not isinstance(inst_zero, stim.CircuitInstruction) or not isinstance(
-            inst_one, stim.CircuitInstruction
-        ):
+    zero_instrs: list[stim.CircuitInstruction] = []
+    for inst in branch_zero:
+        if not isinstance(inst, stim.CircuitInstruction):
             raise ValueError(
                 "branch_diff does not support REPEAT or nested blocks "
                 "in branch circuits at this stage."
             )
-        if _instructions_equal(inst_zero, inst_one):
-            flush()
-            out.append(inst_zero)
+        zero_instrs.append(inst)
+    one_instrs: list[stim.CircuitInstruction] = []
+    for inst in branch_one:
+        if not isinstance(inst, stim.CircuitInstruction):
+            raise ValueError(
+                "branch_diff does not support REPEAT or nested blocks "
+                "in branch circuits at this stage."
+            )
+        one_instrs.append(inst)
+
+    zero_keys = [_instruction_key(i) for i in zero_instrs]
+    one_keys = [_instruction_key(i) for i in one_instrs]
+    matcher = difflib.SequenceMatcher(a=zero_keys, b=one_keys, autojunk=False)
+
+    out: list[CircuitEntry] = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            out.extend(zero_instrs[i1:i2])
         else:
-            pending_zero.append(inst_zero)
-            pending_one.append(inst_one)
-    flush()
+            block = IfBlock(condition_rec=condition_rec)
+            block.then_body = list(one_instrs[j1:j2])
+            block.else_body = list(zero_instrs[i1:i2])
+            out.append(block)
     return out
+
+
+def _instruction_key(inst: stim.CircuitInstruction) -> tuple:
+    return (
+        inst.name,
+        tuple(inst.gate_args_copy()),
+        tuple((t.value, t.is_qubit_target, t.is_measurement_record_target)
+              for t in inst.targets_copy()),
+    )
 
 
 def _instructions_equal(

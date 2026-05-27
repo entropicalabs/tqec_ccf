@@ -107,8 +107,17 @@ def test_branch_diff_collapses_consecutive_differences() -> None:
     assert [i.name for i in block.else_body] == ["MX", "MY"]
 
 
-def test_branch_diff_length_mismatch_raises() -> None:
-    z = _circuit("H 0\nM 0")
-    o = _circuit("H 0\nM 0\nX 1")
-    with pytest.raises(ValueError, match="instruction count mismatch"):
-        branch_diff(z, o, condition_rec=-1)
+def test_branch_diff_length_mismatch_creates_if_only_block() -> None:
+    z = stim.Circuit()
+    z.append("H", [0])
+    z.append("M", [0])
+    o = stim.Circuit()
+    o.append("H", [0])
+    o.append("M", [0])
+    o.append("X", [1])
+    entries = branch_diff(z, o, condition_rec=-1)
+    # H, M shared; trailing X only in branch_one -> IfBlock with empty else.
+    assert len(entries) == 3
+    assert isinstance(entries[-1], IfBlock)
+    assert [i.name for i in entries[-1].then_body] == ["X"]
+    assert entries[-1].else_body == []

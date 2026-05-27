@@ -525,6 +525,90 @@ class TopologicalComputationGraph:
             circuit = noise_model.noisy_circuit(circuit)
         return circuit
 
+    def generate_conditional_stim_text(
+        self,
+        k: int,
+        condition_rec: int,
+        manhattan_radius: int = 2,
+        detector_database: DetectorDatabase | None = None,
+        database_path: str | Path = DEFAULT_DETECTOR_DATABASE_PATH,
+        do_not_use_database: bool = False,
+        only_use_database: bool = False,
+        reschedule_measurements: bool = True,
+    ) -> str:
+        """Compile a graph with conditional cubes into IF/ELSE-annotated Stim text.
+
+        Stage 6 first cut: handles graphs containing exactly one
+        ``ConditionalBlock`` via the two-pass strategy.  Both branches are
+        compiled in turn by transiently swapping the conditional block for
+        each of its sub-blocks; the two ``stim.Circuit`` outputs are then
+        diffed instruction-by-instruction (see
+        :func:`tqec.compile.conditional.branch_diff`) into a single
+        ``ConditionalCircuit`` whose ``to_stim_text`` representation contains
+        ``IF(rec[k]) {{ ... }} ELSE {{ ... }}`` blocks around the differing
+        spans.
+
+        ``condition_rec`` is the negative ``rec`` offset of the measurement
+        whose outcome selects the true branch.  Until the Pauli frame tracker
+        starts driving emission, this must be supplied by the caller.
+
+        Multi-conditional-cube graphs are not yet supported.
+        """
+        from tqec.compile.conditional.circuit import (
+            ConditionalCircuit,
+            branch_diff,
+        )
+
+        if not self._conditional_blocks:
+            circuit = self.generate_stim_circuit(
+                k,
+                manhattan_radius=manhattan_radius,
+                detector_database=detector_database,
+                database_path=database_path,
+                do_not_use_database=do_not_use_database,
+                only_use_database=only_use_database,
+                reschedule_measurements=reschedule_measurements,
+            )
+            return str(circuit)
+
+        if len(self._conditional_blocks) != 1:
+            raise NotImplementedError(
+                "generate_conditional_stim_text currently supports at most "
+                f"one ConditionalBlock; got {len(self._conditional_blocks)}."
+            )
+        ((pos, cblock),) = self._conditional_blocks.items()
+        original_block = self._blocks[pos]
+        original_cond = self._conditional_blocks
+
+        try:
+            self._conditional_blocks = {}
+            self._blocks[pos] = cblock.block_if_zero
+            circuit_zero = self.generate_stim_circuit(
+                k,
+                manhattan_radius=manhattan_radius,
+                detector_database=detector_database,
+                database_path=database_path,
+                do_not_use_database=do_not_use_database,
+                only_use_database=only_use_database,
+                reschedule_measurements=reschedule_measurements,
+            )
+            self._blocks[pos] = cblock.block_if_one
+            circuit_one = self.generate_stim_circuit(
+                k,
+                manhattan_radius=manhattan_radius,
+                detector_database=detector_database,
+                database_path=database_path,
+                do_not_use_database=do_not_use_database,
+                only_use_database=only_use_database,
+                reschedule_measurements=reschedule_measurements,
+            )
+        finally:
+            self._blocks[pos] = original_block
+            self._conditional_blocks = original_cond
+
+        entries = branch_diff(circuit_zero, circuit_one, condition_rec=condition_rec)
+        return ConditionalCircuit(entries).to_stim_text()
+
     def generate_crumble_url(
         self,
         k: int,
