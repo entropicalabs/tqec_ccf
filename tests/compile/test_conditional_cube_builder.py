@@ -17,7 +17,7 @@ from tqec.utils.position import Position3D
 from tqec.utils.scale import LinearFunction
 
 
-_BLOCK_TEMPORAL_HEIGHT = LinearFunction(0, 2)
+_BLOCK_TEMPORAL_HEIGHT = LinearFunction(2, -1)
 
 
 def _trivial_condition() -> CorrelationSurface:

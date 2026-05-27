@@ -4,7 +4,7 @@ import warnings
 from collections.abc import Mapping, Sequence
 from multiprocessing import cpu_count
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import stim
 from typing_extensions import override
@@ -12,6 +12,10 @@ from typing_extensions import override
 from tqec.circuit.qubit import GridQubit
 from tqec.circuit.qubit_map import QubitMap
 from tqec.compile.blocks.layers.composed.sequenced import SequencedLayers
+
+if TYPE_CHECKING:
+    from tqec.compile.blocks.block import ConditionalBlock
+    from tqec.compile.blocks.positioning import LayoutPosition3D
 from tqec.compile.detectors.database import CURRENT_DATABASE_VERSION, DetectorDatabase
 from tqec.compile.observables.abstract_observable import AbstractObservable
 from tqec.compile.observables.builder import ObservableBuilder
@@ -60,6 +64,7 @@ class LayerTree:
         observable_builder: ObservableBuilder,
         abstract_observables: list[AbstractObservable] | None = None,
         annotations: Mapping[int, LayerTreeAnnotations] | None = None,
+        conditional_blocks: Mapping["LayoutPosition3D", "ConditionalBlock"] | None = None,
     ):
         """Represent a computation as a tree.
 
@@ -78,12 +83,25 @@ class LayerTree:
                 of ``k``, the scaling factor, to annotations computed for that
                 value of ``k``.
             observable_builder: the style of the surface code patch.
+            conditional_blocks: mapping from each ``LayoutPosition3D`` that hosts
+                a ``ConditionalBlock`` to the block itself.  Used by the
+                IF/ELSE emission stages to recover both branches and the
+                ``CorrelationSurface`` condition associated with each
+                conditional cube.  Optional; defaults to an empty mapping.
 
         """
         self._root = LayerNode(root)
         self._abstract_observables = abstract_observables or []
         self._annotations = dict(annotations) if annotations is not None else {}
         self._observable_builder = observable_builder
+        self._conditional_blocks: dict["LayoutPosition3D", "ConditionalBlock"] = (
+            dict(conditional_blocks) if conditional_blocks is not None else {}
+        )
+
+    @property
+    def conditional_blocks(self) -> Mapping["LayoutPosition3D", "ConditionalBlock"]:
+        """Return the conditional-cube blocks indexed by ``LayoutPosition3D``."""
+        return self._conditional_blocks
 
     def to_dict(self) -> dict[str, Any]:
         """Return a dictionary representation of ``self``."""
