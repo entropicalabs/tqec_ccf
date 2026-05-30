@@ -353,6 +353,19 @@ class TopologicalComputationGraph:
         pblock = LayoutPosition3D.from_block_position(block_pos)
         block = self._blocks[pblock]
 
+        # A ConditionalBlock aliases its layer_sequence to block_if_zero; the
+        # spatial-pipe substitution path below (via _substitute_part_of_spatial_pipe)
+        # would read only the zero-branch border layer and silently drop the
+        # one-branch layer.  Until per-branch spatial pipe substitution is wired,
+        # refuse to mix a ConditionalBlock with spatial pipes.
+        if isinstance(block, ConditionalBlock) and block.trimmed_spatial_borders:
+            raise NotImplementedError(
+                f"Conditional cube at {block_pos} has a spatial pipe attached; "
+                "spatial-pipe substitution from a ConditionalBlock is not yet "
+                "supported (would lose one-branch boundary). Connect conditional "
+                "cubes via temporal pipes only for now."
+            )
+
         # First replace the layer on the temporal border of the block.
         layer_on_top_of_block = layer
         if block.trimmed_spatial_borders:
