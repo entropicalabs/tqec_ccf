@@ -226,6 +226,30 @@ class ConditionalBlock(Block):
         """Correlation surface whose Z outcome selects the active branch."""
         return self._condition
 
+    @override
+    def with_spatial_borders_trimmed(
+        self, borders: Iterable[SpatialBlockBorder]
+    ) -> ConditionalBlock:
+        borders = tuple(borders)
+        return ConditionalBlock(
+            self._block_if_zero.with_spatial_borders_trimmed(borders),
+            self._block_if_one.with_spatial_borders_trimmed(borders),
+            self._condition,
+        )
+
+    @override
+    def with_temporal_borders_replaced(
+        self,
+        border_replacements: Mapping[TemporalBlockBorder, BaseLayer | None],
+    ) -> ConditionalBlock | None:
+        if not border_replacements:
+            return self
+        new_zero = self._block_if_zero.with_temporal_borders_replaced(border_replacements)
+        new_one = self._block_if_one.with_temporal_borders_replaced(border_replacements)
+        if new_zero is None or new_one is None:
+            return None
+        return ConditionalBlock(new_zero, new_one, self._condition)
+
 
 def merge_parallel_block_layers(
     blocks_in_parallel: Mapping[LayoutPosition2D, Block],

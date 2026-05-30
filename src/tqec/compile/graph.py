@@ -149,6 +149,23 @@ class TopologicalComputationGraph:
         if isinstance(block, ConditionalBlock):
             self._conditional_blocks[layout_position] = block
 
+    def _set_cube_block(self, pos: LayoutPosition3D, block: Block) -> None:
+        """Write back a cube ``block`` at ``pos``, keeping ``_conditional_blocks`` in sync.
+
+        Used by pipe-attachment helpers that transform a cube via
+        ``with_spatial_borders_trimmed`` or ``with_temporal_borders_replaced``.
+        When the original cube is a :class:`ConditionalBlock`, the transformed
+        result must also be a :class:`ConditionalBlock` (carrying its two
+        branches through the transform) so that ``generate_conditional_stim_text``
+        sees the pipe-substituted sub-blocks during two-pass emission.
+        """
+        self._blocks[pos] = block
+        if pos in self._conditional_blocks:
+            assert isinstance(block, ConditionalBlock), (
+                f"Lost ConditionalBlock identity at {pos}: got {type(block).__name__}."
+            )
+            self._conditional_blocks[pos] = block
+
     def get_cube(self, position: BlockPosition3D) -> Block:
         """Recover the :class:`.Block` instance at the provided ``position``.
 
@@ -271,8 +288,12 @@ class TopologicalComputationGraph:
         sink_border = border_from_signed_direction(SignedDirection3D(juncdir, False))
         assert isinstance(source_border, SpatialBlockBorder)
         assert isinstance(sink_border, SpatialBlockBorder)
-        self._blocks[psource] = self._blocks[psource].with_spatial_borders_trimmed([source_border])
-        self._blocks[psink] = self._blocks[psink].with_spatial_borders_trimmed([sink_border])
+        self._set_cube_block(
+            psource, self._blocks[psource].with_spatial_borders_trimmed([source_border])
+        )
+        self._set_cube_block(
+            psink, self._blocks[psink].with_spatial_borders_trimmed([sink_border])
+        )
 
     def _substitute_part_of_spatial_pipe(
         self,
@@ -340,7 +361,7 @@ class TopologicalComputationGraph:
             )
         new_block = block.with_temporal_borders_replaced({block_border: layer_on_top_of_block})
         assert new_block is not None, "No layer removal happened, only replacement"
-        self._blocks[pblock] = new_block
+        self._set_cube_block(pblock, new_block)
         # Then, if the block has no trimmed spatial border (i.e., no spatial
         # pipes), we can return because the replacement is over.
         if not block.trimmed_spatial_borders:
