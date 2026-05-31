@@ -64,9 +64,16 @@ def contains_only_repeated_or_sequenced_layers(
 def merge_base_layers(
     layers: dict[LayoutPosition2D, BaseLayer],
     scalable_qubit_shape: PhysicalQubitScalable2D,
+    conditional_layers: dict[LayoutPosition2D, BaseLayer] | None = None,
 ) -> LayoutLayer:
-    """Merge several :class:`.BaseLayer` instances into one."""
-    return LayoutLayer(layers, scalable_qubit_shape)
+    """Merge several :class:`.BaseLayer` instances into one.
+
+    ``conditional_layers``, if provided, carries the parallel branch-``one``
+    slices for cube positions that came from a
+    :class:`~tqec.compile.blocks.block.ConditionalBlock`.  The zero-branch
+    slice lives in ``layers`` at the same position.
+    """
+    return LayoutLayer(layers, scalable_qubit_shape, conditional_layers=conditional_layers)
 
 
 def merge_composed_layers(

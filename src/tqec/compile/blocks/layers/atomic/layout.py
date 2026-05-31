@@ -39,6 +39,7 @@ class LayoutLayer(BaseLayer):
         self,
         layers: dict[LayoutPosition2D, BaseLayer],
         element_shape: PhysicalQubitScalable2D,
+        conditional_layers: dict[LayoutPosition2D, BaseLayer] | None = None,
     ) -> None:
         """Glue several other layers together on a 2-dimensional grid.
 
@@ -49,6 +50,12 @@ class LayoutLayer(BaseLayer):
                 The mapping is expected to represent a connected computation.
             element_shape: scalable shape (in qubit coordinates) of each entry
                 in the provided ``layers``.
+            conditional_layers: optional branch-``one`` alternate layers for
+                positions that originated from a
+                :class:`~tqec.compile.blocks.block.ConditionalBlock` cube.
+                ``layers[pos]`` always carries the zero-branch slice; this
+                dict carries the parallel one-branch slice at the same
+                position. Empty / ``None`` for non-conditional layers.
 
         Raises:
             TQECError: if ``layers`` is empty.
@@ -58,6 +65,9 @@ class LayoutLayer(BaseLayer):
         super().__init__(frozenset())
         self._layers = layers
         self._element_shape = element_shape
+        self._conditional_layers: dict[LayoutPosition2D, BaseLayer] = (
+            dict(conditional_layers) if conditional_layers else {}
+        )
         self._post_init_check()
 
     def _post_init_check(self) -> None:
@@ -75,6 +85,16 @@ class LayoutLayer(BaseLayer):
     def element_shape(self) -> PhysicalQubitScalable2D:
         """Return the scalable shape of each stored elements."""
         return self._element_shape
+
+    @property
+    def conditional_layers(self) -> dict[LayoutPosition2D, BaseLayer]:
+        """Branch-``one`` alternate layers for positions that originated from
+        a :class:`~tqec.compile.blocks.block.ConditionalBlock` cube.
+
+        Co-indexed with ``self.layers`` (which holds the zero branch).
+        Empty when no conditional cubes feed this layer.
+        """
+        return self._conditional_layers
 
     @cached_property
     def bounds(self) -> tuple[BlockPosition2D, BlockPosition2D]:
@@ -118,6 +138,7 @@ class LayoutLayer(BaseLayer):
             isinstance(value, LayoutLayer)
             and self.element_shape == value.element_shape
             and self.layers == value.layers
+            and self._conditional_layers == value._conditional_layers
         )
 
     def __hash__(self) -> int:
