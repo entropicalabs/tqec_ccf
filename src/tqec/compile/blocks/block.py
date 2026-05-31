@@ -293,16 +293,46 @@ def merge_parallel_block_layers(
     merged_layers: list[LayoutLayer | BaseComposedLayer] = []
     for i in range(len(schedule)):
         layers = {pos: block.layer_sequence[i] for pos, block in blocks_in_parallel.items()}
+        # Branch-``one`` alternates for ConditionalBlock cubes at this
+        # timestep. ``layers[pos]`` already holds the zero-branch slice
+        # via Block.__init__'s alias.
+        conditional_one_layers: dict[LayoutPosition2D, BaseLayer | BaseComposedLayer] = {
+            pos: block.block_if_one.layer_sequence[i]
+            for pos, block in blocks_in_parallel.items()
+            if isinstance(block, ConditionalBlock)
+        }
         if contains_only_base_layers(layers):
+            cond_base: dict[LayoutPosition2D, BaseLayer] = {}
+            for pos, alt in conditional_one_layers.items():
+                if not isinstance(alt, BaseLayer):
+                    raise TQECError(
+                        f"ConditionalBlock at {pos}: branch-one layer at "
+                        f"timestep {i} is not a BaseLayer while the zero "
+                        "side is. Both branches must share structure."
+                    )
+                cond_base[pos] = alt
             merged_layers.append(
                 merge_base_layers(
-                    cast(dict[LayoutPosition2D, BaseLayer], layers), scalable_qubit_shape
+                    cast(dict[LayoutPosition2D, BaseLayer], layers),
+                    scalable_qubit_shape,
+                    conditional_layers=cond_base or None,
                 )
             )
         elif contains_only_composed_layers(layers):
+            cond_composed: dict[LayoutPosition2D, BaseComposedLayer] = {}
+            for pos, alt in conditional_one_layers.items():
+                if not isinstance(alt, BaseComposedLayer):
+                    raise TQECError(
+                        f"ConditionalBlock at {pos}: branch-one layer at "
+                        f"timestep {i} is not a BaseComposedLayer while "
+                        "the zero side is."
+                    )
+                cond_composed[pos] = alt
             merged_layers.append(
                 merge_composed_layers(
-                    cast(dict[LayoutPosition2D, BaseComposedLayer], layers), scalable_qubit_shape
+                    cast(dict[LayoutPosition2D, BaseComposedLayer], layers),
+                    scalable_qubit_shape,
+                    conditional_layers=cond_composed or None,
                 )
             )
         else:
