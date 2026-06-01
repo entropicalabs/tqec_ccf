@@ -2,7 +2,7 @@
 
 **Branch**: `ccf-compile` (tqec_ccf fork)
 **Base**: `b77ca994` (tip of upstream PR #829, `feat/conditional-cube`)
-**Commits added**: 17
+**Commits added**: 18
 **Final test state**: 670 pass, 8 skip, 2 xfail (upstream typo), 0 regressions
 
 ---
@@ -207,6 +207,18 @@ End of the per-branch emission chain at the `LayoutLayer` boundary.
 No call site rewired yet: `LayerTree`, the detector annotator, and `generate_conditional_stim_text` still go through the existing `to_circuit` / two-pass `branch_diff` path. Commit 3c will wire the new method into the tree-level annotation.
 
 2 new unit tests: `to_conditional_circuit` raises on empty `conditional_layers`; on a compiled 2-cube XZX_XZZ graph, at least one of the 3 `LayoutLayer`s carrying `conditional_layers` surfaces `IfBlock` entries with the supplied `condition_rec`. Full suite: 675 pass, 0 regressions.
+
+### Co-compile Stage A commit 3c — Annotator wires `to_conditional_circuit`
+
+**Files**: `compile/tree/annotations.py`, `compile/tree/node.py`, `compile/tree/annotators/circuit.py`, `compile/tree/tree.py`, `tests/compile/tree/annotators/circuit_test.py`
+
+`AnnotateCircuitOnLayerNode` gains an optional `condition_rec: int | None` ctor parameter; `LayerTree._annotate_circuits` / `LayerTree._generate_annotations` thread it through. When `condition_rec` is supplied **and** a leaf's `LayoutLayer.conditional_layers` is non-empty, the annotator additionally calls `to_conditional_circuit(...)` and stores the result on the new `LayerNodeAnnotations.conditional_circuit: ConditionalCircuit | None` field. The branch-zero `ScheduledCircuit` annotation is always populated (unchanged); downstream detector annotation keeps reading from it.
+
+New `LayerNode.set_conditional_circuit_annotation(k, conditional_circuit)` mirror to the existing setter.
+
+No tree-level assembly yet: `LayerTree.generate_circuit` still returns a plain `stim.Circuit` from the branch-zero annotations; the per-leaf `conditional_circuit` is annotated but not yet consumed by any caller. The follow-up commit will introduce a `LayerNode.generate_conditional_circuit(k, qubit_map) -> ConditionalCircuit` walker that picks up the new annotation; commit 4 takes per-branch detector annotation and retires `branch_diff`.
+
+2 new unit tests on a compiled 2-cube `XZX_XZZ` graph: with `condition_rec=None`, no leaf gets a `conditional_circuit`; with `condition_rec=-7`, every leaf whose `LayoutLayer` has `conditional_layers` carries a populated `ConditionalCircuit`, and at least one of those surfaces an `IfBlock` entry. Full suite: 677 pass, 0 regressions.
 
 ---
 

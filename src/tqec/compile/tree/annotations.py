@@ -10,6 +10,7 @@ from tqec.circuit.measurement_map import MeasurementRecordsMap
 from tqec.circuit.qubit import GridQubit
 from tqec.circuit.qubit_map import QubitMap
 from tqec.circuit.schedule.circuit import ScheduledCircuit
+from tqec.compile.conditional.circuit import ConditionalCircuit
 from tqec.compile.detectors.detector import Detector
 from tqec.compile.observables.builder import Observable
 from tqec.plaquette.rpng.rpng import PauliBasis
@@ -77,6 +78,12 @@ class LayerNodeAnnotations:
     detectors: list[DetectorAnnotation] = field(default_factory=list)
     observables: list[Observable] = field(default_factory=list)
     polygons: list[Polygon] = field(default_factory=list)
+    conditional_circuit: ConditionalCircuit | None = None
+    """Branch-aware emission of the layer, populated only when the leaf carries a
+    non-empty ``LayoutLayer.conditional_layers``. ``circuit`` (the branch-zero
+    :class:`ScheduledCircuit`) stays populated alongside it so the detector
+    annotator can continue computing measurement records from a flat circuit.
+    """
 
     def to_dict(self) -> dict[str, Any]:
         """Return a dictionary representation of ``self``."""

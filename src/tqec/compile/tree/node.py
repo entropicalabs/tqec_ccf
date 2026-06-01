@@ -9,6 +9,7 @@ import stim
 from tqec.circuit.qubit_map import QubitMap
 from tqec.circuit.schedule.circuit import ScheduledCircuit
 from tqec.compile.blocks.layers.atomic.base import BaseLayer
+from tqec.compile.conditional.circuit import ConditionalCircuit
 from tqec.compile.blocks.layers.atomic.layout import LayoutLayer
 from tqec.compile.blocks.layers.atomic.plaquettes import PlaquetteLayer
 from tqec.compile.blocks.layers.atomic.raw import RawCircuitLayer
@@ -135,6 +136,15 @@ class LayerNode:
     def set_circuit_annotation(self, k: int, circuit: ScheduledCircuit) -> None:
         """Set the circuit annotation associated with the scaling parameter ``k`` to ``circuit``."""
         self.get_annotations(k).circuit = circuit
+
+    def set_conditional_circuit_annotation(
+        self, k: int, conditional_circuit: ConditionalCircuit
+    ) -> None:
+        """Set the branch-aware circuit annotation. Only populated for leaves whose
+        ``LayoutLayer`` carries a non-empty ``conditional_layers``; ``circuit`` (the
+        branch-zero :class:`ScheduledCircuit`) is set independently and unchanged.
+        """
+        self.get_annotations(k).conditional_circuit = conditional_circuit
 
     def generate_circuits_with_potential_polygons(
         self,
