@@ -2,7 +2,7 @@
 
 **Branch**: `ccf-compile` (tqec_ccf fork)
 **Base**: `b77ca994` (tip of upstream PR #829, `feat/conditional-cube`)
-**Commits added**: 20
+**Commits added**: 21
 **Final test state**: 670 pass, 8 skip, 2 xfail (upstream typo), 0 regressions
 
 ---
@@ -257,6 +257,18 @@ Per-branch detector annotation. The `Pauli` frame tracker stub still leaves bran
 The annotator no longer needs `branch_diff` for detector handling on the conditional path; the two-pass `generate_conditional_stim_text` still calls it, but only for gate-content divergence (which is now redundant given commit 3d).
 
 1 new unit test: divergent `DETECTOR`-only `IfBlock` surfaces on the 2-cube `XZX_XZZ` fixture (in addition to the 9 gate-level `IfBlock`s already verified by commit 3d). Full suite: 680 pass, 0 regressions.
+
+### Co-compile Stage A commit 4b — `generate_conditional_stim_text` collapses onto the single-pass path
+
+**File**: `compile/graph.py`, `tests/tools/test_resolve.py`.
+
+`TopologicalComputationGraph.generate_conditional_stim_text` is now a thin wrapper around `LayerTree.generate_conditional_circuit(k, condition_rec, ...).to_stim_text()`. The two-pass body-swap + `branch_diff` call is gone from this entry point (the helpers still live in `compile/conditional/circuit.py`; commit 4c removes them). Non-conditional graphs continue to fall through to `generate_stim_circuit`.
+
+A `len(self._conditional_blocks) != 1` guard preserves the existing "at most one conditional cube" rejection; the lift to multiple conditional cubes lands in commit 4d when `condition_rec: int` is widened to `condition_recs: dict[LayoutPosition3D, int]`.
+
+The byte-compare test in `tests/tools/test_resolve.py::test_resolve_matches_inplace_branch_compile` was tightly coupled to `branch_diff`'s detector ordering (shared detectors interleaved in radius-2 lookback order). The new single-pass path emits shared detectors *first* then divergent ones, which produces a semantically equivalent circuit with a different `DETECTOR` order. The test was relaxed to compare per-measurement-block detector multisets (`frozenset[str]` per block) while keeping the non-`DETECTOR` instructions byte-exact.
+
+Full suite: 680 pass, 0 regressions.
 
 ---
 
