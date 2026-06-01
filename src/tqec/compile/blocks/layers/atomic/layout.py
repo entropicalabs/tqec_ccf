@@ -319,16 +319,23 @@ class LayoutLayer(BaseLayer):
             condition_rec=condition_rec,
         )
         # Shift entries into the layer's qubit coordinate frame.
+        from tqec.circuit.qubit import GridQubit
+        from tqec.circuit.qubit_map import QubitMap
+
         mincube, _ = self.bounds
         eshape = self.element_shape.to_shape_2d(k)
         shift_x = mincube.x * (eshape.x - 1)
         shift_y = mincube.y * (eshape.y - 1)
-        out = ConditionalCircuit()
-        for idx in sorted(qubit_map.i2q.keys()):
-            q = qubit_map.i2q[idx]
-            out.append(
-                "QUBIT_COORDS", [idx], [float(q.x + shift_x), float(q.y + shift_y)]
-            )
+        shifted_qubit_map = QubitMap(
+            {
+                idx: GridQubit(q.x + shift_x, q.y + shift_y)
+                for idx, q in qubit_map.i2q.items()
+            }
+        )
+        out = ConditionalCircuit(qubit_map=shifted_qubit_map)
+        for idx in sorted(shifted_qubit_map.i2q.keys()):
+            q = shifted_qubit_map.i2q[idx]
+            out.append("QUBIT_COORDS", [idx], [float(q.x), float(q.y)])
         for moment_idx, entries in enumerate(moments_entries):
             if moment_idx > 0:
                 out.append("TICK")

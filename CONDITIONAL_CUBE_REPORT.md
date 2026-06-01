@@ -2,7 +2,7 @@
 
 **Branch**: `ccf-compile` (tqec_ccf fork)
 **Base**: `b77ca994` (tip of upstream PR #829, `feat/conditional-cube`)
-**Commits added**: 18
+**Commits added**: 19
 **Final test state**: 670 pass, 8 skip, 2 xfail (upstream typo), 0 regressions
 
 ---
@@ -219,6 +219,25 @@ New `LayerNode.set_conditional_circuit_annotation(k, conditional_circuit)` mirro
 No tree-level assembly yet: `LayerTree.generate_circuit` still returns a plain `stim.Circuit` from the branch-zero annotations; the per-leaf `conditional_circuit` is annotated but not yet consumed by any caller. The follow-up commit will introduce a `LayerNode.generate_conditional_circuit(k, qubit_map) -> ConditionalCircuit` walker that picks up the new annotation; commit 4 takes per-branch detector annotation and retires `branch_diff`.
 
 2 new unit tests on a compiled 2-cube `XZX_XZZ` graph: with `condition_rec=None`, no leaf gets a `conditional_circuit`; with `condition_rec=-7`, every leaf whose `LayoutLayer` has `conditional_layers` carries a populated `ConditionalCircuit`, and at least one of those surfaces an `IfBlock` entry. Full suite: 677 pass, 0 regressions.
+
+### Co-compile Stage A commit 3d — Tree-level assembly into a single `ConditionalCircuit`
+
+**Files**: `compile/conditional/circuit.py`, `compile/blocks/layers/atomic/layout.py`, `compile/tree/node.py`, `compile/tree/tree.py`, `tests/compile/tree/conditional_circuit_test.py`
+
+Closes the tree-level half of the single-pass refactor. Per-leaf `ConditionalCircuit` annotations laid down by commit 3c are now consumed by a tree walker that produces one assembled `ConditionalCircuit` for the whole computation.
+
+- `ConditionalCircuit` gains an optional `qubit_map: QubitMap | None` attribute (`.qubit_map` property + `set_qubit_map(...)`). `append_instruction_or_if(entry)` convenience for callers iterating a mixed `CircuitEntry` sequence. New module-level `remap_entry_qubit_indices(entry, qubit_index_remap) → CircuitEntry` walks a single entry (recursing into `IfBlock` bodies) and returns a copy with qubit-target indices remapped; non-qubit targets pass through unchanged.
+- `LayoutLayer.to_conditional_circuit` builds a *shifted* `QubitMap` (each `GridQubit` shifted by the layer's `mincube * (eshape - 1)` to match the global frame) and attaches it to the returned `ConditionalCircuit`. The `QUBIT_COORDS` preamble inside the returned circuit also uses the shifted coordinates, so a downstream consumer that strips the preamble loses no information.
+- `LayerNode.has_conditional_descendant(k) → bool` — `True` only when at least one descendant leaf's annotated `ConditionalCircuit` actually surfaces an `IfBlock`. Stabiliser-round leaves that carry a `conditional_layers` map but happen to be byte-identical across branches are intentionally reported as non-conditional so that the `RepeatedLayer` fast path can still expand them as plain stim.
+- `LayerNode.generate_conditional_circuit(k, global_qubit_map) → ConditionalCircuit`:
+  - `LayoutLayer` leaf: when the leaf has a `conditional_circuit` annotation, walk its entries (skipping the local `QUBIT_COORDS` preamble) and apply `remap_entry_qubit_indices` with the local→global lookup derived from the local + global `QubitMap`. Otherwise reuse the existing branch-zero `ScheduledCircuit` path (`map_qubit_indices`, `get_circuit(include_qubit_coords=False)`, ingest as plain `stim.CircuitInstruction` entries). Detector + observable annotations and a trailing `SHIFT_COORDS(0,0,1)` are appended at the leaf in the same positions as the existing emitter — they still come from the branch-zero annotation (per-branch detector annotation is commit 4 territory).
+  - `SequencedLayers`: walk children, insert a `TICK` between adjacent fragments (same rule as `generate_circuits_with_potential_polygons`: skip the `TICK` when the next child is a `RepeatedLayer`).
+  - `RepeatedLayer`: raise `TQECError` if any descendant has an actual `IfBlock` annotation; otherwise reuse the plain `generate_circuit` (returning `stim.Circuit`) and flatten its instructions into the `ConditionalCircuit`. `stim.CircuitRepeatBlock` is rendered as a flat repetition since `ConditionalCircuit` has no native `REPEAT` primitive at this stage. **Known limitation**: a multi-cube graph whose conditional cube sits *inside* a repeated stabiliser-round wrapper will fail here; current fixtures never hit this case.
+- `LayerTree.generate_conditional_circuit(k, condition_rec, ...)` is the new top-level entry point. Reuses the database-resolution prelude from `generate_circuit`, drives `_generate_annotations(..., condition_rec=condition_rec)`, then assembles via the new walker. `include_qubit_coords=True` prepends the global `QUBIT_COORDS` map once at the top of the returned `ConditionalCircuit`. Existing `generate_circuit` (plain `stim.Circuit` return) is unchanged.
+
+The path is **not** yet wired into `TopologicalComputationGraph.generate_conditional_stim_text`; the public entry point still goes through the two-pass `branch_diff` strategy. Commit 4 will collapse that wrapper onto `LayerTree.generate_conditional_circuit` and replace branch-zero-only detector annotation with per-branch annotation.
+
+2 new unit tests: on a compiled 2-cube `XZX_XZZ` graph, `LayerTree.generate_conditional_circuit(k=1, condition_rec=-1)` returns a `ConditionalCircuit` with at least one top-level `IfBlock` (and no duplicate `QUBIT_COORDS`); the rendered `to_stim_text()` output contains the expected `IF(rec[-1]) { ... } ELSE { ... }` block syntax. Full suite: 679 pass, 0 regressions.
 
 ---
 

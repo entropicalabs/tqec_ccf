@@ -9,7 +9,11 @@ import stim
 from tqec.circuit.qubit_map import QubitMap
 from tqec.circuit.schedule.circuit import ScheduledCircuit
 from tqec.compile.blocks.layers.atomic.base import BaseLayer
-from tqec.compile.conditional.circuit import ConditionalCircuit
+from tqec.compile.conditional.circuit import (
+    ConditionalCircuit,
+    IfBlock,
+    remap_entry_qubit_indices,
+)
 from tqec.compile.blocks.layers.atomic.layout import LayoutLayer
 from tqec.compile.blocks.layers.atomic.plaquettes import PlaquetteLayer
 from tqec.compile.blocks.layers.atomic.raw import RawCircuitLayer
@@ -20,6 +24,29 @@ from tqec.compile.tree.annotations import LayerNodeAnnotations, Polygon
 from tqec.utils.coordinates import StimCoordinates
 from tqec.utils.exceptions import TQECError
 from tqec.utils.scale import LinearFunction
+
+
+def _extend_conditional_circuit(
+    target: ConditionalCircuit, source: ConditionalCircuit
+) -> None:
+    """Append every entry of ``source`` to ``target``."""
+    target.extend(source.entries)
+
+
+def _append_stim_circuit_to_conditional(
+    circuit: stim.Circuit, target: ConditionalCircuit
+) -> None:
+    """Flatten a ``stim.Circuit`` (no nested blocks) into plain entries on
+    ``target``. ``stim.CircuitRepeatBlock`` is rendered as a flat repetition —
+    ``ConditionalCircuit`` has no native REPEAT primitive at this stage.
+    """
+    for inst in circuit:
+        if isinstance(inst, stim.CircuitRepeatBlock):
+            repeated_body = inst.body_copy()
+            for _ in range(inst.repeat_count):
+                _append_stim_circuit_to_conditional(repeated_body, target)
+        else:
+            target.append_instruction(inst)
 
 
 def contains_only_layout_or_composed_layers(
@@ -231,6 +258,120 @@ class LayerNode:
             ret.append(body_circuit * self._layer.repetitions.integer_eval(k))
             return ret
         raise TQECError(f"Unknown layer type found: {type(self._layer).__name__}.")
+
+    def has_conditional_descendant(self, k: int) -> bool:
+        """Return ``True`` iff this node (or any descendant) holds a
+        :class:`ConditionalCircuit` annotation that actually surfaces an
+        :class:`IfBlock`. Stabiliser-round leaves that happen to be
+        byte-identical across branches are reported as non-conditional so the
+        :class:`RepeatedLayer` fast path can still expand them as plain stim.
+        """
+        if self.is_leaf:
+            cc = self.get_annotations(k).conditional_circuit
+            if cc is None:
+                return False
+            return any(isinstance(e, IfBlock) for e in cc.entries)
+        return any(child.has_conditional_descendant(k) for child in self._children)
+
+    def generate_conditional_circuit(
+        self, k: int, global_qubit_map: QubitMap
+    ) -> ConditionalCircuit:
+        """Assemble the subtree into a single :class:`ConditionalCircuit`.
+
+        Mirrors :meth:`generate_circuits_with_potential_polygons` (without
+        polygons / Crumble) but supports leaves whose annotation contains a
+        per-branch :class:`ConditionalCircuit`. Non-conditional leaves and
+        ``RepeatedLayer`` bodies without conditional descendants are ingested
+        as plain ``stim.Circuit`` content.
+
+        Detector / observable annotations are appended at each leaf in the
+        same positions as the branch-zero path (they originate from the
+        branch-zero ``ScheduledCircuit`` until Stage A commit 4 brings
+        per-branch detector annotation).
+
+        Args:
+            k: scaling parameter.
+            global_qubit_map: qubit map shared with the rest of the tree.
+
+        Raises:
+            TQECError: when a :class:`RepeatedLayer` body contains a
+                conditional descendant. Current fixtures never hit this case;
+                Stage A keeps the LCM-expansion path out of scope.
+
+        """
+        if isinstance(self._layer, LayoutLayer):
+            return self._leaf_to_conditional_circuit(k, global_qubit_map)
+        if isinstance(self._layer, SequencedLayers):
+            out = ConditionalCircuit()
+            for child, next_child in itertools.pairwise(self._children):
+                _extend_conditional_circuit(
+                    out, child.generate_conditional_circuit(k, global_qubit_map)
+                )
+                if not next_child.is_repeated:
+                    out.append("TICK")
+            _extend_conditional_circuit(
+                out, self._children[-1].generate_conditional_circuit(k, global_qubit_map)
+            )
+            return out
+        if isinstance(self._layer, RepeatedLayer):
+            if self.has_conditional_descendant(k):
+                raise TQECError(
+                    "RepeatedLayer with a conditional descendant is not "
+                    "supported. Expand the repetition or move the conditional "
+                    "cube out of the repeated body."
+                )
+            # Pure-stim fast path: reuse the existing assembly.
+            body_circuit = self.generate_circuit(k, global_qubit_map)
+            out = ConditionalCircuit()
+            _append_stim_circuit_to_conditional(body_circuit, out)
+            return out
+        raise TQECError(f"Unknown layer type found: {type(self._layer).__name__}.")
+
+    def _leaf_to_conditional_circuit(
+        self, k: int, global_qubit_map: QubitMap
+    ) -> ConditionalCircuit:
+        annotations = self.get_annotations(k)
+        out = ConditionalCircuit()
+        if annotations.conditional_circuit is not None:
+            local_qubit_map = annotations.conditional_circuit.qubit_map
+            if local_qubit_map is None:
+                raise TQECError(
+                    "Annotated ConditionalCircuit is missing a local qubit map; "
+                    "LayoutLayer.to_conditional_circuit must set one."
+                )
+            qubit_indices_mapping = {
+                local_qubit_map[q]: global_qubit_map[q] for q in local_qubit_map.qubits
+            }
+            for entry in annotations.conditional_circuit.entries:
+                if isinstance(entry, stim.CircuitInstruction) and entry.name == "QUBIT_COORDS":
+                    continue
+                out.append_instruction_or_if(
+                    remap_entry_qubit_indices(entry, qubit_indices_mapping)
+                )
+        else:
+            base_circuit = annotations.circuit
+            if base_circuit is None:
+                raise TQECError(
+                    "Cannot generate the final quantum circuit before annotating "
+                    "nodes with their individual circuits. Did you call "
+                    "LayerTree.annotate_circuits before?"
+                )
+            local_qubit_map = base_circuit.qubit_map
+            qubit_indices_mapping = {
+                local_qubit_map[q]: global_qubit_map[q] for q in local_qubit_map.qubits
+            }
+            mapped_circuit = base_circuit.map_qubit_indices(qubit_indices_mapping)
+            for inst in mapped_circuit.get_circuit(include_qubit_coords=False):
+                assert isinstance(inst, stim.CircuitInstruction)
+                out.append_instruction(inst)
+        for annotation in annotations.detectors + annotations.observables:
+            out.append_instruction(annotation.to_instruction())
+        out.append_instruction(
+            stim.CircuitInstruction(
+                "SHIFT_COORDS", [], StimCoordinates(0, 0, 1).to_stim_coordinates()
+            )
+        )
+        return out
 
     def generate_circuit(self, k: int, global_qubit_map: QubitMap) -> stim.Circuit:
         """Generate the quantum circuit representing the node.

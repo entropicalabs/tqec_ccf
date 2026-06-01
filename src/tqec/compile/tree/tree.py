@@ -12,6 +12,7 @@ from typing_extensions import override
 from tqec.circuit.qubit import GridQubit
 from tqec.circuit.qubit_map import QubitMap
 from tqec.compile.blocks.layers.composed.sequenced import SequencedLayers
+from tqec.compile.conditional.circuit import ConditionalCircuit
 
 if TYPE_CHECKING:
     from tqec.compile.blocks.block import ConditionalBlock
@@ -406,6 +407,114 @@ class LayerTree:
             circuit += annotations.qubit_map.to_circuit()
         circuit += self._root.generate_circuit(k, annotations.qubit_map)
         return circuit
+
+    def generate_conditional_circuit(
+        self,
+        k: int,
+        condition_rec: int,
+        include_qubit_coords: bool = True,
+        manhattan_radius: int = 2,
+        detector_database: DetectorDatabase | None = None,
+        database_path: str | Path | None = DEFAULT_DETECTOR_DATABASE_PATH,
+        do_not_use_database: bool = False,
+        only_use_database: bool = False,
+        lookback: int = 2,
+        reschedule_measurements: bool = True,
+    ) -> ConditionalCircuit:
+        """Generate a single :class:`ConditionalCircuit` from this tree.
+
+        Drives the same annotation pipeline as :meth:`generate_circuit` but
+        threads ``condition_rec`` so every conditional leaf gets a per-branch
+        annotation, then assembles the tree via
+        :meth:`LayerNode.generate_conditional_circuit`.
+
+        Stage A scope: detectors and observables are appended at each leaf
+        from the branch-zero annotation (matches today's two-pass output for
+        non-divergent detectors; for divergent detectors this is incomplete
+        until Stage A commit 4 brings per-branch detector annotation).
+
+        Args:
+            k: scaling factor.
+            condition_rec: ``stim`` record offset selecting the conditional
+                branch. Convention: ``then_body`` runs when the condition is
+                one.
+            include_qubit_coords: whether to prepend ``QUBIT_COORDS``
+                annotations.
+            manhattan_radius, detector_database, database_path,
+            do_not_use_database, only_use_database, lookback,
+            reschedule_measurements: as on :meth:`generate_circuit`.
+
+        Returns:
+            A :class:`ConditionalCircuit` representing the full computation.
+
+        """
+        # Reuse the database-resolution prelude from generate_circuit by
+        # delegating through _generate_annotations + condition_rec.
+        db_path_input = DEFAULT_DETECTOR_DATABASE_PATH
+        if not do_not_use_database:
+            if isinstance(database_path, str):
+                db_path_input = Path(database_path)
+            else:
+                db_path_input = database_path
+            user_defined = (
+                detector_database is not None or database_path != DEFAULT_DETECTOR_DATABASE_PATH
+            )
+            if detector_database is None:
+                if db_path_input is not None and db_path_input.exists():
+                    detector_database = DetectorDatabase.from_file(db_path_input)
+                else:
+                    detector_database = DetectorDatabase()
+            loaded_version = detector_database.version
+            current_version = CURRENT_DATABASE_VERSION
+            if loaded_version != current_version:
+                if user_defined:
+                    raise TQECError(
+                        f"The detector database on disk you have specified is incompatible with"
+                        f" the version in the TQEC code you are running. The version of the disk"
+                        f" database is {loaded_version}, while the version in the TQEC code is "
+                        f"{current_version}."
+                    )
+                else:
+                    warnings.warn(
+                        f"The default detector database that you have saved on your system is out "
+                        f"of date (version {loaded_version}). The version in the TQEC code you are "
+                        f"running is newer (version {current_version}). The database will be "
+                        "regenerated.",
+                        TQECWarning,
+                    )
+                    detector_database = DetectorDatabase()
+        else:
+            detector_database = None
+
+        parallel_process_count = (
+            cpu_count() // 2 + 1
+            if (detector_database is None or len(detector_database) == 0)
+            else 1
+        )
+
+        self._generate_annotations(
+            k,
+            manhattan_radius,
+            detector_database=detector_database,
+            database_path=db_path_input,
+            only_use_database=only_use_database,
+            lookback=lookback,
+            parallel_process_count=parallel_process_count,
+            reschedule_measurements=reschedule_measurements,
+            condition_rec=condition_rec,
+        )
+        annotations = self._get_annotation(k)
+        assert annotations.qubit_map is not None
+
+        result = ConditionalCircuit()
+        if include_qubit_coords:
+            for inst in annotations.qubit_map.to_circuit():
+                assert isinstance(inst, stim.CircuitInstruction)
+                result.append_instruction(inst)
+        body = self._root.generate_conditional_circuit(k, annotations.qubit_map)
+        for entry in body.entries:
+            result.append_instruction_or_if(entry)
+        return result
 
     def _get_annotation(self, k: int) -> LayerTreeAnnotations:
         return self._annotations.setdefault(k, LayerTreeAnnotations())

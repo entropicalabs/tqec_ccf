@@ -17,9 +17,12 @@ suitable for feeding back into ``ConditionalCircuit.extend``.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Iterator, Union
+from typing import TYPE_CHECKING, Iterator, Union
 
 import stim
+
+if TYPE_CHECKING:
+    from tqec.circuit.qubit_map import QubitMap
 
 
 @dataclass
@@ -50,8 +53,25 @@ CircuitEntry = Union[stim.CircuitInstruction, "IfBlock"]
 class ConditionalCircuit:
     """Mutable container holding ``stim.CircuitInstruction`` + ``IfBlock`` entries."""
 
-    def __init__(self, entries: list[CircuitEntry] | None = None) -> None:
+    def __init__(
+        self,
+        entries: list[CircuitEntry] | None = None,
+        qubit_map: "QubitMap | None" = None,
+    ) -> None:
         self._entries: list[CircuitEntry] = list(entries) if entries else []
+        self._qubit_map = qubit_map
+
+    @property
+    def qubit_map(self) -> "QubitMap | None":
+        """Local qubit map of the circuit, when known. Set by
+        :meth:`LayoutLayer.to_conditional_circuit`; ``None`` for hand-built
+        instances. Tree-level assembly uses this to remap local qubit indices to
+        the global qubit map.
+        """
+        return self._qubit_map
+
+    def set_qubit_map(self, qubit_map: "QubitMap") -> None:
+        self._qubit_map = qubit_map
 
     @property
     def entries(self) -> list[CircuitEntry]:
@@ -80,6 +100,12 @@ class ConditionalCircuit:
     def append_if(self, if_block: IfBlock) -> None:
         self._entries.append(if_block)
 
+    def append_instruction_or_if(self, entry: CircuitEntry) -> None:
+        """Append either a plain :class:`stim.CircuitInstruction` or an
+        :class:`IfBlock`, dispatching on type. Convenience for callers iterating
+        a mixed sequence."""
+        self._entries.append(entry)
+
     def extend(self, entries: list[CircuitEntry]) -> None:
         self._entries.extend(entries)
 
@@ -107,6 +133,34 @@ class ConditionalCircuit:
 
     def __repr__(self) -> str:
         return f"ConditionalCircuit({len(self._entries)} entries)"
+
+
+def remap_entry_qubit_indices(
+    entry: CircuitEntry, qubit_index_remap: dict[int, int]
+) -> CircuitEntry:
+    """Return a copy of ``entry`` with every qubit-target index remapped.
+
+    Recurses into :class:`IfBlock` bodies. ``stim.CircuitInstruction`` with no
+    qubit targets is returned as-is. Non-qubit targets (measurement records,
+    args) are preserved unchanged.
+    """
+    if isinstance(entry, IfBlock):
+        return IfBlock(
+            condition_rec=entry.condition_rec,
+            then_body=[remap_entry_qubit_indices(e, qubit_index_remap) for e in entry.then_body],
+            else_body=(
+                [remap_entry_qubit_indices(e, qubit_index_remap) for e in entry.else_body]
+                if entry.else_body is not None
+                else None
+            ),
+        )
+    new_targets: list[stim.GateTarget] = []
+    for t in entry.targets_copy():
+        if t.is_qubit_target and t.qubit_value is not None:
+            new_targets.append(stim.GateTarget(qubit_index_remap[t.qubit_value]))
+        else:
+            new_targets.append(t)
+    return stim.CircuitInstruction(entry.name, new_targets, list(entry.gate_args_copy()))
 
 
 def _render(entries: list[CircuitEntry], lines: list[str], indent: int) -> None:
