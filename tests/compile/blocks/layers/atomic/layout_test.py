@@ -159,6 +159,64 @@ def test_to_template_and_plaquettes_multiple(empty_plaquette_layer: PlaquetteLay
     )
 
 
+def test_to_conditional_circuit_requires_conditional_layers(
+    empty_plaquette_layer: PlaquetteLayer,
+) -> None:
+    pos1 = LayoutPosition2D.from_block_position(BlockPosition2D(0, 0))
+    layer = LayoutLayer({pos1: empty_plaquette_layer}, LOGICAL_QUBIT_SHAPE)
+    with pytest.raises(TQECError):
+        layer.to_conditional_circuit(k=1, condition_rec=-1)
+
+
+def test_to_conditional_circuit_weaves_ifblock_for_divergent_plaquette() -> None:
+    """Exercise to_conditional_circuit on a LayoutLayer produced by the real
+    compile pipeline for a single-cube conditional graph. Asserts at least one
+    IfBlock surfaces with the requested condition_rec.
+    """
+    from tqec.compile.blocks.layers.atomic.layout import LayoutLayer as _LL
+    from tqec.compile.compile import compile_block_graph
+    from tqec.compile.convention import FIXED_BULK_CONVENTION
+    from tqec.compile.conditional.circuit import ConditionalCircuit, IfBlock
+    from tqec.compile.tree.node import LayerNode, NodeWalker
+    from tqec.computation.block_graph import BlockGraph
+    from tqec.computation.correlation import CorrelationSurface, ZXEdge, ZXNode
+    from tqec.computation.cube import ConditionalLeafCubeKind
+    from tqec.utils.enums import Basis
+    from tqec.utils.position import Position3D
+
+    p0, p1 = Position3D(0, 0, 0), Position3D(0, 0, 1)
+    init_kind = ConditionalLeafCubeKind.XZX_XZZ.value[0]
+    g = BlockGraph("ll-cond")
+    g.add_cube(p0, init_kind)
+    cond = CorrelationSurface(
+        span=frozenset([ZXEdge(ZXNode(p0, Basis.Z), ZXNode(p0, Basis.Z))])
+    )
+    g.add_cube(p1, ConditionalLeafCubeKind.XZX_XZZ, condition=cond)
+    g.add_pipe(p0, p1)
+    cg = compile_block_graph(g, FIXED_BULK_CONVENTION, observables=None)
+    tree = cg.to_layer_tree()
+
+    found_layers: list[_LL] = []
+
+    class _CollectConditionalLayoutLayers(NodeWalker):
+        def visit_node(self, node: LayerNode) -> None:
+            if isinstance(node._layer, _LL) and node._layer.conditional_layers:
+                found_layers.append(node._layer)
+
+    tree._root.walk(_CollectConditionalLayoutLayers())
+    assert found_layers, "no LayoutLayer with conditional_layers in compiled tree"
+    # Stabiliser-round LayoutLayers carry conditional_layers byte-equal to layers
+    # (branches diverge only in the final measurement slice); search across all
+    # conditional layers and assert at least one surfaces an IfBlock.
+    all_if_blocks: list[IfBlock] = []
+    for ll in found_layers:
+        cc = ll.to_conditional_circuit(k=1, condition_rec=-7)
+        assert isinstance(cc, ConditionalCircuit)
+        all_if_blocks.extend(e for e in cc.entries if isinstance(e, IfBlock))
+    assert all_if_blocks, "expected at least one IfBlock for divergent plaquette content"
+    assert all(ib.condition_rec == -7 for ib in all_if_blocks)
+
+
 def test_scalable_num_moments(
     empty_plaquette_layer: PlaquetteLayer, plaquette_layer: PlaquetteLayer
 ) -> None:

@@ -2,7 +2,7 @@
 
 **Branch**: `ccf-compile` (tqec_ccf fork)
 **Base**: `b77ca994` (tip of upstream PR #829, `feat/conditional-cube`)
-**Commits added**: 16
+**Commits added**: 17
 **Final test state**: 670 pass, 8 skip, 2 xfail (upstream typo), 0 regressions
 
 ---
@@ -191,6 +191,22 @@ Errors: moment-count divergence, schedule mismatch between branches, CEO slot co
 No downstream callers yet — the generator/tree/detector annotators still use the single-branch path. Commit 3b will wire `LayoutLayer.to_circuit` (and the detector annotator) onto this helper when `conditional_layers` is non-empty.
 
 3 new unit tests: identical-branches produce no IfBlock, R/RX divergence emits IfBlock(condition_rec=-3), schedule mismatch raises. Full suite: 673 pass, 0 regressions.
+
+### Co-compile Stage A commit 3b — `LayoutLayer.to_conditional_circuit`
+
+**Files**: `circuit/schedule/manipulation.py` (none — already shipped), `compile/blocks/layers/atomic/layout.py`, `compile/generation.py`, `tests/compile/blocks/layers/atomic/layout_test.py`
+
+End of the per-branch emission chain at the `LayoutLayer` boundary.
+
+- `_compute_template_and_plaquettes(layers)` extracted from `to_template_and_plaquettes`. New `_branch_one_layers()` builds the branch-one layer map (`conditional_layers[pos] if present, else layers[pos]`).
+- `generation._build_scheduled_circuits_for_plaquette_array` extracted from `generate_circuit_from_instantiation` (pure refactor; same byte-output).
+- New `generation.generate_per_branch_circuit_from_instantiation(plaquette_array, zero_plaquettes, one_plaquettes, increments, plaquette_to_block, condition_rec)` walks the plaquette array twice (once per branch), relabels both lists against a shared `QubitMap` (concat-then-split), and delegates to `merge_scheduled_circuits_per_branch`. Returns `(list[list[CircuitEntry]], QubitMap)`. Raises `TQECError` if per-branch qubit ownership maps disagree.
+- New `LayoutLayer.to_conditional_circuit(k, condition_rec, reschedule_measurements=True) -> ConditionalCircuit`. Requires non-empty `conditional_layers`. Computes per-branch templates (must match exactly), per-branch plaquettes, builds `plaquette_to_block` from the template's `get_indices_map_for_instantiation`, runs the per-branch emission, then assembles a `ConditionalCircuit` with `QUBIT_COORDS` preamble (qubits shifted into the layer frame as in `to_circuit`) and `TICK` separators between moments. Stabiliser-round LayoutLayers (where both branches' plaquettes happen to be equal) produce a `ConditionalCircuit` with no `IfBlock` entries — exactly what the design predicts.
+- New `_reschedule_per_branch_measurements()` extends `reschedule_measurements` to plaquettes that live only in `conditional_layers`.
+
+No call site rewired yet: `LayerTree`, the detector annotator, and `generate_conditional_stim_text` still go through the existing `to_circuit` / two-pass `branch_diff` path. Commit 3c will wire the new method into the tree-level annotation.
+
+2 new unit tests: `to_conditional_circuit` raises on empty `conditional_layers`; on a compiled 2-cube XZX_XZZ graph, at least one of the 3 `LayoutLayer`s carrying `conditional_layers` surfaces `IfBlock` entries with the supplied `condition_rec`. Full suite: 675 pass, 0 regressions.
 
 ---
 
