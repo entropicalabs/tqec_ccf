@@ -2,7 +2,7 @@
 
 **Branch**: `ccf-compile` (tqec_ccf fork)
 **Base**: `b77ca994` (tip of upstream PR #829, `feat/conditional-cube`)
-**Commits added**: 22
+**Commits added**: 23
 **Final test state**: 670 pass, 8 skip, 2 xfail (upstream typo), 0 regressions
 
 ---
@@ -279,6 +279,26 @@ Full suite: 680 pass, 0 regressions.
 Removed tests: `test_branch_diff_all_identical`, `test_branch_diff_one_differing_instruction`, `test_branch_diff_collapses_consecutive_differences`, `test_branch_diff_length_mismatch_creates_if_only_block` in `tests/compile/conditional/test_circuit.py`. Other tests (`ConditionalCircuit` text serialisation, `IfBlock` round-trip) stay.
 
 Net deletion: 262 lines from `compile/conditional/circuit.py` (from 443 to 181). Full suite: 676 pass, 0 regressions (-4 obsolete tests).
+
+### Co-compile Stage A commit 4d — Flip API to `condition_recs: dict[LayoutPosition3D, int]`
+
+**Files**: `compile/graph.py`, `compile/tree/tree.py`, plus all callers in `tests/compile/conditional/`, `tests/compile/tree/`, `tests/tools/`, `scripts/`.
+
+Public surface changes:
+
+- `TopologicalComputationGraph.generate_conditional_stim_text(k, condition_recs: dict[LayoutPosition3D, int], ...)`. Validates that `condition_recs.keys()` matches `self._conditional_blocks.keys()` exactly. Raises `NotImplementedError` if `len(condition_recs) != 1` (multi-conditional emission requires per-cube CEO slot dispatch — follow-up work).
+- `LayerTree.generate_conditional_circuit(k, condition_recs: dict[LayoutPosition3D, int], ...)`. Same one-entry constraint; internally still extracts a single `int` and threads it through `_generate_annotations(..., condition_rec=...)`.
+
+The internal `condition_rec: int` parameter on `_emit_moment_with_ceo`, `merge_scheduled_circuits_per_branch`, `generate_per_branch_circuit_from_instantiation`, `LayoutLayer.to_conditional_circuit`, `AnnotateCircuitOnLayerNode`, `AnnotateDetectorsOnLayerNode`, `LayerTree._annotate_circuits`, `LayerTree._annotate_detectors`, and `LayerTree._generate_annotations` is unchanged — these are non-public, and the per-cube dispatch refactor will follow once multi-conditional emission lands.
+
+Callers updated:
+
+- `tests/compile/conditional/test_end_to_end.py`, `tests/compile/conditional/test_emission.py`: pass `{pos: -1 for pos in cg._conditional_blocks}`.
+- `tests/compile/conditional/test_emission.py::test_multi_conditional_raises_not_implemented`: regex relaxed to `[Mm]ulti-conditional` (new error message).
+- `tests/compile/tree/conditional_circuit_test.py`: `condition_rec=-1` → `condition_recs={pos: -1 for pos in cg._conditional_blocks}` at 3 call sites.
+- `scripts/test_conditional_two_cubes.py`, `scripts/test_four_cubes.py`, `scripts/verify_conditional_locality.py`, `tests/tools/test_resolve.py`: same rewrite.
+
+Full suite: 676 pass, 0 regressions.
 
 ---
 

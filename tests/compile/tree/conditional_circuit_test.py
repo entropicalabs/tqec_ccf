@@ -34,7 +34,9 @@ def test_generate_conditional_circuit_returns_conditional_circuit_with_ifblocks(
     cg = compile_block_graph(g, FIXED_BULK_CONVENTION, observables=None)
     tree = cg.to_layer_tree()
     cc = tree.generate_conditional_circuit(
-        k=1, condition_rec=-1, do_not_use_database=True
+        k=1,
+        condition_recs={pos: -1 for pos in cg._conditional_blocks},
+        do_not_use_database=True,
     )
     assert isinstance(cc, ConditionalCircuit)
     if_blocks = [e for e in cc.entries if isinstance(e, IfBlock)]
@@ -58,7 +60,9 @@ def test_generate_conditional_circuit_emits_detector_ifblock() -> None:
     cg = compile_block_graph(g, FIXED_BULK_CONVENTION, observables=None)
     tree = cg.to_layer_tree()
     cc = tree.generate_conditional_circuit(
-        k=1, condition_rec=-1, do_not_use_database=True
+        k=1,
+        condition_recs={pos: -1 for pos in cg._conditional_blocks},
+        do_not_use_database=True,
     )
     detector_ifblocks = [
         e
@@ -80,7 +84,9 @@ def test_generate_conditional_circuit_text_renders_ifblock_syntax() -> None:
     cg = compile_block_graph(g, FIXED_BULK_CONVENTION, observables=None)
     tree = cg.to_layer_tree()
     cc = tree.generate_conditional_circuit(
-        k=1, condition_rec=-1, do_not_use_database=True
+        k=1,
+        condition_recs={pos: -1 for pos in cg._conditional_blocks},
+        do_not_use_database=True,
     )
     text = cc.to_stim_text()
     assert "IF(rec[-1])" in text

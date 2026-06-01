@@ -414,7 +414,7 @@ class LayerTree:
     def generate_conditional_circuit(
         self,
         k: int,
-        condition_rec: int,
+        condition_recs: dict["LayoutPosition3D", int],
         include_qubit_coords: bool = True,
         manhattan_radius: int = 2,
         detector_database: DetectorDatabase | None = None,
@@ -427,20 +427,18 @@ class LayerTree:
         """Generate a single :class:`ConditionalCircuit` from this tree.
 
         Drives the same annotation pipeline as :meth:`generate_circuit` but
-        threads ``condition_rec`` so every conditional leaf gets a per-branch
+        threads ``condition_recs`` so every conditional leaf gets a per-branch
         annotation, then assembles the tree via
         :meth:`LayerNode.generate_conditional_circuit`.
 
-        Stage A scope: detectors and observables are appended at each leaf
-        from the branch-zero annotation (matches today's two-pass output for
-        non-divergent detectors; for divergent detectors this is incomplete
-        until Stage A commit 4 brings per-branch detector annotation).
-
         Args:
             k: scaling factor.
-            condition_rec: ``stim`` record offset selecting the conditional
-                branch. Convention: ``then_body`` runs when the condition is
-                one.
+            condition_recs: mapping from each conditional cube's
+                :class:`LayoutPosition3D` to the negative ``stim`` ``rec``
+                offset of the measurement that selects its true branch. For
+                Stage A only a single entry is supported; multi-conditional
+                emission lands once the emitter dispatches the condition_rec
+                per CEO slot.
             include_qubit_coords: whether to prepend ``QUBIT_COORDS``
                 annotations.
             manhattan_radius, detector_database, database_path,
@@ -451,6 +449,13 @@ class LayerTree:
             A :class:`ConditionalCircuit` representing the full computation.
 
         """
+        if len(condition_recs) != 1:
+            raise NotImplementedError(
+                "LayerTree.generate_conditional_circuit currently supports a "
+                f"single conditional cube; got {len(condition_recs)}. "
+                "Multi-conditional emission is a follow-up."
+            )
+        condition_rec = next(iter(condition_recs.values()))
         # Reuse the database-resolution prelude from generate_circuit by
         # delegating through _generate_annotations + condition_rec.
         db_path_input = DEFAULT_DETECTOR_DATABASE_PATH

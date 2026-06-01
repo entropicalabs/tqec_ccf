@@ -562,7 +562,7 @@ class TopologicalComputationGraph:
     def generate_conditional_stim_text(
         self,
         k: int,
-        condition_rec: int,
+        condition_recs: dict[LayoutPosition3D, int],
         manhattan_radius: int = 2,
         detector_database: DetectorDatabase | None = None,
         database_path: str | Path = DEFAULT_DETECTOR_DATABASE_PATH,
@@ -572,9 +572,10 @@ class TopologicalComputationGraph:
     ) -> str:
         """Compile a graph with conditional cubes into IF/ELSE-annotated Stim text.
 
-        ``condition_rec`` is the negative ``rec`` offset of the measurement
-        whose outcome selects the true branch.  Until the Pauli frame tracker
-        starts driving emission, this must be supplied by the caller.
+        ``condition_recs`` maps each conditional cube's :class:`LayoutPosition3D`
+        to the negative ``stim`` ``rec`` offset of the measurement whose outcome
+        selects its true branch. Until the Pauli frame tracker starts driving
+        emission, the caller supplies these manually.
 
         Single-pass implementation: delegates to
         :meth:`LayerTree.generate_conditional_circuit`. The non-conditional
@@ -591,16 +592,24 @@ class TopologicalComputationGraph:
                 reschedule_measurements=reschedule_measurements,
             )
             return str(circuit)
-        if len(self._conditional_blocks) != 1:
+        missing = set(self._conditional_blocks) - set(condition_recs)
+        extra = set(condition_recs) - set(self._conditional_blocks)
+        if missing or extra:
+            raise TQECError(
+                "generate_conditional_stim_text: condition_recs keys must match "
+                f"the graph's conditional cubes. Missing: {sorted(missing)}. "
+                f"Extra: {sorted(extra)}."
+            )
+        if len(condition_recs) != 1:
             raise NotImplementedError(
-                "generate_conditional_stim_text currently supports at most "
-                f"one ConditionalBlock; got {len(self._conditional_blocks)}. "
-                "Multi-conditional graphs land once the condition_rec API is "
-                "widened to dict[LayoutPosition3D, int] (Stage A commit 4d)."
+                "Multi-conditional emission is not yet supported. "
+                f"Got {len(condition_recs)} conditional cubes; the single-pass "
+                "emitter currently threads only one condition_rec per moment. "
+                "Per-cube CEO slot dispatch lands in a follow-up commit."
             )
         cc = self.to_layer_tree().generate_conditional_circuit(
             k,
-            condition_rec=condition_rec,
+            condition_recs=condition_recs,
             manhattan_radius=manhattan_radius,
             detector_database=detector_database,
             database_path=database_path,

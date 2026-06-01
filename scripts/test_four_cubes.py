@@ -58,7 +58,7 @@ def main() -> None:
     g_conditional.add_pipe(pos_cond, cubes[6][0])
 
     cg = compile_block_graph(g_conditional, FIXED_BULK_CONVENTION, observables=None)
-    conditional_stim = cg.generate_conditional_stim_text(k=1, condition_rec=-1)
+    conditional_stim = cg.generate_conditional_stim_text(k=1, condition_recs={pos: -1 for pos in cg._conditional_blocks})
 
     # resolve
     branch_zero = resolve_if_else(conditional_stim, conditions={-1: 0})

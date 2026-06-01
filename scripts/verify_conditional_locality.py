@@ -258,7 +258,7 @@ def main() -> None:
 
     g = _build_conditional_graph(pos_cond)
     cg = compile_block_graph(g, FIXED_BULK_CONVENTION, observables=None)
-    text = cg.generate_conditional_stim_text(k=k, condition_rec=-1)
+    text = cg.generate_conditional_stim_text(k=k, condition_recs={pos: -1 for pos in cg._conditional_blocks})
 
     branch_zero = resolve_if_else(text, conditions={-1: 0})
     qubit_map = QubitMap.from_circuit(branch_zero)
