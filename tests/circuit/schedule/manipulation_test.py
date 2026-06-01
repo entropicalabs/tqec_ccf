@@ -8,6 +8,7 @@ from tqec.circuit.schedule.manipulation import (
     _emit_moment_with_ceo,
     merge_instructions,
     merge_scheduled_circuits,
+    merge_scheduled_circuits_per_branch,
     relabel_circuits_qubit_indices,
     remove_duplicate_instructions,
 )
@@ -210,4 +211,73 @@ def test_emit_moment_with_ceo_branch_length_mismatch_raises() -> None:
             global_i2q,
             branch_merged_instructions=_moment_insts("R 0"),
             condition_rec=-1,
+        )
+
+
+def _scheduled(text: str, schedule: int | list[int] = 0) -> ScheduledCircuit:
+    return ScheduledCircuit.from_circuit(stim.Circuit(text), schedule)
+
+
+def test_merge_scheduled_circuits_per_branch_identical_branches() -> None:
+    circuits = [
+        _scheduled("QUBIT_COORDS(0, 0) 0\nH 0"),
+        _scheduled("QUBIT_COORDS(1, 0) 0\nH 0"),
+    ]
+    zero_circuits, qmap = relabel_circuits_qubit_indices(circuits)
+    one_circuits, _ = relabel_circuits_qubit_indices(circuits)
+    qubit_to_block = {
+        GridQubit(0, 0): BlockPosition2D(0, 0),
+        GridQubit(1, 0): BlockPosition2D(0, 0),
+    }
+    moments_entries, schedule = merge_scheduled_circuits_per_branch(
+        zero_circuits,
+        one_circuits,
+        qmap,
+        condition_rec=-1,
+        qubit_to_block=qubit_to_block,
+    )
+    assert list(schedule) == [0]
+    assert len(moments_entries) == 1
+    assert all(not isinstance(e, IfBlock) for e in moments_entries[0])
+
+
+def test_merge_scheduled_circuits_per_branch_divergent_slot_emits_ifblock() -> None:
+    zero_circuits, qmap = relabel_circuits_qubit_indices(
+        [_scheduled("QUBIT_COORDS(0, 0) 0\nR 0")]
+    )
+    one_circuits, _ = relabel_circuits_qubit_indices(
+        [_scheduled("QUBIT_COORDS(0, 0) 0\nRX 0")]
+    )
+    qubit_to_block = {GridQubit(0, 0): BlockPosition2D(0, 0)}
+    moments_entries, schedule = merge_scheduled_circuits_per_branch(
+        zero_circuits,
+        one_circuits,
+        qmap,
+        condition_rec=-3,
+        qubit_to_block=qubit_to_block,
+    )
+    assert list(schedule) == [0]
+    assert len(moments_entries) == 1
+    ifs = [e for e in moments_entries[0] if isinstance(e, IfBlock)]
+    assert len(ifs) == 1
+    assert ifs[0].condition_rec == -3
+    assert ifs[0].then_body[0].name == "RX"
+    assert (ifs[0].else_body or [])[0].name == "R"
+
+
+def test_merge_scheduled_circuits_per_branch_schedule_mismatch_raises() -> None:
+    zero_circuits, qmap = relabel_circuits_qubit_indices(
+        [_scheduled("QUBIT_COORDS(0, 0) 0\nH 0\nTICK\nM 0", [0, 2])]
+    )
+    one_circuits, _ = relabel_circuits_qubit_indices(
+        [_scheduled("QUBIT_COORDS(0, 0) 0\nH 0\nTICK\nM 0", [0, 3])]
+    )
+    qubit_to_block = {GridQubit(0, 0): BlockPosition2D(0, 0)}
+    with pytest.raises(TQECError):
+        merge_scheduled_circuits_per_branch(
+            zero_circuits,
+            one_circuits,
+            qmap,
+            condition_rec=-1,
+            qubit_to_block=qubit_to_block,
         )

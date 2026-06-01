@@ -473,6 +473,94 @@ def merge_scheduled_circuits(
     return ScheduledCircuit(all_moments, all_schedules, global_i2q, _avoid_checks=True)
 
 
+def merge_scheduled_circuits_per_branch(
+    zero_circuits: list[ScheduledCircuit],
+    one_circuits: list[ScheduledCircuit],
+    global_qubit_map: QubitMap,
+    *,
+    condition_rec: int,
+    mergeable_instructions: Iterable[str] = (),
+    qubit_to_block: Mapping[GridQubit, BlockPosition2D],
+) -> tuple[list[list[CircuitEntry]], Schedule]:
+    """Merge two parallel branches of :class:`.ScheduledCircuit` instances into a per-moment
+    stream of :class:`CircuitEntry` values, weaving :class:`IfBlock` at CEO slots that
+    differ between the branches.
+
+    Both branches must share ``global_qubit_map`` and produce moments at identical
+    schedules (enforced by Equal Measurement Count + Canonical Emission Order).
+    The two branch lists may have different per-plaquette circuits only at slots
+    owned by a conditional cube; everywhere else they are byte-identical and
+    collapse to plain :class:`stim.CircuitInstruction` entries.
+
+    Args:
+        zero_circuits: branch-zero per-plaquette scheduled circuits, in the same
+            order as the per-plaquette walk of the layer.
+        one_circuits: branch-one parallel list; same length and same per-slot
+            qubit footprint as ``zero_circuits``.
+        global_qubit_map: shared qubit map for both branches.
+        condition_rec: ``stim`` record offset that drives the woven IF/ELSE.
+            Convention: ``then_body`` runs when the condition is one,
+            ``else_body`` runs when it is zero.
+        mergeable_instructions: as in :func:`merge_scheduled_circuits`.
+        qubit_to_block: required; CEO needs block ownership to align slots
+            between branches.
+
+    Returns:
+        ``(moments_entries, schedule)`` where ``moments_entries[i]`` is the
+        ``list[CircuitEntry]`` for the moment at ``schedule[i]``. Callers
+        assemble the result into a :class:`~tqec.compile.conditional.circuit.ConditionalCircuit`
+        (or unwrap to a plain ``stim.Circuit`` when no ``IfBlock`` surfaces).
+
+    Raises:
+        TQECError: if the two branches diverge in moment count, schedule, or
+            number of CEO slots at a moment.
+
+    """
+    sched_z = _ScheduledCircuits(zero_circuits, global_qubit_map)
+    sched_o = _ScheduledCircuits(one_circuits, global_qubit_map)
+    global_i2q = QubitMap({i: q for q, i in global_qubit_map.q2i.items()})
+    mergeable = frozenset(mergeable_instructions)
+
+    moments_entries: list[list[CircuitEntry]] = []
+    schedule_out = Schedule()
+
+    while sched_z.has_pending_moment() or sched_o.has_pending_moment():
+        if not (sched_z.has_pending_moment() and sched_o.has_pending_moment()):
+            raise TQECError(
+                "merge_scheduled_circuits_per_branch: branches disagree on moment "
+                "count; Equal Measurement Count violated."
+            )
+        schedule_z, moments_z = sched_z.collect_moments_at_minimum_schedule()
+        schedule_o, moments_o = sched_o.collect_moments_at_minimum_schedule()
+        if schedule_z != schedule_o:
+            raise TQECError(
+                "merge_scheduled_circuits_per_branch: schedule mismatch between "
+                f"branches (zero={schedule_z}, one={schedule_o})."
+            )
+        instructions_z = functools.reduce(
+            operator.iadd, (list(m.instructions) for m in moments_z), []
+        )
+        instructions_o = functools.reduce(
+            operator.iadd, (list(m.instructions) for m in moments_o), []
+        )
+        merged_z = merge_instructions(
+            remove_duplicate_instructions(instructions_z, mergeable)
+        )
+        merged_o = merge_instructions(
+            remove_duplicate_instructions(instructions_o, mergeable)
+        )
+        entries = _emit_moment_with_ceo(
+            merged_z,
+            qubit_to_block,
+            global_i2q.i2q,
+            branch_merged_instructions=merged_o,
+            condition_rec=condition_rec,
+        )
+        moments_entries.append(entries)
+        schedule_out.append(schedule_z)
+    return moments_entries, schedule_out
+
+
 def relabel_circuits_qubit_indices(
     circuits: Sequence[ScheduledCircuit],
 ) -> tuple[list[ScheduledCircuit], QubitMap]:

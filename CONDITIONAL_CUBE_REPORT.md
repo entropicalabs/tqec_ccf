@@ -2,7 +2,7 @@
 
 **Branch**: `ccf-compile` (tqec_ccf fork)
 **Base**: `b77ca994` (tip of upstream PR #829, `feat/conditional-cube`)
-**Commits added**: 15
+**Commits added**: 16
 **Final test state**: 670 pass, 8 skip, 2 xfail (upstream typo), 0 regressions
 
 ---
@@ -179,6 +179,18 @@ Promotes the per-moment buffer in `merge_scheduled_circuits` to a returned `list
 Convention: first positional `merged_instructions` is treated as branch-zero, `branch_merged_instructions` as branch-one (matches `branch_diff(zero, one, …)` ordering: `then_body=one`, `else_body=zero`).
 
 5 new unit tests cover: no-branch baseline parity, identical branches produce no IfBlock, divergent `R`/`RX` weave produces per-slot IfBlocks, missing `condition_rec` raises, slot-count mismatch raises. Full suite: 670 pass, 0 regressions.
+
+### Co-compile Stage A commit 3a — `merge_scheduled_circuits_per_branch` helper
+
+**Files**: `circuit/schedule/manipulation.py`, `circuit/schedule/__init__.py`, `tests/circuit/schedule/manipulation_test.py`
+
+Adds a sibling of `merge_scheduled_circuits` that consumes two parallel `list[ScheduledCircuit]` (one per branch), walks moments in lockstep with a shared `global_qubit_map`, and returns `(list[list[CircuitEntry]], Schedule)`. Each per-moment bucket is the output of `_emit_moment_with_ceo` with both branches threaded in — divergent CEO slots surface as `IfBlock(condition_rec, then=branch_one, else=branch_zero)`, identical slots collapse to plain `stim.CircuitInstruction`.
+
+Errors: moment-count divergence, schedule mismatch between branches, CEO slot count mismatch (the last delegated to `_emit_moment_with_ceo`).
+
+No downstream callers yet — the generator/tree/detector annotators still use the single-branch path. Commit 3b will wire `LayoutLayer.to_circuit` (and the detector annotator) onto this helper when `conditional_layers` is non-empty.
+
+3 new unit tests: identical-branches produce no IfBlock, R/RX divergence emits IfBlock(condition_rec=-3), schedule mismatch raises. Full suite: 673 pass, 0 regressions.
 
 ---
 
