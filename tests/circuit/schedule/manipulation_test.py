@@ -5,12 +5,15 @@ from tqec.circuit.qubit import GridQubit
 from tqec.circuit.qubit_map import QubitMap
 from tqec.circuit.schedule.circuit import ScheduledCircuit
 from tqec.circuit.schedule.manipulation import (
+    _emit_moment_with_ceo,
     merge_instructions,
     merge_scheduled_circuits,
     relabel_circuits_qubit_indices,
     remove_duplicate_instructions,
 )
-from tqec.utils.exceptions import TQECWarning
+from tqec.compile.conditional.circuit import IfBlock
+from tqec.utils.exceptions import TQECError, TQECWarning
+from tqec.utils.position import BlockPosition2D
 
 
 def test_remove_duplicate_instructions() -> None:
@@ -121,3 +124,90 @@ def test_merge_instructions() -> None:
             assert sorted(t.value for t in instr.targets_copy()) == [0, 1, 2, 5, 7]
         if instr.name == "CX":
             assert instr.target_groups() == [[stim.GateTarget(3), stim.GateTarget(4)]]
+
+
+def _moment_insts(text: str) -> list[stim.CircuitInstruction]:
+    out: list[stim.CircuitInstruction] = []
+    for inst in stim.Circuit(text):
+        assert isinstance(inst, stim.CircuitInstruction)
+        out.append(inst)
+    return out
+
+
+def test_emit_moment_with_ceo_no_branch_returns_plain_entries() -> None:
+    q0, q1 = GridQubit(0, 0), GridQubit(1, 0)
+    qubit_to_block = {q0: BlockPosition2D(0, 0), q1: BlockPosition2D(0, 0)}
+    global_i2q = {0: q0, 1: q1}
+    entries = _emit_moment_with_ceo(_moment_insts("R 0 1"), qubit_to_block, global_i2q)
+    assert len(entries) == 1
+    assert not isinstance(entries[0], IfBlock)
+    assert entries[0].name == "R"
+    assert sorted(t.value for t in entries[0].targets_copy()) == [0, 1]
+
+
+def test_emit_moment_with_ceo_identical_branches_no_ifblock() -> None:
+    q0, q1 = GridQubit(0, 0), GridQubit(1, 0)
+    qubit_to_block = {q0: BlockPosition2D(0, 0), q1: BlockPosition2D(0, 0)}
+    global_i2q = {0: q0, 1: q1}
+    entries = _emit_moment_with_ceo(
+        _moment_insts("R 0 1"),
+        qubit_to_block,
+        global_i2q,
+        branch_merged_instructions=_moment_insts("R 0 1"),
+        condition_rec=-1,
+    )
+    assert all(not isinstance(e, IfBlock) for e in entries)
+    assert len(entries) == 1
+    assert entries[0].name == "R"
+
+
+def test_emit_moment_with_ceo_weaves_ifblock_for_divergent_branch() -> None:
+    q0, q1 = GridQubit(0, 0), GridQubit(1, 0)
+    qubit_to_block = {q0: BlockPosition2D(0, 0), q1: BlockPosition2D(0, 0)}
+    global_i2q = {0: q0, 1: q1}
+    entries = _emit_moment_with_ceo(
+        _moment_insts("R 0 1"),
+        qubit_to_block,
+        global_i2q,
+        branch_merged_instructions=_moment_insts("RX 0 1"),
+        condition_rec=-1,
+    )
+    # R/RX are single-qubit gates -> two CEO slots (q0 and q1), each divergent.
+    assert len(entries) == 2
+    for entry, expected_qubit in zip(entries, [0, 1]):
+        assert isinstance(entry, IfBlock)
+        assert entry.condition_rec == -1
+        assert len(entry.then_body) == 1 and len(entry.else_body or []) == 1
+        then_inst = entry.then_body[0]
+        else_inst = (entry.else_body or [])[0]
+        assert then_inst.name == "RX"
+        assert else_inst.name == "R"
+        assert [t.value for t in then_inst.targets_copy()] == [expected_qubit]
+        assert [t.value for t in else_inst.targets_copy()] == [expected_qubit]
+
+
+def test_emit_moment_with_ceo_branch_requires_condition_rec() -> None:
+    q0 = GridQubit(0, 0)
+    qubit_to_block = {q0: BlockPosition2D(0, 0)}
+    global_i2q = {0: q0}
+    with pytest.raises(TQECError):
+        _emit_moment_with_ceo(
+            _moment_insts("R 0"),
+            qubit_to_block,
+            global_i2q,
+            branch_merged_instructions=_moment_insts("RX 0"),
+        )
+
+
+def test_emit_moment_with_ceo_branch_length_mismatch_raises() -> None:
+    q0, q1 = GridQubit(0, 0), GridQubit(1, 0)
+    qubit_to_block = {q0: BlockPosition2D(0, 0), q1: BlockPosition2D(0, 0)}
+    global_i2q = {0: q0, 1: q1}
+    with pytest.raises(TQECError):
+        _emit_moment_with_ceo(
+            _moment_insts("R 0 1"),
+            qubit_to_block,
+            global_i2q,
+            branch_merged_instructions=_moment_insts("R 0"),
+            condition_rec=-1,
+        )
