@@ -147,6 +147,7 @@ class LayerTree:
         only_use_database: bool = False,
         lookback: int = 2,
         parallel_process_count: int = 1,
+        condition_rec: int | None = None,
     ) -> None:
         if manhattan_radius <= 0:
             return  # pragma: no cover
@@ -158,6 +159,7 @@ class LayerTree:
                 only_use_database,
                 lookback,
                 parallel_process_count,
+                condition_rec=condition_rec,
             )
         )
         # The database will have been updated inside the above function, and here at
@@ -282,6 +284,7 @@ class LayerTree:
             only_use_database,
             lookback,
             parallel_process_count,
+            condition_rec=condition_rec,
         )
         self._annotate_observables(k)
 

@@ -364,7 +364,12 @@ class LayerNode:
             for inst in mapped_circuit.get_circuit(include_qubit_coords=False):
                 assert isinstance(inst, stim.CircuitInstruction)
                 out.append_instruction(inst)
-        for annotation in annotations.detectors + annotations.observables:
+        for annotation in annotations.detectors:
+            out.append_instruction(annotation.to_instruction())
+        if annotations.conditional_detectors:
+            for if_block in annotations.conditional_detectors:
+                out.append_if(if_block)
+        for annotation in annotations.observables:
             out.append_instruction(annotation.to_instruction())
         out.append_instruction(
             stim.CircuitInstruction(

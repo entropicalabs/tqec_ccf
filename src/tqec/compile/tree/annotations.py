@@ -10,7 +10,7 @@ from tqec.circuit.measurement_map import MeasurementRecordsMap
 from tqec.circuit.qubit import GridQubit
 from tqec.circuit.qubit_map import QubitMap
 from tqec.circuit.schedule.circuit import ScheduledCircuit
-from tqec.compile.conditional.circuit import ConditionalCircuit
+from tqec.compile.conditional.circuit import ConditionalCircuit, IfBlock
 from tqec.compile.detectors.detector import Detector
 from tqec.compile.observables.builder import Observable
 from tqec.plaquette.rpng.rpng import PauliBasis
@@ -83,6 +83,14 @@ class LayerNodeAnnotations:
     non-empty ``LayoutLayer.conditional_layers``. ``circuit`` (the branch-zero
     :class:`ScheduledCircuit`) stays populated alongside it so the detector
     annotator can continue computing measurement records from a flat circuit.
+    """
+    conditional_detectors: list[IfBlock] | None = None
+    """Per-branch-divergent detectors for conditional leaves. ``None`` outside the
+    conditional path; an empty list when the leaf is conditional but every
+    detector agrees across branches. Detectors that agree across branches stay on
+    ``detectors`` (above) so non-conditional callers see them unconditionally;
+    divergent detectors land here as :class:`IfBlock` entries with branch-one
+    detectors in ``then_body`` and branch-zero detectors in ``else_body``.
     """
 
     def to_dict(self) -> dict[str, Any]:

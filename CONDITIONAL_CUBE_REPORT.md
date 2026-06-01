@@ -2,7 +2,7 @@
 
 **Branch**: `ccf-compile` (tqec_ccf fork)
 **Base**: `b77ca994` (tip of upstream PR #829, `feat/conditional-cube`)
-**Commits added**: 19
+**Commits added**: 20
 **Final test state**: 670 pass, 8 skip, 2 xfail (upstream typo), 0 regressions
 
 ---
@@ -238,6 +238,25 @@ Closes the tree-level half of the single-pass refactor. Per-leaf `ConditionalCir
 The path is **not** yet wired into `TopologicalComputationGraph.generate_conditional_stim_text`; the public entry point still goes through the two-pass `branch_diff` strategy. Commit 4 will collapse that wrapper onto `LayerTree.generate_conditional_circuit` and replace branch-zero-only detector annotation with per-branch annotation.
 
 2 new unit tests: on a compiled 2-cube `XZX_XZZ` graph, `LayerTree.generate_conditional_circuit(k=1, condition_rec=-1)` returns a `ConditionalCircuit` with at least one top-level `IfBlock` (and no duplicate `QUBIT_COORDS`); the rendered `to_stim_text()` output contains the expected `IF(rec[-1]) { ... } ELSE { ... }` block syntax. Full suite: 679 pass, 0 regressions.
+
+### Co-compile Stage A commit 4a — Per-branch detector annotation
+
+**Files**: `compile/tree/annotators/detectors.py`, `compile/tree/annotations.py`, `compile/tree/tree.py`, `compile/tree/node.py`, `tests/compile/tree/conditional_circuit_test.py`
+
+Per-branch detector annotation. The `Pauli` frame tracker stub still leaves branch-dependent detectors uncancelled; this commit makes those land as `IfBlock` entries rather than appearing only in the branch-zero output.
+
+- `LookbackInformation` gains `plaquettes_branch_one: Plaquettes | None` (defaults to `None` for non-conditional rounds, falling back to branch-zero in `lookback_per_branch`). `LookbackInformationList.append` + `LookbackStack.append` accept the new optional argument.
+- `LookbackStack.lookback_per_branch(n)` mirrors `lookback` but returns parallel `(plaquettes_zero, plaquettes_one)` lists. Non-conditional rounds appear with the same `Plaquettes` instance on both sides.
+- `AnnotateDetectorsOnLayerNode(..., condition_rec=None)` constructor gains a `condition_rec`. When the walker visits a conditional leaf (`LayoutLayer.conditional_layers` non-empty **and** `condition_rec` supplied):
+  - Computes branch-one `(template, plaquettes)` via `LayoutLayer._compute_template_and_plaquettes(self._branch_one_layers())`. Templates must match exactly (sanity-check for EMC + CEO).
+  - Stores branch-one plaquettes on the lookback stack alongside the existing branch-zero entry so subsequent conditional rounds see consistent per-branch lookbacks.
+  - Runs `compute_detectors_for_fixed_radius` twice: once with the branch-zero lookback, once with the branch-one lookback. Identical detectors (`Detector` set intersection — frozen-set comparison covers both measurements and coordinates) stay on the existing `annotations.detectors` list. Divergent detectors (zero-only / one-only) are wrapped in a single `IfBlock(condition_rec, then=one_only, else=zero_only)` and appended to a new `annotations.conditional_detectors: list[IfBlock] | None` field. **Coarse-grained**: one `IfBlock` per leaf, not one per detector. Finer-grained categorisation is a future refinement.
+- `LayerTree._annotate_detectors` / `_generate_annotations` thread `condition_rec`. `LayerTree.generate_conditional_circuit` (commit 3d) already passes it.
+- `LayerNode._leaf_to_conditional_circuit` appends `conditional_detectors` entries between the per-leaf `detectors` and `observables`, preserving the original detector-then-observable interleave for non-divergent slices.
+
+The annotator no longer needs `branch_diff` for detector handling on the conditional path; the two-pass `generate_conditional_stim_text` still calls it, but only for gate-content divergence (which is now redundant given commit 3d).
+
+1 new unit test: divergent `DETECTOR`-only `IfBlock` surfaces on the 2-cube `XZX_XZZ` fixture (in addition to the 9 gate-level `IfBlock`s already verified by commit 3d). Full suite: 680 pass, 0 regressions.
 
 ---
 

@@ -51,6 +51,30 @@ def test_generate_conditional_circuit_returns_conditional_circuit_with_ifblocks(
     )
 
 
+def test_generate_conditional_circuit_emits_detector_ifblock() -> None:
+    """Stage A commit 4a: per-branch detector annotation surfaces at least one
+    IfBlock whose body consists of DETECTOR instructions."""
+    g = _two_cube_graph("XZX_XZZ")
+    cg = compile_block_graph(g, FIXED_BULK_CONVENTION, observables=None)
+    tree = cg.to_layer_tree()
+    cc = tree.generate_conditional_circuit(
+        k=1, condition_rec=-1, do_not_use_database=True
+    )
+    detector_ifblocks = [
+        e
+        for e in cc.entries
+        if isinstance(e, IfBlock)
+        and all(
+            isinstance(b, stim.CircuitInstruction) and b.name == "DETECTOR"
+            for b in e.then_body + (e.else_body or [])
+        )
+    ]
+    assert detector_ifblocks, (
+        "expected at least one IfBlock whose body is composed of DETECTOR "
+        "instructions (per-branch divergent detectors)"
+    )
+
+
 def test_generate_conditional_circuit_text_renders_ifblock_syntax() -> None:
     g = _two_cube_graph("XZX_XZZ")
     cg = compile_block_graph(g, FIXED_BULK_CONVENTION, observables=None)

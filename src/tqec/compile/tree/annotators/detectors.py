@@ -6,6 +6,7 @@ from typing_extensions import override
 
 from tqec.circuit.measurement_map import MeasurementRecordsMap
 from tqec.compile.blocks.layers.atomic.layout import LayoutLayer
+from tqec.compile.conditional.circuit import IfBlock
 from tqec.compile.detectors.compute import compute_detectors_for_fixed_radius
 from tqec.compile.detectors.database import DetectorDatabase
 from tqec.compile.tree.annotations import DetectorAnnotation
@@ -39,6 +40,12 @@ class LookbackInformation:
     template: Template
     plaquettes: Plaquettes
     measurement_records: MeasurementRecordsMap
+    plaquettes_branch_one: Plaquettes | None = None
+    """Branch-one plaquettes for the round, when this round belongs to a
+    conditional cube. ``None`` for rounds where both branches share the same
+    plaquettes (every round outside a conditional cube, plus the conditional
+    cube's stabiliser-round slices that happen to be byte-equal across
+    branches)."""
 
 
 @dataclass
@@ -52,13 +59,16 @@ class LookbackInformationList:
         template: Template,
         plaquettes: Plaquettes,
         measurement_records: MeasurementRecordsMap,
+        plaquettes_branch_one: Plaquettes | None = None,
     ) -> None:
         """Add the provided parameters to the lookback window.
 
         This method might remove older items that should not be considered anymore from the lookback
         stack.
         """
-        self.infos.append(LookbackInformation(template, plaquettes, measurement_records))
+        self.infos.append(
+            LookbackInformation(template, plaquettes, measurement_records, plaquettes_branch_one)
+        )
 
     def extend(self, other: LookbackInformationList, repetitions: int = 1) -> None:
         """Add the provided lookback information to self, potentially repeating it several times.
@@ -111,22 +121,31 @@ class LookbackStack:
         template: Template,
         plaquettes: Plaquettes,
         measurement_records: MeasurementRecordsMap,
+        plaquettes_branch_one: Plaquettes | None = None,
     ) -> None:
         """Append a new QEC round in the data-structure."""
-        self._stack[-1].append(template, plaquettes, measurement_records)
+        self._stack[-1].append(
+            template, plaquettes, measurement_records, plaquettes_branch_one
+        )
 
     def _get_last_n(
         self, n: int
-    ) -> tuple[list[Template], list[Plaquettes], list[MeasurementRecordsMap]]:
+    ) -> tuple[
+        list[Template],
+        list[Plaquettes],
+        list[MeasurementRecordsMap],
+        list[Plaquettes | None],
+    ]:
         if n < 0:
             raise TQECError(
                 f"Cannot look back a negative number of rounds. Got a lookback value of {n}."
             )
         if n == 0:
-            return [], [], []
+            return [], [], [], []
         templates: list[Template] = []
         plaquettes: list[Plaquettes] = []
         measurement_records: list[MeasurementRecordsMap] = []
+        plaquettes_one: list[Plaquettes | None] = []
         # Filling the lists in reverse order (i.e., from earlier time to oldest
         # time) and correcting when returning.
         for element in reversed(self._stack):
@@ -134,21 +153,56 @@ class LookbackStack:
                 templates.append(info.template)
                 plaquettes.append(info.plaquettes)
                 measurement_records.append(info.measurement_records)
+                plaquettes_one.append(info.plaquettes_branch_one)
                 if len(templates) == n:
-                    return templates[::-1], plaquettes[::-1], measurement_records[::-1]
+                    return (
+                        templates[::-1],
+                        plaquettes[::-1],
+                        measurement_records[::-1],
+                        plaquettes_one[::-1],
+                    )
 
-        return templates[::-1], plaquettes[::-1], measurement_records[::-1]
+        return (
+            templates[::-1],
+            plaquettes[::-1],
+            measurement_records[::-1],
+            plaquettes_one[::-1],
+        )
 
     def lookback(
         self,
         n: int,
     ) -> tuple[list[Template], list[Plaquettes], MeasurementRecordsMap]:
         """Get the last ``self._lookback`` QEC rounds."""
-        templates, plaquettes, measurement_records = self._get_last_n(n)
+        templates, plaquettes, measurement_records, _ = self._get_last_n(n)
         measurement_record = MeasurementRecordsMap()
         for mrec in measurement_records:
             measurement_record = measurement_record.with_added_measurements(mrec)
         return templates, plaquettes, measurement_record
+
+    def lookback_per_branch(
+        self,
+        n: int,
+    ) -> tuple[
+        list[Template],
+        list[Plaquettes],
+        list[Plaquettes],
+        MeasurementRecordsMap,
+    ]:
+        """Get the last ``n`` QEC rounds with parallel branch-zero and branch-one
+        plaquette lists. Rounds with no branch-one alternate fall back to the
+        branch-zero entry (both branches share that round's content)."""
+        templates, plaquettes_zero, measurement_records, plaquettes_one = (
+            self._get_last_n(n)
+        )
+        plaquettes_one_filled: list[Plaquettes] = [
+            (po if po is not None else pz)
+            for po, pz in zip(plaquettes_one, plaquettes_zero)
+        ]
+        measurement_record = MeasurementRecordsMap()
+        for mrec in measurement_records:
+            measurement_record = measurement_record.with_added_measurements(mrec)
+        return templates, plaquettes_zero, plaquettes_one_filled, measurement_record
 
     def __len__(self) -> int:
         if len(self._stack) > 1:
@@ -167,6 +221,7 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
         only_use_database: bool = False,
         lookback: int = 2,
         parallel_process_count: int = 1,
+        condition_rec: int | None = None,
     ):
         """Walker computing and annotating detectors on leaf nodes.
 
@@ -210,6 +265,7 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
         self._lookback_size = lookback
         self._lookback_stack = LookbackStack()
         self._parallel_process_count = parallel_process_count
+        self._condition_rec = condition_rec
 
     @override
     def visit_node(self, node: LayerNode) -> None:
@@ -218,15 +274,34 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
         annotations = node.get_annotations(self._k)
         if annotations.circuit is None:
             raise TQECError("Cannot compute detectors without the circuit annotation.")
-        self._lookback_stack.append(
-            *node._layer.to_template_and_plaquettes(),
-            MeasurementRecordsMap.from_scheduled_circuit(annotations.circuit),
+
+        template_zero, plaquettes_zero = node._layer.to_template_and_plaquettes()
+        plaquettes_one_for_round: Plaquettes | None = None
+        leaf_is_conditional = (
+            self._condition_rec is not None and bool(node._layer.conditional_layers)
         )
+        if leaf_is_conditional:
+            template_one, plaquettes_one_for_round = (
+                node._layer._compute_template_and_plaquettes(
+                    node._layer._branch_one_layers()
+                )
+            )
+            if template_one != template_zero:
+                raise TQECError(
+                    "AnnotateDetectorsOnLayerNode: per-branch templates differ; "
+                    "EMC + CEO violated."
+                )
+        self._lookback_stack.append(
+            template_zero,
+            plaquettes_zero,
+            MeasurementRecordsMap.from_scheduled_circuit(annotations.circuit),
+            plaquettes_branch_one=plaquettes_one_for_round,
+        )
+
         templates, plaquettes, measurement_records = self._lookback_stack.lookback(
             self._lookback_size
         )
-
-        detectors = compute_detectors_for_fixed_radius(
+        detectors_zero = compute_detectors_for_fixed_radius(
             templates,
             self._k,
             plaquettes,
@@ -236,9 +311,60 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
             self._parallel_process_count,
         )
 
-        for detector in detectors:
-            annotations.detectors.append(
-                DetectorAnnotation.from_detector(detector, measurement_records)
+        if not leaf_is_conditional:
+            for detector in detectors_zero:
+                annotations.detectors.append(
+                    DetectorAnnotation.from_detector(detector, measurement_records)
+                )
+            return
+
+        # Per-branch detector computation. The lookback gives parallel
+        # branch-zero / branch-one plaquette lists; everything else (templates,
+        # measurement records) is shared by EMC + CEO.
+        templates_pb, plaquettes_zero_lb, plaquettes_one_lb, measurement_records_pb = (
+            self._lookback_stack.lookback_per_branch(self._lookback_size)
+        )
+        detectors_one = compute_detectors_for_fixed_radius(
+            templates_pb,
+            self._k,
+            plaquettes_one_lb,
+            self._manhattan_radius,
+            self._database,
+            self._only_use_database,
+            self._parallel_process_count,
+        )
+        zero_set = set(detectors_zero)
+        one_set = set(detectors_one)
+        shared = zero_set & one_set
+        zero_only = [d for d in detectors_zero if d not in shared]
+        one_only = [d for d in detectors_one if d not in shared]
+        # Common detectors stay on annotations.detectors so non-conditional
+        # callers continue to see them. The divergent slice is recorded
+        # separately on conditional_detectors.
+        for detector in detectors_zero:
+            if detector in shared:
+                annotations.detectors.append(
+                    DetectorAnnotation.from_detector(detector, measurement_records_pb)
+                )
+        # Coarse single-IfBlock-per-leaf: zero-only -> else, one-only -> then.
+        if zero_only or one_only:
+            assert self._condition_rec is not None
+            then_body = [
+                DetectorAnnotation.from_detector(d, measurement_records_pb).to_instruction()
+                for d in one_only
+            ]
+            else_body = [
+                DetectorAnnotation.from_detector(d, measurement_records_pb).to_instruction()
+                for d in zero_only
+            ]
+            if annotations.conditional_detectors is None:
+                annotations.conditional_detectors = []
+            annotations.conditional_detectors.append(
+                IfBlock(
+                    condition_rec=self._condition_rec,
+                    then_body=then_body,
+                    else_body=else_body if else_body else None,
+                )
             )
 
     @override
