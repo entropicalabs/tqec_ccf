@@ -11,7 +11,7 @@ from tqec.compile.conditional.circuit import (
     CircuitEntry,
     ConditionalCircuit,
     IfBlock,
-    branch_diff,
+    remap_entry_qubit_indices,
 )
 from tqec.compile.conditional.frame import ConditionId, PauliFrameTracker
 
@@ -21,5 +21,5 @@ __all__ = [
     "ConditionalCircuit",
     "IfBlock",
     "PauliFrameTracker",
-    "branch_diff",
+    "remap_entry_qubit_indices",
 ]

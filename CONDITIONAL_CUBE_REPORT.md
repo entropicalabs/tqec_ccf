@@ -2,7 +2,7 @@
 
 **Branch**: `ccf-compile` (tqec_ccf fork)
 **Base**: `b77ca994` (tip of upstream PR #829, `feat/conditional-cube`)
-**Commits added**: 21
+**Commits added**: 22
 **Final test state**: 670 pass, 8 skip, 2 xfail (upstream typo), 0 regressions
 
 ---
@@ -269,6 +269,16 @@ A `len(self._conditional_blocks) != 1` guard preserves the existing "at most one
 The byte-compare test in `tests/tools/test_resolve.py::test_resolve_matches_inplace_branch_compile` was tightly coupled to `branch_diff`'s detector ordering (shared detectors interleaved in radius-2 lookback order). The new single-pass path emits shared detectors *first* then divergent ones, which produces a semantically equivalent circuit with a different `DETECTOR` order. The test was relaxed to compare per-measurement-block detector multisets (`frozenset[str]` per block) while keeping the non-`DETECTOR` instructions byte-exact.
 
 Full suite: 680 pass, 0 regressions.
+
+### Co-compile Stage A commit 4c — Delete `branch_diff` and helpers
+
+**Files**: `compile/conditional/circuit.py`, `compile/conditional/__init__.py`, `tests/compile/conditional/test_circuit.py`.
+
+`branch_diff`, `_split_unequal_span`, `_PER_QUBIT_GATES`, `_check_per_qubit_span`, `_aggregate_by_name`, `_name_of_qubit_in`, `_instruction_key`, and `_instructions_equal` are removed from `compile/conditional/circuit.py` — all callers were retired by commit 4b. `remap_entry_qubit_indices` is re-exported through `compile.conditional` and added to `__all__` in place of `branch_diff`. The module docstring's `branch_diff` paragraph is replaced with a pointer to `remap_entry_qubit_indices`.
+
+Removed tests: `test_branch_diff_all_identical`, `test_branch_diff_one_differing_instruction`, `test_branch_diff_collapses_consecutive_differences`, `test_branch_diff_length_mismatch_creates_if_only_block` in `tests/compile/conditional/test_circuit.py`. Other tests (`ConditionalCircuit` text serialisation, `IfBlock` round-trip) stay.
+
+Net deletion: 262 lines from `compile/conditional/circuit.py` (from 443 to 181). Full suite: 676 pass, 0 regressions (-4 obsolete tests).
 
 ---
 
