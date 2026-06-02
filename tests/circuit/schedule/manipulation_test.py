@@ -173,18 +173,37 @@ def test_emit_moment_with_ceo_weaves_ifblock_for_divergent_branch() -> None:
         branch_merged_instructions=_moment_insts("RX 0 1"),
         condition_rec=-1,
     )
-    # R/RX are single-qubit gates -> two CEO slots (q0 and q1), each divergent.
-    assert len(entries) == 2
-    for entry, expected_qubit in zip(entries, [0, 1]):
-        assert isinstance(entry, IfBlock)
-        assert entry.condition_rec == -1
-        assert len(entry.then_body) == 1 and len(entry.else_body or []) == 1
-        then_inst = entry.then_body[0]
-        else_inst = (entry.else_body or [])[0]
-        assert then_inst.name == "RX"
-        assert else_inst.name == "R"
-        assert [t.value for t in then_inst.targets_copy()] == [expected_qubit]
-        assert [t.value for t in else_inst.targets_copy()] == [expected_qubit]
+    # R/RX are single-qubit gates -> two CEO slots (q0 and q1), each divergent
+    # with matching (name, args) signatures across the two slots -> batched
+    # into a single IfBlock with merged targets.
+    assert len(entries) == 1
+    entry = entries[0]
+    assert isinstance(entry, IfBlock)
+    assert entry.condition_rec == -1
+    assert len(entry.then_body) == 1 and len(entry.else_body or []) == 1
+    then_inst = entry.then_body[0]
+    else_inst = (entry.else_body or [])[0]
+    assert then_inst.name == "RX"
+    assert else_inst.name == "R"
+    assert [t.value for t in then_inst.targets_copy()] == [0, 1]
+    assert [t.value for t in else_inst.targets_copy()] == [0, 1]
+
+
+def test_emit_moment_with_ceo_does_not_batch_across_gate_signatures() -> None:
+    """Divergent slots with different per-branch (name, args) signatures stay
+    in separate IfBlocks; batching applies only to runs of same-signature slots."""
+    q0, q1 = GridQubit(0, 0), GridQubit(1, 0)
+    qubit_to_block = {q0: BlockPosition2D(0, 0), q1: BlockPosition2D(0, 0)}
+    global_i2q = {0: q0, 1: q1}
+    entries = _emit_moment_with_ceo(
+        _moment_insts("R 0\nH 1"),
+        qubit_to_block,
+        global_i2q,
+        branch_merged_instructions=_moment_insts("RX 0\nS 1"),
+        condition_rec=-1,
+    )
+    if_blocks = [e for e in entries if isinstance(e, IfBlock)]
+    assert len(if_blocks) == 2
 
 
 def test_emit_moment_with_ceo_branch_requires_condition_rec() -> None:

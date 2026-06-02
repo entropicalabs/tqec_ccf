@@ -278,12 +278,30 @@ def _emit_moment_with_ceo(
                 i += 1
             result.append(stim.CircuitInstruction(name, flat, list(args)))
         else:
-            zero_inst = stim.CircuitInstruction(
-                ceo_z[i][2], list(ceo_z[i][4]), list(ceo_z[i][3])
-            )
-            one_inst = stim.CircuitInstruction(
-                ceo_o[i][2], list(ceo_o[i][4]), list(ceo_o[i][3])
-            )
+            # Batch consecutive divergent slots sharing per-branch
+            # (name, args) signatures into a single IfBlock with merged
+            # targets. Common pattern: a basis-swap across an ancilla run
+            # (M/MX over qubits 4, 5, 6, ...) — CEO sorts these adjacently,
+            # so per-slot IF/ELSE wraps collapse to one IF/ELSE per run.
+            z_name = ceo_z[i][2]
+            z_args = ceo_z[i][3]
+            o_name = ceo_o[i][2]
+            o_args = ceo_o[i][3]
+            z_targets: list[stim.GateTarget] = []
+            o_targets: list[stim.GateTarget] = []
+            while (
+                i < len(ceo_z)
+                and _ceo_entry_signature(ceo_z[i]) != _ceo_entry_signature(ceo_o[i])
+                and ceo_z[i][2] == z_name
+                and ceo_z[i][3] == z_args
+                and ceo_o[i][2] == o_name
+                and ceo_o[i][3] == o_args
+            ):
+                z_targets.extend(ceo_z[i][4])
+                o_targets.extend(ceo_o[i][4])
+                i += 1
+            zero_inst = stim.CircuitInstruction(z_name, z_targets, list(z_args))
+            one_inst = stim.CircuitInstruction(o_name, o_targets, list(o_args))
             result.append(
                 IfBlock(
                     condition_rec=condition_rec,
@@ -291,7 +309,6 @@ def _emit_moment_with_ceo(
                     else_body=[zero_inst],
                 )
             )
-            i += 1
     return result
 
 
