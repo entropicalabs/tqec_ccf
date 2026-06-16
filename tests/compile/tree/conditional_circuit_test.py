@@ -35,13 +35,14 @@ def test_generate_conditional_circuit_returns_conditional_circuit_with_ifblocks(
     tree = cg.to_layer_tree()
     cc = tree.generate_conditional_circuit(
         k=1,
-        condition_recs={pos: -1 for pos in cg._conditional_blocks},
+        condition_recs={pos.z: [-1] for pos in cg._conditional_blocks},
+        min_z=0,
         do_not_use_database=True,
     )
     assert isinstance(cc, ConditionalCircuit)
     if_blocks = [e for e in cc.entries if isinstance(e, IfBlock)]
     assert if_blocks, "expected at least one IfBlock at top level"
-    assert all(ib.condition_rec == -1 for ib in if_blocks)
+    assert all(ib.condition_recs == [-1] for ib in if_blocks)
 
     # QUBIT_COORDS preamble present, only once per qubit.
     qubit_coord_indices: list[int] = []
@@ -61,7 +62,8 @@ def test_generate_conditional_circuit_emits_detector_ifblock() -> None:
     tree = cg.to_layer_tree()
     cc = tree.generate_conditional_circuit(
         k=1,
-        condition_recs={pos: -1 for pos in cg._conditional_blocks},
+        condition_recs={pos.z: [-1] for pos in cg._conditional_blocks},
+        min_z=0,
         do_not_use_database=True,
     )
     detector_ifblocks = [
@@ -85,7 +87,8 @@ def test_generate_conditional_circuit_text_renders_ifblock_syntax() -> None:
     tree = cg.to_layer_tree()
     cc = tree.generate_conditional_circuit(
         k=1,
-        condition_recs={pos: -1 for pos in cg._conditional_blocks},
+        condition_recs={pos.z: [-1] for pos in cg._conditional_blocks},
+        min_z=0,
         do_not_use_database=True,
     )
     text = cc.to_stim_text()

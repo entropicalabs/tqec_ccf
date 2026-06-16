@@ -34,10 +34,8 @@ def _single_conditional_graph(pair_name: str) -> BlockGraph:
 def test_single_conditional_cube_emits_if_else_block() -> None:
     g = _single_conditional_graph("XZX_XZZ")
     cg = compile_block_graph(g, FIXED_BULK_CONVENTION, observables=None)
-    text = cg.generate_conditional_stim_text(
-        k=1, condition_recs={pos: -1 for pos in cg._conditional_blocks}
-    )
-    assert "IF(rec[-1]) {" in text
+    text = cg.generate_conditional_stim_text(k=1)
+    assert "IF(rec[" in text
     assert "} ELSE {" in text
     # The IF/ELSE wraps the conditional measurement layer, where one branch
     # emits a single combined MX run and the other emits the CEO-interleaved
@@ -53,15 +51,17 @@ def test_no_conditional_block_passthrough() -> None:
     g = BlockGraph("Memory")
     g.add_cube(Position3D(0, 0, 0), ZXCube.XZX)
     cg = compile_block_graph(g, FIXED_BULK_CONVENTION, observables=None)
-    text_cond = cg.generate_conditional_stim_text(k=1, condition_recs={})
+    text_cond = cg.generate_conditional_stim_text(k=1)
     circuit = cg.generate_stim_circuit(k=1)
     assert text_cond == str(circuit)
 
 
-def test_multi_conditional_raises_not_implemented() -> None:
+def test_multi_conditional_same_z_layer_raises() -> None:
     import pytest
 
-    g = BlockGraph("MultiCondTest")
+    from tqec.utils.exceptions import TQECError
+
+    g = BlockGraph("MultiCondSameZTest")
     init0 = Position3D(0, 0, 0)
     cond0 = Position3D(0, 0, 1)
     init1 = Position3D(2, 0, 0)
@@ -74,7 +74,5 @@ def test_multi_conditional_raises_not_implemented() -> None:
     g.add_cube(cond1, ConditionalLeafCubeKind.XZX_XZZ, condition=_condition())
     g.add_pipe(init1, cond1)
     cg = compile_block_graph(g, FIXED_BULK_CONVENTION, observables=None)
-    with pytest.raises(NotImplementedError, match="[Mm]ulti-conditional"):
-        cg.generate_conditional_stim_text(
-            k=1, condition_recs={pos: -1 for pos in cg._conditional_blocks}
-        )
+    with pytest.raises(TQECError, match="z=1"):
+        cg.generate_conditional_stim_text(k=1)

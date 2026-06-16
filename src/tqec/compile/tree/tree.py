@@ -116,13 +116,15 @@ class LayerTree:
         self,
         k: int,
         reschedule_measurements: bool = True,
-        condition_rec: int | None = None,
+        condition_recs: dict[int, list[int]] | None = None,
+        min_z: int = 0,
     ) -> None:
         self._root.walk(
             AnnotateCircuitOnLayerNode(
                 k,
                 reschedule_measurements=reschedule_measurements,
-                condition_rec=condition_rec,
+                condition_recs=condition_recs,
+                min_z=min_z,
             )
         )
 
@@ -147,7 +149,8 @@ class LayerTree:
         only_use_database: bool = False,
         lookback: int = 2,
         parallel_process_count: int = 1,
-        condition_rec: int | None = None,
+        condition_recs: dict[int, list[int]] | None = None,
+        min_z: int = 0,
     ) -> None:
         if manhattan_radius <= 0:
             return  # pragma: no cover
@@ -159,7 +162,8 @@ class LayerTree:
                 only_use_database,
                 lookback,
                 parallel_process_count,
-                condition_rec=condition_rec,
+                condition_recs=condition_recs,
+                min_z=min_z,
             )
         )
         # The database will have been updated inside the above function, and here at
@@ -262,7 +266,8 @@ class LayerTree:
         lookback: int = 2,
         parallel_process_count: int = 1,
         reschedule_measurements: bool = True,
-        condition_rec: int | None = None,
+        condition_recs: dict[int, list[int]] | None = None,
+        min_z: int = 0,
     ) -> None:
         """Annotate the tree with circuits, qubit maps, detectors and observables."""
         # If already annotated, no need to re-annotate.
@@ -272,7 +277,8 @@ class LayerTree:
         self._annotate_circuits(
             k,
             reschedule_measurements=reschedule_measurements,
-            condition_rec=condition_rec,
+            condition_recs=condition_recs,
+            min_z=min_z,
         )
         self._annotate_qubit_map(k)
         # This method will also update the detector_database and save it to disk at database_path.
@@ -284,7 +290,8 @@ class LayerTree:
             only_use_database,
             lookback,
             parallel_process_count,
-            condition_rec=condition_rec,
+            condition_recs=condition_recs,
+            min_z=min_z,
         )
         self._annotate_observables(k)
 
@@ -414,7 +421,8 @@ class LayerTree:
     def generate_conditional_circuit(
         self,
         k: int,
-        condition_recs: dict["LayoutPosition3D", int],
+        condition_recs: dict[int, list[int]],
+        min_z: int = 0,
         include_qubit_coords: bool = True,
         manhattan_radius: int = 2,
         detector_database: DetectorDatabase | None = None,
@@ -433,12 +441,16 @@ class LayerTree:
 
         Args:
             k: scaling factor.
-            condition_recs: mapping from each conditional cube's
-                :class:`LayoutPosition3D` to the negative ``stim`` ``rec``
-                offset of the measurement that selects its true branch. For
-                Stage A only a single entry is supported; multi-conditional
-                emission lands once the emitter dispatches the condition_rec
-                per CEO slot.
+            condition_recs: mapping from each conditional cube's z-layer
+                (``LayoutPosition3D.z``) to the list of negative ``stim``
+                ``rec`` offsets whose XOR selects its true branch. At most
+                one conditional cube per z-layer is supported; the caller
+                (:meth:`TopologicalComputationGraph.generate_conditional_stim_text`)
+                enforces that and re-keys the resolver's
+                ``dict[LayoutPosition3D, list[int]]`` to ``dict[int, list[int]]``.
+            min_z: minimum z-coordinate present in the underlying
+                :class:`BlockGraph`. Used by the per-leaf annotators to
+                map their walk position back to a z-layer key.
             include_qubit_coords: whether to prepend ``QUBIT_COORDS``
                 annotations.
             manhattan_radius, detector_database, database_path,
@@ -449,15 +461,8 @@ class LayerTree:
             A :class:`ConditionalCircuit` representing the full computation.
 
         """
-        if len(condition_recs) != 1:
-            raise NotImplementedError(
-                "LayerTree.generate_conditional_circuit currently supports a "
-                f"single conditional cube; got {len(condition_recs)}. "
-                "Multi-conditional emission is a follow-up."
-            )
-        condition_rec = next(iter(condition_recs.values()))
         # Reuse the database-resolution prelude from generate_circuit by
-        # delegating through _generate_annotations + condition_rec.
+        # delegating through _generate_annotations + condition_recs.
         db_path_input = DEFAULT_DETECTOR_DATABASE_PATH
         if not do_not_use_database:
             if isinstance(database_path, str):
@@ -509,7 +514,8 @@ class LayerTree:
             lookback=lookback,
             parallel_process_count=parallel_process_count,
             reschedule_measurements=reschedule_measurements,
-            condition_rec=condition_rec,
+            condition_recs=condition_recs,
+            min_z=min_z,
         )
         annotations = self._get_annotation(k)
         assert annotations.qubit_map is not None

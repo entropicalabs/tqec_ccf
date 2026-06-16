@@ -1,5 +1,5 @@
 """Stage 3c: AnnotateCircuitOnLayerNode propagates ConditionalCircuit when
-``condition_rec`` is supplied and the leaf carries a non-empty
+``condition_recs`` is supplied and the leaf carries a non-empty
 ``conditional_layers`` map.
 """
 
@@ -41,9 +41,9 @@ class _CollectLayoutNodes(NodeWalker):
             self.nodes.append(node)
 
 
-def test_annotator_skips_conditional_when_condition_rec_missing() -> None:
+def test_annotator_skips_conditional_when_condition_recs_missing() -> None:
     tree = _build_conditional_tree()
-    walker = AnnotateCircuitOnLayerNode(k=1, condition_rec=None)
+    walker = AnnotateCircuitOnLayerNode(k=1, condition_recs=None)
     tree._root.walk(walker)
     collector = _CollectLayoutNodes()
     tree._root.walk(collector)
@@ -53,9 +53,9 @@ def test_annotator_skips_conditional_when_condition_rec_missing() -> None:
         assert annotations.conditional_circuit is None
 
 
-def test_annotator_populates_conditional_circuit_when_condition_rec_given() -> None:
+def test_annotator_populates_conditional_circuit_when_condition_recs_given() -> None:
     tree = _build_conditional_tree()
-    walker = AnnotateCircuitOnLayerNode(k=1, condition_rec=-7)
+    walker = AnnotateCircuitOnLayerNode(k=1, condition_recs={1: [-7]}, min_z=0)
     tree._root.walk(walker)
 
     collector = _CollectLayoutNodes()

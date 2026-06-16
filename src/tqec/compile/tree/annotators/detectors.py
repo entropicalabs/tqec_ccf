@@ -221,7 +221,8 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
         only_use_database: bool = False,
         lookback: int = 2,
         parallel_process_count: int = 1,
-        condition_rec: int | None = None,
+        condition_recs: dict[int, list[int]] | None = None,
+        min_z: int = 0,
     ):
         """Walker computing and annotating detectors on leaf nodes.
 
@@ -265,7 +266,10 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
         self._lookback_size = lookback
         self._lookback_stack = LookbackStack()
         self._parallel_process_count = parallel_process_count
-        self._condition_rec = condition_rec
+        self._condition_recs = condition_recs
+        self._min_z = min_z
+        self._depth = 0
+        self._z_index = -1
 
     @override
     def visit_node(self, node: LayerNode) -> None:
@@ -277,9 +281,12 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
 
         template_zero, plaquettes_zero = node._layer.to_template_and_plaquettes()
         plaquettes_one_for_round: Plaquettes | None = None
-        leaf_is_conditional = (
-            self._condition_rec is not None and bool(node._layer.conditional_layers)
-        )
+        active_condition_recs: list[int] | None = None
+        if self._condition_recs is not None and node._layer.conditional_layers:
+            active_condition_recs = self._condition_recs.get(
+                self._min_z + self._z_index
+            )
+        leaf_is_conditional = active_condition_recs is not None
         if leaf_is_conditional:
             template_one, plaquettes_one_for_round = (
                 node._layer._compute_template_and_plaquettes(
@@ -348,7 +355,7 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
                 )
         # Coarse single-IfBlock-per-leaf: zero-only -> else, one-only -> then.
         if zero_only or one_only:
-            assert self._condition_rec is not None
+            assert active_condition_recs is not None
             then_body = [
                 DetectorAnnotation.from_detector(d, measurement_records_pb).to_instruction()
                 for d in one_only
@@ -361,7 +368,7 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
                 annotations.conditional_detectors = []
             annotations.conditional_detectors.append(
                 IfBlock(
-                    condition_rec=self._condition_rec,
+                    condition_recs=list(active_condition_recs),
                     then_body=then_body,
                     else_body=else_body if else_body else None,
                 )
@@ -369,11 +376,15 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
 
     @override
     def enter_node(self, node: LayerNode) -> None:
+        self._depth += 1
+        if self._depth == 2:
+            self._z_index += 1
         if node.is_repeated:
             self._lookback_stack.enter_repeat_block()
 
     @override
     def exit_node(self, node: LayerNode) -> None:
+        self._depth -= 1
         if not node.is_repeated:
             return
         # Note: this is the place to perform checks. In particular, checking that

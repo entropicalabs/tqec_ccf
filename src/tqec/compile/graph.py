@@ -113,6 +113,8 @@ class TopologicalComputationGraph:
         scalable_qubit_shape: PhysicalQubitScalable2D,
         observable_builder: ObservableBuilder,
         observables: list[AbstractObservable] | None = None,
+        conditional_observables: dict[LayoutPosition3D, AbstractObservable]
+        | None = None,
     ) -> None:
         """Represent a topological computation with :class:`.Block` instances."""
         self._blocks: dict[LayoutPosition3D, Block] = {}
@@ -130,6 +132,12 @@ class TopologicalComputationGraph:
         # branches and the CorrelationSurface condition after the block has
         # been merged into a layout layer.
         self._conditional_blocks: dict[LayoutPosition3D, ConditionalBlock] = {}
+        # Pre-compiled per-conditional-cube AbstractObservable, computed
+        # by compile_block_graph (where BlockGraph context exists). The
+        # resolver reads from here without needing the BlockGraph.
+        self._conditional_observables: dict[
+            LayoutPosition3D, AbstractObservable
+        ] = dict(conditional_observables) if conditional_observables else {}
 
     def add_cube(self, position: BlockPosition3D, block: Block) -> None:
         """Add a new cube at ``position`` implemented by the provided ``block``."""
@@ -562,7 +570,6 @@ class TopologicalComputationGraph:
     def generate_conditional_stim_text(
         self,
         k: int,
-        condition_recs: dict[LayoutPosition3D, int],
         manhattan_radius: int = 2,
         detector_database: DetectorDatabase | None = None,
         database_path: str | Path = DEFAULT_DETECTOR_DATABASE_PATH,
@@ -572,15 +579,19 @@ class TopologicalComputationGraph:
     ) -> str:
         """Compile a graph with conditional cubes into IF/ELSE-annotated Stim text.
 
-        ``condition_recs`` maps each conditional cube's :class:`LayoutPosition3D`
-        to the negative ``stim`` ``rec`` offset of the measurement whose outcome
-        selects its true branch. Until the Pauli frame tracker starts driving
-        emission, the caller supplies these manually.
+        Each conditional cube's :class:`CorrelationSurface` ``condition``
+        (attached at :class:`Cube` construction time, see
+        :attr:`Cube.condition`) drives the IF/ELSE branch selection. The
+        surfaces are pre-compiled into :class:`AbstractObservable` at
+        :func:`compile_block_graph` time and stashed on
+        ``self._conditional_observables``; the resolver reads from there.
 
         Single-pass implementation: delegates to
         :meth:`LayerTree.generate_conditional_circuit`. The non-conditional
         path falls through to :meth:`generate_stim_circuit`.
         """
+        from tqec.compile.conditional.condition_recs import resolve_condition_recs
+
         if not self._conditional_blocks:
             circuit = self.generate_stim_circuit(
                 k,
@@ -592,24 +603,52 @@ class TopologicalComputationGraph:
                 reschedule_measurements=reschedule_measurements,
             )
             return str(circuit)
-        missing = set(self._conditional_blocks) - set(condition_recs)
-        extra = set(condition_recs) - set(self._conditional_blocks)
+        missing = set(self._conditional_blocks) - set(self._conditional_observables)
+        extra = set(self._conditional_observables) - set(self._conditional_blocks)
         if missing or extra:
             raise TQECError(
-                "generate_conditional_stim_text: condition_recs keys must match "
-                f"the graph's conditional cubes. Missing: {sorted(missing)}. "
-                f"Extra: {sorted(extra)}."
+                "generate_conditional_stim_text: pre-compiled "
+                "conditional_observables do not match the graph's conditional "
+                f"cubes. Missing: {sorted(missing)}. Extra: {sorted(extra)}. "
+                "compile_block_graph normally populates this dict; check that "
+                "every conditional cube was constructed with a condition= "
+                "surface."
             )
-        if len(condition_recs) != 1:
-            raise NotImplementedError(
-                "Multi-conditional emission is not yet supported. "
-                f"Got {len(condition_recs)} conditional cubes; the single-pass "
-                "emitter currently threads only one condition_rec per moment. "
-                "Per-cube CEO slot dispatch lands in a follow-up commit."
+        by_z: dict[int, list[LayoutPosition3D]] = {}
+        for pos in self._conditional_blocks:
+            by_z.setdefault(pos.z, []).append(pos)
+        clashes = {z: poss for z, poss in by_z.items() if len(poss) > 1}
+        if clashes:
+            details = "; ".join(
+                f"z={z}: " + ", ".join(repr(p) for p in poss)
+                for z, poss in sorted(clashes.items())
             )
-        cc = self.to_layer_tree().generate_conditional_circuit(
+            raise TQECError(
+                "Multi-conditional emission requires at most one conditional "
+                "cube per z-layer, but the following z-layers contain more "
+                f"than one conditional cube: {details}. Place each conditional "
+                "cube on a distinct z-layer (e.g. by adding a temporal pipe "
+                "to a non-conditional cube on the offending layer)."
+            )
+        layer_tree = self.to_layer_tree()
+        # Pre-annotate circuits so resolver can read MeasurementRecordsMap.
+        layer_tree._annotate_circuits(
+            k, reschedule_measurements=reschedule_measurements
+        )
+        resolved_condition_recs = resolve_condition_recs(
+            layer_tree,
             k,
-            condition_recs=condition_recs,
+            self._conditional_observables,
+            self._observable_builder,
+        )
+        condition_recs_by_z: dict[int, list[int]] = {
+            pos.z: recs for pos, recs in resolved_condition_recs.items()
+        }
+        min_z = min(pos.z for pos in self._blocks.keys())
+        cc = layer_tree.generate_conditional_circuit(
+            k,
+            condition_recs=condition_recs_by_z,
+            min_z=min_z,
             manhattan_radius=manhattan_radius,
             detector_database=detector_database,
             database_path=database_path,
