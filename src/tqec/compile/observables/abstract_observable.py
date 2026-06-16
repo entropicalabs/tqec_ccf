@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from collections import Counter
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -218,8 +219,16 @@ def compile_correlation_surface_to_abstract_observable(
         # single memory experiment
         return AbstractObservable(top_readout_cubes=frozenset([cube_with_arms]))
 
-    pg = block_graph.to_zx_graph()
-    _check_correlation_surface_validity(correlation_surface, pg)
+    if any(cube.is_conditional for cube in block_graph.cubes):
+        warnings.warn(
+            "BlockGraph contains conditional cubes; skipping correlation-surface "
+            "validity check (pyzx ZX conversion does not support "
+            "ConditionalLeafCubeKind).",
+            stacklevel=2,
+        )
+    else:
+        pg = block_graph.to_zx_graph()
+        _check_correlation_surface_validity(correlation_surface, pg)
 
     endpoints_to_edge: dict[frozenset[Position3D], list[ZXEdge]] = {}
     for edge in correlation_surface.span:
