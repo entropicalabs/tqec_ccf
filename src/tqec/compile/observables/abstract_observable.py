@@ -162,6 +162,7 @@ def compile_correlation_surface_to_abstract_observable(
     block_graph: BlockGraph,
     correlation_surface: CorrelationSurface,
     include_temporal_hadamard_pipes: bool = False,
+    _skip_validation: bool = False,
 ) -> AbstractObservable:
     """Compile a ``CorrelationSurface`` into an ``AbstractObservable`` in the block graph.
 
@@ -243,7 +244,9 @@ def compile_correlation_surface_to_abstract_observable(
         # single memory experiment
         return AbstractObservable(top_readout_cubes=frozenset([cube_with_arms]))
 
-    if any(cube.is_conditional for cube in block_graph.cubes):
+    if _skip_validation:
+        pass
+    elif any(cube.is_conditional for cube in block_graph.cubes):
         warnings.warn(
             "BlockGraph contains conditional cubes; skipping correlation-surface "
             "validity check (pyzx ZX conversion does not support "

@@ -91,6 +91,92 @@ def test_conditional_observable_emits_per_branch_observable_include() -> None:
     assert "OBSERVABLE_INCLUDE(0)" in then_body or "OBSERVABLE_INCLUDE(0)" in else_body
 
 
+def _build_multi_cube_graph() -> tuple[BlockGraph, ConditionalCorrelationSurface]:
+    a0 = Position3D(0, 0, 0)
+    a1 = Position3D(0, 0, 1)
+    b0 = Position3D(2, 0, 0)
+    b1 = Position3D(2, 0, 1)
+    b2 = Position3D(2, 0, 2)
+    b3 = Position3D(2, 0, 3)
+
+    init_kind = ConditionalLeafCubeKind.ZXX_ZXZ.value[0]
+    g = BlockGraph("multi_cond_obs")
+    g.add_cube(a0, init_kind)
+    g.add_cube(
+        a1,
+        ConditionalLeafCubeKind.ZXX_ZXZ,
+        condition=CorrelationSurface(
+            span=frozenset({ZXEdge(u=ZXNode(a0, Basis.Z), v=ZXNode(a0, Basis.Z))})
+        ),
+    )
+    g.add_pipe(a0, a1)
+    g.add_cube(b0, init_kind)
+    g.add_cube(b1, init_kind)
+    g.add_cube(b2, init_kind)
+    g.add_cube(
+        b3,
+        ConditionalLeafCubeKind.ZXX_ZXZ,
+        condition=CorrelationSurface(
+            span=frozenset({ZXEdge(u=ZXNode(b2, Basis.Z), v=ZXNode(b2, Basis.Z))})
+        ),
+    )
+    g.add_pipe(b0, b1)
+    g.add_pipe(b1, b2)
+    g.add_pipe(b2, b3)
+
+    span = frozenset(
+        {
+            ZXEdge(u=ZXNode(a0, Basis.X), v=ZXNode(a1, Basis.X)),
+            ZXEdge(u=ZXNode(b0, Basis.X), v=ZXNode(b1, Basis.X)),
+            ZXEdge(u=ZXNode(b1, Basis.X), v=ZXNode(b2, Basis.X)),
+            ZXEdge(u=ZXNode(b2, Basis.X), v=ZXNode(b3, Basis.X)),
+        }
+    )
+    cond_obs = ConditionalCorrelationSurface(
+        branch_zero=CorrelationSurface(span=span),
+        branch_one=CorrelationSurface(span=span),
+        conditional_cube_positions=(a1, b3),
+    )
+    return g, cond_obs
+
+
+def test_multi_conditional_observable_emits_two_ifblocks() -> None:
+    g, cond_obs = _build_multi_cube_graph()
+    cg = compile_block_graph(g, FIXED_BULK_CONVENTION, observables=[cond_obs])
+    text = cg.generate_conditional_stim_text(k=1)
+    if_blocks = re.findall(r"IF\(.*?\}(?:\s*ELSE\s*\{.*?\})?", text, re.DOTALL)
+    obs_blocks = [b for b in if_blocks if "OBSERVABLE_INCLUDE(0)" in b]
+    assert len(obs_blocks) == 2, f"expected 2 OBSERVABLE_INCLUDE IfBlocks, got {len(obs_blocks)}"
+
+
+def test_multi_conditional_observable_blocks_live_in_distinct_z_layers() -> None:
+    g, cond_obs = _build_multi_cube_graph()
+    cg = compile_block_graph(g, FIXED_BULK_CONVENTION, observables=[cond_obs])
+    text = cg.generate_conditional_stim_text(k=1)
+    lines = text.splitlines()
+    z_index = 0
+    obs_if_zs: list[int] = []
+    in_block_with_obs = False
+    block_z = -1
+    for line in lines:
+        if line.startswith("SHIFT_COORDS"):
+            z_index += 1
+        if line.startswith("IF("):
+            in_block_with_obs = False
+            block_z = z_index
+        if "OBSERVABLE_INCLUDE(0)" in line:
+            in_block_with_obs = True
+        if line == "}":
+            if in_block_with_obs:
+                obs_if_zs.append(block_z)
+            in_block_with_obs = False
+    # Allow duplicate z entries if two paired IF{}/ELSE{} blocks share a SHIFT
+    # frame, but expect at least two distinct z indices total.
+    assert len(set(obs_if_zs)) >= 2, (
+        f"observable IfBlocks should span >=2 z-layers, got {obs_if_zs}"
+    )
+
+
 def test_conditional_observable_diverges_per_branch_qubits() -> None:
     g, cond_obs = _build_graph()
     cg = compile_block_graph(g, FIXED_BULK_CONVENTION, observables=[cond_obs])

@@ -85,17 +85,14 @@ def annotate_conditional_observable(
 ) -> None:
     """Annotate a branch-aware logical observable on the tree.
 
-    For each leaf at ``z <= cube_z``, both branch surfaces are lowered to qubit
-    sets via :class:`ObservableBuilder`. Shared qubits emit a plain
-    ``OBSERVABLE_INCLUDE`` on that leaf's trunk. Divergent qubits' measurement
-    records are shifted into the IfBlock emission frame (the conditional
-    cube's last leaf at z=cube_z) and bundled into a single per-branch
-    ``OBSERVABLE_INCLUDE`` instruction, then wrapped in an
-    :class:`IfBlock` gated by the cube's ``condition_recs`` and emitted on
-    the cube's last leaf.
-
-    Currently only a single conditional cube per observable is supported;
-    multi-cube ConditionalCorrelationSurface is reserved for a follow-up.
+    Each conditional cube in ``conditional_cube_positions`` owns the leaves
+    at z-layers in ``(prev_cube_z, this_cube_z]`` (after sorting by z).
+    Shared per-leaf qubits emit as plain ``OBSERVABLE_INCLUDE`` on the trunk.
+    Divergent qubits' rec offsets are shifted into the owning cube's IfBlock
+    frame and bundled into one per-branch ``OBSERVABLE_INCLUDE`` instruction
+    inside an :class:`IfBlock` gated by that cube's ``condition_recs``.
+    All IfBlocks reuse the same ``observable_index`` — Stim XORs them into
+    a single logical observable.
     """
     import stim  # local: avoid module-level dep when unused
 
@@ -104,51 +101,84 @@ def annotate_conditional_observable(
         _compute_tail_shifts,
     )
 
-    if len(cond_observable.conditional_cube_positions) != 1:
-        raise NotImplementedError(
-            "ConditionalCorrelationSurface with multiple "
-            "conditional_cube_positions is not yet supported. Use exactly one "
-            "cube position; multi-cube emission is a follow-up."
-        )
-    cube_pos = cond_observable.conditional_cube_positions[0]
-    cube_z = cube_pos.z
-    cube_z_idx = cube_z - min_z
-    if cube_z_idx < 0 or cube_z_idx >= len(root.children):
+    if not cond_observable.conditional_cube_positions:
         raise TQECError(
-            f"ConditionalCorrelationSurface names a conditional cube at "
-            f"z={cube_z} that does not correspond to any z-layer in the "
-            f"tree (min_z={min_z}, layers={len(root.children)})."
+            "ConditionalAbstractObservable has no conditional_cube_positions."
         )
-    recs = condition_recs_by_z.get(cube_z)
-    if recs is None:
-        raise TQECError(
-            f"ConditionalCorrelationSurface references a conditional cube at "
-            f"z={cube_z} but no resolved condition_recs were produced for "
-            "that z-layer. Ensure the named cube is actually conditional."
-        )
+    cube_z_indices = sorted(p.z - min_z for p in cond_observable.conditional_cube_positions)
+    n_layers = len(root.children)
+    for z_idx in cube_z_indices:
+        if z_idx < 0 or z_idx >= n_layers:
+            raise TQECError(
+                f"ConditionalCorrelationSurface names a conditional cube at "
+                f"z={min_z + z_idx} that does not correspond to any z-layer "
+                f"in the tree (min_z={min_z}, layers={n_layers})."
+            )
+    recs_per_cube: list[list[int]] = []
+    for z_idx in cube_z_indices:
+        z_actual = min_z + z_idx
+        recs = condition_recs_by_z.get(z_actual)
+        if recs is None:
+            raise TQECError(
+                f"ConditionalCorrelationSurface references a conditional cube at "
+                f"z={z_actual} but no resolved condition_recs were produced for "
+                "that z-layer. Ensure the named cube is actually conditional."
+            )
+        recs_per_cube.append(list(recs))
 
-    # Walk leaves at z <= cube_z. _collect_pre_cond_entries takes a strict
-    # upper bound, so pass cube_z_idx + 1.
-    entries, subtree_leaves = _collect_pre_cond_entries(
-        root, k, cube_z_idx + 1
-    )
-    tail_shifts = _compute_tail_shifts(entries)
+    max_idx = cube_z_indices[-1]
+    entries, subtree_leaves = _collect_pre_cond_entries(root, k, max_idx + 1)
+    tail_shifts_max = _compute_tail_shifts(entries)
     entry_by_leaf_id = {id(e.leaf): (e, i) for i, e in enumerate(entries)}
 
-    div_zero_recs: list[int] = []
-    div_one_recs: list[int] = []
+    # For each cube, find the index of its last entry (in `entries`) and the
+    # count of measurements that happen AFTER that point up to the end of
+    # the walk. Subtracting that from tail_shifts_max translates rec offsets
+    # from the max-cube frame to this cube's IfBlock frame.
+    end_entry_idx_per_cube: list[int] = []
+    j = 0
+    for cube_z_idx in cube_z_indices:
+        while j < len(entries) and entries[j].z <= cube_z_idx:
+            j += 1
+        end_entry_idx_per_cube.append(j - 1)
+    tail_beyond_per_cube: list[int] = []
+    total_after = 0
+    running_total = sum(e.num_measurements for e in entries)
+    cumulative_through: list[int] = []
+    cum = 0
+    for e in entries:
+        cum += e.num_measurements
+        cumulative_through.append(cum)
+    for end_idx in end_entry_idx_per_cube:
+        through = cumulative_through[end_idx] if end_idx >= 0 else 0
+        tail_beyond_per_cube.append(running_total - through)
+    del total_after  # not used
 
-    def _collect_recs(leaf: LayerNode, qubits: set, target: list[int]) -> None:
+    # owner_for_z_idx[z_idx] = cube index that owns this z-layer
+    owner_for_z_idx: list[int] = [0] * (max_idx + 1)
+    c = 0
+    for z_idx in range(max_idx + 1):
+        while cube_z_indices[c] < z_idx:
+            c += 1
+        owner_for_z_idx[z_idx] = c
+
+    div_zero_per_cube: list[list[int]] = [[] for _ in cube_z_indices]
+    div_one_per_cube: list[list[int]] = [[] for _ in cube_z_indices]
+
+    def _collect_recs(leaf: LayerNode, qubits: set, target: list[int], cube_idx: int) -> None:
         entry, idx = entry_by_leaf_id[id(leaf)]
-        shift = tail_shifts[idx]
+        shift = tail_shifts_max[idx] - tail_beyond_per_cube[cube_idx]
         for q in qubits:
             if q not in entry.records:
                 continue
             local = entry.records[q][-1]
             target.append(local - shift)
 
-    def _anchor_actions(leaves: list[LayerNode], slice_zero: AbstractObservable,
-                        slice_one: AbstractObservable) -> list[tuple[LayerNode, ObservableComponent]]:
+    def _anchor_actions(
+        leaves: list[LayerNode],
+        slice_zero: AbstractObservable,
+        slice_one: AbstractObservable,
+    ) -> list[tuple[LayerNode, ObservableComponent]]:
         actions: list[tuple[LayerNode, ObservableComponent]] = [
             (leaves[0], ObservableComponent.BOTTOM_STABILIZERS)
         ]
@@ -160,6 +190,7 @@ def annotate_conditional_observable(
         return actions
 
     for z_idx, leaves in enumerate(subtree_leaves):
+        cube_owner = owner_for_z_idx[z_idx]
         slice_zero = cond_observable.branch_zero.slice_at_z(z_idx)
         slice_one = cond_observable.branch_one.slice_at_z(z_idx)
         for anchor_leaf, component in _anchor_actions(leaves, slice_zero, slice_one):
@@ -179,41 +210,43 @@ def annotate_conditional_observable(
                         shared, meas, observable_index
                     )
                 )
-            _collect_recs(anchor_leaf, div_zero, div_zero_recs)
-            _collect_recs(anchor_leaf, div_one, div_one_recs)
+            _collect_recs(anchor_leaf, div_zero, div_zero_per_cube[cube_owner], cube_owner)
+            _collect_recs(anchor_leaf, div_one, div_one_per_cube[cube_owner], cube_owner)
 
-    if not (div_zero_recs or div_one_recs):
-        return
-
-    cube_leaf = subtree_leaves[cube_z_idx][-1]
-    then_body: list = []
-    else_body: list = []
-    if div_one_recs:
-        then_body.append(
-            stim.CircuitInstruction(
-                "OBSERVABLE_INCLUDE",
-                [stim.target_rec(o) for o in sorted(div_one_recs)],
-                [observable_index],
+    for c, cube_z_idx in enumerate(cube_z_indices):
+        d0 = div_zero_per_cube[c]
+        d1 = div_one_per_cube[c]
+        if not (d0 or d1):
+            continue
+        cube_leaf = subtree_leaves[cube_z_idx][-1]
+        then_body: list = []
+        else_body: list = []
+        if d1:
+            then_body.append(
+                stim.CircuitInstruction(
+                    "OBSERVABLE_INCLUDE",
+                    [stim.target_rec(o) for o in sorted(d1)],
+                    [observable_index],
+                )
+            )
+        if d0:
+            else_body.append(
+                stim.CircuitInstruction(
+                    "OBSERVABLE_INCLUDE",
+                    [stim.target_rec(o) for o in sorted(d0)],
+                    [observable_index],
+                )
+            )
+        annotations = cube_leaf.get_annotations(k)
+        if annotations.conditional_observables is None:
+            annotations.conditional_observables = []
+        annotations.conditional_observables.append(
+            IfBlock(
+                condition_recs=recs_per_cube[c],
+                then_body=then_body,
+                else_body=else_body if else_body else None,
             )
         )
-    if div_zero_recs:
-        else_body.append(
-            stim.CircuitInstruction(
-                "OBSERVABLE_INCLUDE",
-                [stim.target_rec(o) for o in sorted(div_zero_recs)],
-                [observable_index],
-            )
-        )
-    annotations = cube_leaf.get_annotations(k)
-    if annotations.conditional_observables is None:
-        annotations.conditional_observables = []
-    annotations.conditional_observables.append(
-        IfBlock(
-            condition_recs=list(recs),
-            then_body=then_body,
-            else_body=else_body if else_body else None,
-        )
-    )
 
 
 def _annotate_observable_at_node(

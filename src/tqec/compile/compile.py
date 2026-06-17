@@ -191,10 +191,16 @@ def compile_block_graph(
                 cond_obs_included.append(
                     ConditionalAbstractObservable(
                         branch_zero=compile_correlation_surface_to_abstract_observable(
-                            bg_branch_zero, surface.branch_zero, include_temporal_hadamard_pipes
+                            bg_branch_zero,
+                            surface.branch_zero,
+                            include_temporal_hadamard_pipes,
+                            _skip_validation=True,
                         ),
                         branch_one=compile_correlation_surface_to_abstract_observable(
-                            bg_branch_one, surface.branch_one, include_temporal_hadamard_pipes
+                            bg_branch_one,
+                            surface.branch_one,
+                            include_temporal_hadamard_pipes,
+                            _skip_validation=True,
                         ),
                         conditional_cube_positions=surface.conditional_cube_positions,
                     )
