@@ -90,6 +90,46 @@ class ZXEdge(NamedTuple):
 
 
 @dataclass(frozen=True)
+class ConditionalCorrelationSurface:
+    """A branch-aware observable: one CorrelationSurface per branch of a conditional cube.
+
+    Attributes:
+        branch_zero: surface active when the conditional cube resolves to its
+            first (lowercase) branch.
+        branch_one: surface active when the conditional cube resolves to its
+            second branch.
+        conditional_cube_positions: positions of the conditional cubes whose
+            IF/ELSE blocks gate this observable's per-branch
+            ``OBSERVABLE_INCLUDE`` emission. Each named cube must sit on a
+            distinct z-layer (enforced by the multi-conditional compile path).
+
+    """
+
+    branch_zero: "CorrelationSurface"
+    branch_one: "CorrelationSurface"
+    conditional_cube_positions: tuple[Position3D, ...]
+
+    def __post_init__(self) -> None:
+        if not self.conditional_cube_positions:
+            raise TQECError(
+                "ConditionalCorrelationSurface requires at least one conditional "
+                "cube position to gate the IF/ELSE emission."
+            )
+
+    def shift_by(
+        self, dx: int = 0, dy: int = 0, dz: int = 0
+    ) -> "ConditionalCorrelationSurface":
+        return ConditionalCorrelationSurface(
+            branch_zero=self.branch_zero.shift_by(dx=dx, dy=dy, dz=dz),
+            branch_one=self.branch_one.shift_by(dx=dx, dy=dy, dz=dz),
+            conditional_cube_positions=tuple(
+                Position3D(p.x + dx, p.y + dy, p.z + dz)
+                for p in self.conditional_cube_positions
+            ),
+        )
+
+
+@dataclass(frozen=True)
 class CorrelationSurface:
     """Represent a set of measurements whose values determine the parity of the logical operators.
 

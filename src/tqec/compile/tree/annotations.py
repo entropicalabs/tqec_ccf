@@ -92,6 +92,13 @@ class LayerNodeAnnotations:
     divergent detectors land here as :class:`IfBlock` entries with branch-one
     detectors in ``then_body`` and branch-zero detectors in ``else_body``.
     """
+    conditional_observables: list[IfBlock] | None = None
+    """Per-branch-divergent ``OBSERVABLE_INCLUDE`` annotations. Same indexing
+    convention as ``conditional_detectors``: shared qubits emit a plain
+    ``OBSERVABLE_INCLUDE`` on ``observables`` (trunk); divergent qubits land
+    here as :class:`IfBlock` entries with branch-one targets in ``then_body``
+    and branch-zero targets in ``else_body``.
+    """
 
     def to_dict(self) -> dict[str, Any]:
         """Return a dictionary representation of ``self``."""

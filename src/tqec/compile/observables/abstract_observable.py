@@ -134,6 +134,30 @@ class AbstractObservable:
         )
 
 
+@dataclass(frozen=True)
+class ConditionalAbstractObservable:
+    """A pair of :class:`AbstractObservable` instances, one per branch of a conditional cube.
+
+    Used to drive per-branch ``OBSERVABLE_INCLUDE`` emission: at every leaf in the
+    layer tree, both branches are independently lowered to qubit sets via the
+    :class:`ObservableBuilder`; shared qubits emit a plain ``OBSERVABLE_INCLUDE``,
+    divergent qubits emit an :class:`IfBlock` gated by the ``condition_recs`` of
+    the conditional cube at that z-layer.
+
+    Attributes:
+        branch_zero: observable lowered from the branch-zero correlation surface.
+        branch_one: observable lowered from the branch-one correlation surface.
+        conditional_cube_positions: positions of the conditional cubes whose
+            IF/ELSE blocks gate this observable. Each must sit on a distinct
+            z-layer.
+
+    """
+
+    branch_zero: AbstractObservable
+    branch_one: AbstractObservable
+    conditional_cube_positions: tuple[Position3D, ...]
+
+
 def compile_correlation_surface_to_abstract_observable(
     block_graph: BlockGraph,
     correlation_surface: CorrelationSurface,

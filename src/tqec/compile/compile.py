@@ -11,11 +11,15 @@ from tqec.compile.convention import FIXED_BULK_CONVENTION, Convention
 from tqec.compile.graph import TopologicalComputationGraph
 from tqec.compile.observables.abstract_observable import (
     AbstractObservable,
+    ConditionalAbstractObservable,
     compile_correlation_surface_to_abstract_observable,
 )
 from tqec.compile.specs.base import CubeSpec, PipeSpec
 from tqec.computation.block_graph import BlockGraph
-from tqec.computation.correlation import CorrelationSurface
+from tqec.computation.correlation import (
+    ConditionalCorrelationSurface,
+    CorrelationSurface,
+)
 from tqec.computation.cube import Cube
 from tqec.templates.base import RectangularTemplate
 from tqec.utils.exceptions import TQECError
@@ -27,6 +31,22 @@ _DEFAULT_SCALABLE_QUBIT_SHAPE: Final = PhysicalQubitScalable2D(
 )
 
 _DEFAULT_BLOCK_REPETITIONS: LinearFunction = LinearFunction(2, -1)
+
+
+def _resolve_conditional_cubes(bg: BlockGraph, branch_index: int) -> BlockGraph:
+    """Return a BlockGraph copy in which every conditional cube is replaced by
+    its ``branch_index``-th branch kind. Used to lower a per-branch correlation
+    surface against a graph the existing observable-compilation helper can
+    consume (it asserts cube kinds are ZXCube)."""
+    new_bg = BlockGraph(bg.name)
+    for cube in bg.cubes:
+        kind = cube.kind
+        if cube.is_conditional:
+            kind = kind.value[branch_index]
+        new_bg.add_cube(cube.position, kind, label=cube.label)
+    for pipe in bg.pipes:
+        new_bg.add_pipe(pipe.u.position, pipe.v.position, pipe.kind)
+    return new_bg
 
 
 def _get_template_from_layer(
@@ -73,7 +93,11 @@ def _get_template_from_layer(
 def compile_block_graph(
     block_graph: BlockGraph,
     convention: Convention = FIXED_BULK_CONVENTION,
-    observables: list[CorrelationSurface] | Literal["auto"] | None = "auto",
+    observables: (
+        list[CorrelationSurface | ConditionalCorrelationSurface]
+        | Literal["auto"]
+        | None
+    ) = "auto",
     block_temporal_height: LinearFunction = _DEFAULT_BLOCK_REPETITIONS,
 ) -> TopologicalComputationGraph:
     """Compile a block graph.
@@ -144,24 +168,68 @@ def compile_block_graph(
 
     # 0. Get the abstract observables to be included in the compiled circuit.
     obs_included: list[AbstractObservable] = []
+    cond_obs_included: list[ConditionalAbstractObservable] = []
     if observables is not None:
         if observables == "auto":
             observables = block_graph.find_correlation_surfaces()
         else:
             observables = [cs.shift_by(dz=-minz) for cs in observables]
         include_temporal_hadamard_pipes = convention.name == "fixed_bulk"
-        obs_included = [
-            compile_correlation_surface_to_abstract_observable(
-                block_graph, surface, include_temporal_hadamard_pipes
-            )
-            for surface in observables
-        ]
+        for surface in observables:
+            if isinstance(surface, ConditionalCorrelationSurface):
+                import warnings as _warnings
+
+                _warnings.warn(
+                    "ConditionalCorrelationSurface: skipping per-branch surface "
+                    "validation against substituted BlockGraph. TODO: replace the "
+                    "conditional cube with each branch's ZXCube kind and run "
+                    "_check_correlation_surface_validity on each branch.",
+                    stacklevel=2,
+                )
+                bg_branch_zero = _resolve_conditional_cubes(block_graph, 0)
+                bg_branch_one = _resolve_conditional_cubes(block_graph, 1)
+                cond_obs_included.append(
+                    ConditionalAbstractObservable(
+                        branch_zero=compile_correlation_surface_to_abstract_observable(
+                            bg_branch_zero, surface.branch_zero, include_temporal_hadamard_pipes
+                        ),
+                        branch_one=compile_correlation_surface_to_abstract_observable(
+                            bg_branch_one, surface.branch_one, include_temporal_hadamard_pipes
+                        ),
+                        conditional_cube_positions=surface.conditional_cube_positions,
+                    )
+                )
+            else:
+                obs_included.append(
+                    compile_correlation_surface_to_abstract_observable(
+                        block_graph, surface, include_temporal_hadamard_pipes
+                    )
+                )
+
+    # 0.5 Pre-compile each conditional cube's condition surface into an
+    # AbstractObservable. Doing it here (where the BlockGraph is in scope)
+    # lets the resolver run at emission time without needing the BlockGraph.
+    from tqec.compile.blocks.positioning import LayoutPosition3D
+
+    conditional_observables = {
+        LayoutPosition3D.from_block_position(
+            BlockPosition3D(cube.position.x, cube.position.y, cube.position.z)
+        ): compile_correlation_surface_to_abstract_observable(
+            block_graph,
+            cube.condition,
+            include_temporal_hadamard_pipes=(convention.name == "fixed_bulk"),
+        )
+        for cube in block_graph.cubes
+        if cube.is_conditional and cube.condition is not None
+    }
 
     # 1. Create topological computation graph
     graph = TopologicalComputationGraph(
         _DEFAULT_SCALABLE_QUBIT_SHAPE,
         observables=obs_included,
         observable_builder=convention.triplet.observable_builder,
+        conditional_observables=conditional_observables,
+        conditional_abstract_observables=cond_obs_included,
     )
 
     # 2. Add cubes to the graph

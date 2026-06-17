@@ -18,12 +18,18 @@ if TYPE_CHECKING:
     from tqec.compile.blocks.block import ConditionalBlock
     from tqec.compile.blocks.positioning import LayoutPosition3D
 from tqec.compile.detectors.database import CURRENT_DATABASE_VERSION, DetectorDatabase
-from tqec.compile.observables.abstract_observable import AbstractObservable
+from tqec.compile.observables.abstract_observable import (
+    AbstractObservable,
+    ConditionalAbstractObservable,
+)
 from tqec.compile.observables.builder import ObservableBuilder
 from tqec.compile.tree.annotations import LayerTreeAnnotations, Polygon
 from tqec.compile.tree.annotators.circuit import AnnotateCircuitOnLayerNode
 from tqec.compile.tree.annotators.detectors import AnnotateDetectorsOnLayerNode
-from tqec.compile.tree.annotators.observables import annotate_observable
+from tqec.compile.tree.annotators.observables import (
+    annotate_conditional_observable,
+    annotate_observable,
+)
 from tqec.compile.tree.annotators.polygons import AnnotatePolygonOnLayerNode
 from tqec.compile.tree.node import LayerNode, NodeWalker
 from tqec.post_processing.shift import shift_to_only_positive
@@ -66,6 +72,7 @@ class LayerTree:
         abstract_observables: list[AbstractObservable] | None = None,
         annotations: Mapping[int, LayerTreeAnnotations] | None = None,
         conditional_blocks: Mapping["LayoutPosition3D", "ConditionalBlock"] | None = None,
+        conditional_abstract_observables: list[ConditionalAbstractObservable] | None = None,
     ):
         """Represent a computation as a tree.
 
@@ -97,6 +104,11 @@ class LayerTree:
         self._observable_builder = observable_builder
         self._conditional_blocks: dict["LayoutPosition3D", "ConditionalBlock"] = (
             dict(conditional_blocks) if conditional_blocks is not None else {}
+        )
+        self._conditional_abstract_observables: list[ConditionalAbstractObservable] = (
+            list(conditional_abstract_observables)
+            if conditional_abstract_observables
+            else []
         )
 
     @property
@@ -136,9 +148,32 @@ class LayerTree:
         self._root.walk(qubit_lister)
         return QubitMap.from_qubits(sorted(qubit_lister.seen_qubits))
 
-    def _annotate_observables(self, k: int) -> None:
+    def _annotate_observables(
+        self,
+        k: int,
+        condition_recs: dict[int, list[int]] | None = None,
+        min_z: int = 0,
+    ) -> None:
         for obs_idx, observable in enumerate(self._abstract_observables):
             annotate_observable(self._root, k, observable, obs_idx, self._observable_builder)
+        if not self._conditional_abstract_observables:
+            return
+        if condition_recs is None:
+            # Non-conditional emission path: ConditionalCorrelationSurface
+            # has no IF/ELSE to live in, so its per-branch emission is silently
+            # dropped here. generate_conditional_stim_text supplies condition_recs.
+            return
+        next_idx = len(self._abstract_observables)
+        for i, cond_obs in enumerate(self._conditional_abstract_observables):
+            annotate_conditional_observable(
+                self._root,
+                k,
+                cond_obs,
+                next_idx + i,
+                self._observable_builder,
+                condition_recs,
+                min_z,
+            )
 
     def _annotate_detectors(
         self,
@@ -293,7 +328,7 @@ class LayerTree:
             condition_recs=condition_recs,
             min_z=min_z,
         )
-        self._annotate_observables(k)
+        self._annotate_observables(k, condition_recs=condition_recs, min_z=min_z)
 
     def generate_circuit(
         self,

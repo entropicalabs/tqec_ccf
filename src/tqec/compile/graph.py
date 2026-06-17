@@ -63,7 +63,10 @@ from tqec.compile.blocks.positioning import (
     LayoutPosition3D,
 )
 from tqec.compile.detectors.database import DetectorDatabase
-from tqec.compile.observables.abstract_observable import AbstractObservable
+from tqec.compile.observables.abstract_observable import (
+    AbstractObservable,
+    ConditionalAbstractObservable,
+)
 from tqec.compile.observables.builder import ObservableBuilder
 from tqec.compile.tree.tree import LayerTree
 from tqec.templates.enums import TemplateBorder
@@ -115,6 +118,8 @@ class TopologicalComputationGraph:
         observables: list[AbstractObservable] | None = None,
         conditional_observables: dict[LayoutPosition3D, AbstractObservable]
         | None = None,
+        conditional_abstract_observables: list[ConditionalAbstractObservable]
+        | None = None,
     ) -> None:
         """Represent a topological computation with :class:`.Block` instances."""
         self._blocks: dict[LayoutPosition3D, Block] = {}
@@ -138,6 +143,15 @@ class TopologicalComputationGraph:
         self._conditional_observables: dict[
             LayoutPosition3D, AbstractObservable
         ] = dict(conditional_observables) if conditional_observables else {}
+        # Branch-aware logical observables. Compiled by compile_block_graph
+        # from ConditionalCorrelationSurface entries in the ``observables``
+        # argument; emitted per-branch inside the IF/ELSE generated for the
+        # named conditional cube(s).
+        self._conditional_abstract_observables: list[ConditionalAbstractObservable] = (
+            list(conditional_abstract_observables)
+            if conditional_abstract_observables
+            else []
+        )
 
     def add_cube(self, position: BlockPosition3D, block: Block) -> None:
         """Add a new cube at ``position`` implemented by the provided ``block``."""
@@ -510,6 +524,7 @@ class TopologicalComputationGraph:
             abstract_observables=self._observables,
             observable_builder=self._observable_builder,
             conditional_blocks=self._conditional_blocks,
+            conditional_abstract_observables=self._conditional_abstract_observables,
         )
 
     def generate_stim_circuit(

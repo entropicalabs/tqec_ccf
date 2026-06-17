@@ -371,6 +371,9 @@ class LayerNode:
                 out.append_if(if_block)
         for annotation in annotations.observables:
             out.append_instruction(annotation.to_instruction())
+        if annotations.conditional_observables:
+            for if_block in annotations.conditional_observables:
+                out.append_if(if_block)
         out.append_instruction(
             stim.CircuitInstruction(
                 "SHIFT_COORDS", [], StimCoordinates(0, 0, 1).to_stim_coordinates()
