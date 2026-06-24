@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import numpy.typing as npt
 
-from tqec.computation.cube import LeafCubeKind, ZXCube
+from tqec.computation.cube import ConditionalLeafCubeKind, LeafCubeKind, ZXCube
 from tqec.computation.pipe import PipeKind
 from tqec.interop.color import TQECColor
 from tqec.utils.enums import Basis
@@ -92,6 +92,8 @@ class BlockGeometries:
         self._load_zx_cube_geometries()
         # 1 y half cube block
         self._load_y_cube_geometry()
+        # conditional leaf cubes (gray on flipping walls)
+        self._load_conditional_cube_geometries()
         # 6 pipe blocks without H
         self._load_pipe_without_hadamard_geometries()
         # 6 pipe blocks with H
@@ -119,6 +121,28 @@ class BlockGeometries:
                     height,
                     SignedDirection3D(direction, False),
                 )
+                faces.append(face)
+                translation = [0.0, 0.0, 0.0]
+                translation[direction.value] = 1.0
+                faces.append(face.shift_by(*translation).with_negated_normal_direction())
+            self.geometries[kind] = faces
+
+    def _load_conditional_cube_geometries(self) -> None:
+        """Geometries for ConditionalLeafCubeKind. Faces whose basis differs between
+        the two branches are painted gray; matching faces keep the basis color."""
+        width, height = 1.0, 1.0
+        for kind in ConditionalLeafCubeKind:
+            false_k, true_k = kind.value
+            faces: list[Face] = []
+            for direction in Direction3D.all_directions():
+                b_false = false_k.get_basis_along(direction)
+                b_true = true_k.get_basis_along(direction)
+                color = (
+                    TQECColor.CONDITIONAL
+                    if b_false != b_true
+                    else TQECColor(b_false.value)
+                )
+                face = Face(color, width, height, SignedDirection3D(direction, False))
                 faces.append(face)
                 translation = [0.0, 0.0, 0.0]
                 translation[direction.value] = 1.0

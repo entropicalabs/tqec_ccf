@@ -227,10 +227,6 @@ def write_block_graph_to_dae_file(
     for cube in block_graph.cubes:
         if cube.is_port:
             continue
-        if cube.is_conditional:
-            raise NotImplementedError(
-                "Exporting conditional cubes to DAE file is not yet supported."
-            )
 
         scaled_position = scale_position(cube.position)
         if cube.is_y_cube and block_graph.has_pipe_between(
