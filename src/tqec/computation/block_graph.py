@@ -540,7 +540,17 @@ class BlockGraph:
         """
         new_graph = BlockGraph()
         for cube in self.cubes:
-            new_graph.add_cube(cube.position.shift_by(dx=dx, dy=dy, dz=dz), cube.kind, cube.label)
+            shifted_condition = (
+                cube.condition.shift_by(dx=dx, dy=dy, dz=dz)
+                if cube.condition is not None
+                else None
+            )
+            new_graph.add_cube(
+                cube.position.shift_by(dx=dx, dy=dy, dz=dz),
+                cube.kind,
+                cube.label,
+                condition=shifted_condition,
+            )
         for pipe in self.pipes:
             u, v = pipe.u, pipe.v
             new_graph.add_pipe(
@@ -779,7 +789,29 @@ class BlockGraph:
         for cube in self.cubes:
             rotated_kind = rotate_block_kind_by_matrix(cube.kind, rotation_matrix)
             rotated_pos = rotate_position_by_matrix(cube.position, rotation_matrix)
-            rotated.add_cube(rotated_pos, cast(CubeKind, rotated_kind), cube.label)
+            rotated_condition = None
+            if cube.condition is not None:
+                from tqec.computation.correlation import (  # noqa: PLC0415
+                    CorrelationSurface,
+                    ZXEdge,
+                    ZXNode,
+                )
+
+                rotated_condition = CorrelationSurface(
+                    span=frozenset(
+                        ZXEdge(
+                            ZXNode(rotate_position_by_matrix(e.u.position, rotation_matrix), e.u.basis),
+                            ZXNode(rotate_position_by_matrix(e.v.position, rotation_matrix), e.v.basis),
+                        )
+                        for e in cube.condition.span
+                    )
+                )
+            rotated.add_cube(
+                rotated_pos,
+                cast(CubeKind, rotated_kind),
+                cube.label,
+                condition=rotated_condition,
+            )
             pos_map[cube.position] = rotated_pos
 
         for pipe in self.pipes:
