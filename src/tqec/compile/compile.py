@@ -12,6 +12,7 @@ from tqec.compile.graph import TopologicalComputationGraph
 from tqec.compile.observables.abstract_observable import (
     AbstractObservable,
     ConditionalAbstractObservable,
+    _ConditionBinding,
     compile_correlation_surface_to_abstract_observable,
 )
 from tqec.compile.specs.base import CubeSpec, PipeSpec
@@ -23,7 +24,7 @@ from tqec.computation.correlation import (
 from tqec.computation.cube import Cube
 from tqec.templates.base import RectangularTemplate
 from tqec.utils.exceptions import TQECError
-from tqec.utils.position import BlockPosition3D, Direction3D
+from tqec.utils.position import BlockPosition3D, Direction3D, Position3D
 from tqec.utils.scale import LinearFunction, PhysicalQubitScalable2D
 
 _DEFAULT_SCALABLE_QUBIT_SHAPE: Final = PhysicalQubitScalable2D(
@@ -33,20 +34,103 @@ _DEFAULT_SCALABLE_QUBIT_SHAPE: Final = PhysicalQubitScalable2D(
 _DEFAULT_BLOCK_REPETITIONS: LinearFunction = LinearFunction(2, -1)
 
 
-def _resolve_conditional_cubes(bg: BlockGraph, branch_index: int) -> BlockGraph:
+def _resolve_conditional_cubes(
+    bg: BlockGraph, branch_assignment: "dict[Position3D, int] | int"
+) -> BlockGraph:
     """Return a BlockGraph copy in which every conditional cube is replaced by
-    its ``branch_index``-th branch kind. Used to lower a per-branch correlation
-    surface against a graph the existing observable-compilation helper can
-    consume (it asserts cube kinds are ZXCube)."""
+    one of its branch kinds.
+
+    ``branch_assignment`` may be:
+
+    - an ``int`` (legacy single-branch path): every conditional cube takes the
+      same branch index.
+    - a ``dict[Position3D, int]`` mapping each conditional cube's position to
+      its selected branch index (0 or 1). Cubes not present in the dict are
+      left unchanged — caller must include every conditional cube it cares
+      about.
+
+    The result has only ZXCube-kinded cubes, so the existing observable-
+    compilation helper (which asserts ZXCube) can consume it directly.
+    """
     new_bg = BlockGraph(bg.name)
+    is_legacy_int = isinstance(branch_assignment, int)
     for cube in bg.cubes:
         kind = cube.kind
         if cube.is_conditional:
-            kind = kind.value[branch_index]
+            if is_legacy_int:
+                idx = branch_assignment  # type: ignore[assignment]
+            else:
+                idx = branch_assignment[cube.position]  # type: ignore[index]
+            kind = kind.value[idx]
         new_bg.add_cube(cube.position, kind, label=cube.label)
     for pipe in bg.pipes:
         new_bg.add_pipe(pipe.u.position, pipe.v.position, pipe.kind)
     return new_bg
+
+
+def _classify_conditions(
+    bg: BlockGraph, surface: "ConditionalCorrelationSurface"
+) -> tuple[_ConditionBinding, ...]:
+    """Bind each entry of ``surface.conditions`` either to an existing
+    conditional cube (when ``Cube.condition == surface.conditions[i]``) or to
+    a surface-anchored position derived from the condition's max measurement
+    z.
+
+    Returns one :class:`_ConditionBinding` per surface condition, ordered the
+    same as ``surface.conditions`` — that ordering defines the bit order of
+    every key in ``surface.resolutions``.
+
+    Raises:
+        TQECError: if a condition matches more than one conditional cube
+            (ambiguous binding), or if a surface-anchored condition spans an
+            empty position range.
+    """
+    bindings: list[_ConditionBinding] = []
+    for i, cond in enumerate(surface.conditions):
+        matches = [
+            c.position
+            for c in bg.cubes
+            if c.is_conditional and c.condition == cond
+        ]
+        if len(matches) > 1:
+            raise TQECError(
+                f"ConditionalCorrelationSurface.conditions[{i}] matches "
+                f"multiple conditional cubes at {matches}; conditions must be "
+                "uniquely identifying."
+            )
+        if len(matches) == 1:
+            cube_pos = matches[0]
+            bindings.append(
+                _ConditionBinding(
+                    surface_index=i,
+                    anchor_z=cube_pos.z,
+                    cube_position=cube_pos,
+                )
+            )
+        else:
+            # Surface-anchored: condition gates an observable without a
+            # corresponding conditional cube. anchor_z = max-z reached by
+            # any node in the condition's surface, +1 so the rec offset is
+            # strictly in the past at the emission leaf.
+            zs = [
+                node.position.z
+                for edge in cond.span
+                for node in (edge.u, edge.v)
+            ]
+            if not zs:
+                raise TQECError(
+                    f"ConditionalCorrelationSurface.conditions[{i}] has an "
+                    "empty span; surface-anchored conditions must reference "
+                    "at least one measurement."
+                )
+            bindings.append(
+                _ConditionBinding(
+                    surface_index=i,
+                    anchor_z=max(zs) + 1,
+                    cube_position=None,
+                )
+            )
+    return tuple(bindings)
 
 
 def _get_template_from_layer(
@@ -186,23 +270,52 @@ def compile_block_graph(
                     "_check_correlation_surface_validity on each branch.",
                     stacklevel=2,
                 )
-                bg_branch_zero = _resolve_conditional_cubes(block_graph, 0)
-                bg_branch_one = _resolve_conditional_cubes(block_graph, 1)
+                # Bind each surface condition either to an existing
+                # conditional cube (Cube.condition match) or to a past
+                # measurement string (surface-anchored). Ordering of bindings
+                # follows surface.conditions; it defines the bit order of
+                # resolution keys.
+                bindings = _classify_conditions(block_graph, surface)
+                cube_bits = [
+                    i for i, b in enumerate(bindings) if b.cube_position is not None
+                ]
+                # Compile every truth-table resolution against a graph that
+                # has cube-anchored bits resolved per the key (surface-anchored
+                # bits don't affect the BlockGraph topology).
+                branches: dict[tuple[bool, ...], AbstractObservable] = {}
+                for key, resolution in surface.resolutions.items():
+                    if cube_bits:
+                        assignment = {
+                            bindings[i].cube_position: int(key[i])  # type: ignore[misc]
+                            for i in cube_bits
+                        }
+                        bg_for_compile = _resolve_conditional_cubes(
+                            block_graph, assignment
+                        )
+                    else:
+                        bg_for_compile = block_graph
+                    branches[key] = compile_correlation_surface_to_abstract_observable(
+                        bg_for_compile,
+                        resolution,
+                        include_temporal_hadamard_pipes,
+                        _skip_validation=True,
+                    )
+                # Pre-compile each condition surface into an AbstractObservable
+                # so the resolver can derive rec offsets at emission time.
+                resolved_conditions = tuple(
+                    compile_correlation_surface_to_abstract_observable(
+                        block_graph,
+                        surface.conditions[b.surface_index],
+                        include_temporal_hadamard_pipes,
+                        _skip_validation=True,
+                    )
+                    for b in bindings
+                )
                 cond_obs_included.append(
                     ConditionalAbstractObservable(
-                        branch_zero=compile_correlation_surface_to_abstract_observable(
-                            bg_branch_zero,
-                            surface.branch_zero,
-                            include_temporal_hadamard_pipes,
-                            _skip_validation=True,
-                        ),
-                        branch_one=compile_correlation_surface_to_abstract_observable(
-                            bg_branch_one,
-                            surface.branch_one,
-                            include_temporal_hadamard_pipes,
-                            _skip_validation=True,
-                        ),
-                        conditional_cube_positions=surface.conditional_cube_positions,
+                        branches=branches,
+                        condition_bindings=bindings,
+                        resolved_conditions=resolved_conditions,
                     )
                 )
             else:
