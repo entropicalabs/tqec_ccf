@@ -86,15 +86,20 @@ _shared_span = frozenset(
 branch_zero_surface = CorrelationSurface(span=_shared_span)
 branch_one_surface = CorrelationSurface(span=_shared_span)
 
-conditional_observable = ConditionalCorrelationSurface(
-    branch_zero=branch_zero_surface,
-    branch_one=branch_one_surface,
-    conditional_cube_positions=(a1, b3),
-)
-
-
 if __name__ == "__main__":
     g = build_graph()
+    cond_a = next(c.condition for c in g.cubes if c.position == a1)
+    cond_b = next(c.condition for c in g.cubes if c.position == b3)
+    assert cond_a is not None and cond_b is not None
+    conditional_observable = ConditionalCorrelationSurface(
+        conditions=(cond_a, cond_b),
+        resolutions={
+            (False, False): branch_zero_surface,
+            (False, True): branch_one_surface,
+            (True, False): branch_one_surface,
+            (True, True): branch_zero_surface,
+        },
+    )
     cg = compile_block_graph(g, observables=[conditional_observable])
     text = cg.generate_conditional_stim_text(k=1)
     print(text)

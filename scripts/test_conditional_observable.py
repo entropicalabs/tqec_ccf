@@ -18,7 +18,6 @@ from tqec.computation.cube import ConditionalLeafCubeKind
 from tqec.utils.enums import Basis
 from tqec.utils.position import Position3D
 
-
 b1 = Position3D(0, 0, 0)
 c1 = Position3D(0, 0, 1)
 c2 = Position3D(1, 0, 1)
@@ -36,9 +35,7 @@ def build_graph() -> BlockGraph:
         t2,
         ConditionalLeafCubeKind.ZXX_ZXZ,
         condition=CorrelationSurface(
-            span=frozenset(
-                {ZXEdge(u=ZXNode(b1, Basis.Z), v=ZXNode(c1, Basis.Z))}
-            )
+            span=frozenset({ZXEdge(u=ZXNode(c1, Basis.Z), v=ZXNode(c2, Basis.Z))})
         ),
     )
     g.add_pipe(b1, c1)
@@ -67,16 +64,17 @@ branch_one_surface = CorrelationSurface(
     )
 )
 
+g = build_graph()
+cond_at_t2 = next(c.condition for c in g.cubes if c.position == t2)
+assert cond_at_t2 is not None
 conditional_observable = ConditionalCorrelationSurface(
-    branch_zero=branch_zero_surface,
-    branch_one=branch_one_surface,
-    conditional_cube_positions=(t2,),
+    conditions=(cond_at_t2,),
+    resolutions={
+        (False,): branch_zero_surface,
+        (True,): branch_one_surface,
+    },
 )
 
-g = build_graph()
 cg = compile_block_graph(g, observables=[conditional_observable])
 text = cg.generate_conditional_stim_text(k=1)
 print(text)
-print()
-print(f"# OBSERVABLE_INCLUDE in trunk:   {text.count(chr(10) + 'OBSERVABLE_INCLUDE')}")
-print(f"# IF/ELSE blocks:                {text.count('IF(')}")

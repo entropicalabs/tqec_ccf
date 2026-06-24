@@ -69,10 +69,14 @@ def _build_conditional() -> tuple[BlockGraph, ConditionalCorrelationSurface]:
     g.add_pipe(c1, c2)
     g.add_pipe(c1, t1)
     g.add_pipe(c2, t2)
+    cond_at_t2 = next(c.condition for c in g.cubes if c.position == t2)
+    assert cond_at_t2 is not None
     cond = ConditionalCorrelationSurface(
-        branch_zero=_branch_zero_surface,
-        branch_one=_branch_one_surface,
-        conditional_cube_positions=(t2,),
+        conditions=(cond_at_t2,),
+        resolutions={
+            (False,): _branch_zero_surface,
+            (True,): _branch_one_surface,
+        },
     )
     return g, cond
 

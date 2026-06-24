@@ -329,10 +329,14 @@ def test_resolve_matches_inplace_branch_compile_with_conditional_observable() ->
             }
         )
     )
+    cond_a = next(c.condition for c in g.cubes if c.position == t2)
+    assert cond_a is not None
     cond_obs = ConditionalCorrelationSurface(
-        branch_zero=branch_zero_surface,
-        branch_one=branch_one_surface,
-        conditional_cube_positions=(t2,),
+        conditions=(cond_a,),
+        resolutions={
+            (False,): branch_zero_surface,
+            (True,): branch_one_surface,
+        },
     )
 
     cg = compile_block_graph(g, FIXED_BULK_CONVENTION, observables=[cond_obs])
