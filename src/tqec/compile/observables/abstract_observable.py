@@ -135,27 +135,54 @@ class AbstractObservable:
 
 
 @dataclass(frozen=True)
-class ConditionalAbstractObservable:
-    """A pair of :class:`AbstractObservable` instances, one per branch of a conditional cube.
+class _ConditionBinding:
+    """How one condition surface anchors into the BlockGraph.
 
-    Used to drive per-branch ``OBSERVABLE_INCLUDE`` emission: at every leaf in the
-    layer tree, both branches are independently lowered to qubit sets via the
-    :class:`ObservableBuilder`; shared qubits emit a plain ``OBSERVABLE_INCLUDE``,
-    divergent qubits emit an :class:`IfBlock` gated by the ``condition_recs`` of
-    the conditional cube at that z-layer.
+    Mirrors ``tqec.compile.compile._ConditionBinding`` (kept here to avoid an
+    import cycle).
+    """
+
+    surface_index: int
+    anchor_z: int
+    cube_position: Position3D | None
+
+
+@dataclass
+class ConditionalAbstractObservable:
+    """A truth-table of :class:`AbstractObservable` instances over N conditions.
+
+    Drives flat-XOR per-branch ``OBSERVABLE_INCLUDE`` emission: at every leaf
+    in the layer tree, all ``2 ** N`` branches are independently lowered to
+    qubit sets via the :class:`ObservableBuilder`. The shared baseline emits
+    as a plain ``OBSERVABLE_INCLUDE`` on the trunk; each per-condition flip-
+    delta is wrapped in a single ``IF(rec_i) { OBSERVABLE_INCLUDE Δ_i }``
+    block (no ELSE).
+
+    Each condition is anchored either to an existing conditional cube
+    (binding's ``cube_position`` is set) or directly to a past measurement
+    string (surface-anchored — no cube required). Only XOR-decomposable
+    observables are supported; non-decomposable inputs (AND-structured) are
+    rejected at emission time.
 
     Attributes:
-        branch_zero: observable lowered from the branch-zero correlation surface.
-        branch_one: observable lowered from the branch-one correlation surface.
-        conditional_cube_positions: positions of the conditional cubes whose
-            IF/ELSE blocks gate this observable. Each must sit on a distinct
-            z-layer.
+        branches: maps each outcome tuple in ``{False, True} ** N`` to the
+            observable lowered from that resolution's correlation surface.
+        condition_bindings: parallel to the bit order of every key in
+            ``branches``. ``condition_bindings[i]`` carries the i-th
+            condition's IfBlock anchor z and an optional cube position.
+        resolved_conditions: pre-compiled :class:`AbstractObservable` per
+            condition, used by the resolver to derive ``rec[-k]`` offsets.
+        condition_recs: filled in by the conditional-emission pipeline
+            (`TopologicalComputationGraph.generate_conditional_stim_text`)
+            after `resolve_condition_recs`. ``condition_recs[i]`` is the
+            rec-offset list gating the i-th condition's IfBlock.
 
     """
 
-    branch_zero: AbstractObservable
-    branch_one: AbstractObservable
-    conditional_cube_positions: tuple[Position3D, ...]
+    branches: dict[tuple[bool, ...], AbstractObservable]
+    condition_bindings: tuple[_ConditionBinding, ...]
+    resolved_conditions: tuple[AbstractObservable, ...]
+    condition_recs: tuple[tuple[int, ...], ...] | None = None
 
 
 def compile_correlation_surface_to_abstract_observable(
