@@ -80,19 +80,24 @@ def annotate_conditional_observable(
     cond_observable: ConditionalAbstractObservable,
     observable_index: int,
     observable_builder: ObservableBuilder,
-    condition_recs_by_z: dict[int, list[int]],
+    condition_recs_by_z: dict[int, list[int]],  # noqa: ARG001 — back-compat; per-bit recs now read off cond_observable.condition_recs
     min_z: int,
 ) -> None:
-    """Annotate a branch-aware logical observable on the tree.
+    """Annotate a truth-table-indexed logical observable on the tree.
 
-    Each conditional cube in ``conditional_cube_positions`` owns the leaves
-    at z-layers in ``(prev_cube_z, this_cube_z]`` (after sorting by z).
-    Shared per-leaf qubits emit as plain ``OBSERVABLE_INCLUDE`` on the trunk.
-    Divergent qubits' rec offsets are shifted into the owning cube's IfBlock
-    frame and bundled into one per-branch ``OBSERVABLE_INCLUDE`` instruction
-    inside an :class:`IfBlock` gated by that cube's ``condition_recs``.
-    All IfBlocks reuse the same ``observable_index`` — Stim XORs them into
-    a single logical observable.
+    Conditional cubes in ``cond_observable.conditional_cube_positions`` each
+    own the leaves at z-layers ``(prev_cube_z, this_cube_z]`` (after sorting by
+    z). At every anchor leaf, all ``2 ** N`` branch resolutions are independently
+    lowered to qubit sets. The N-condition flat-XOR decomposition
+
+        O(key) = S ⊕ XOR_{i: key[i]} Δ_i
+
+    is computed and validated; non-decomposable inputs (AND structure) are
+    rejected with a descriptive error. ``S`` emits as a plain
+    ``OBSERVABLE_INCLUDE`` on the trunk; each ``Δ_i`` is wrapped in a single
+    ``IF(condition_recs_i) { OBSERVABLE_INCLUDE Δ_i }`` (no ELSE) at its
+    owning cube's anchor leaf. Stim XORs all contributions into one logical
+    observable.
     """
     import stim  # local: avoid module-level dep when unused
 
@@ -101,73 +106,84 @@ def annotate_conditional_observable(
         _compute_tail_shifts,
     )
 
-    if not cond_observable.conditional_cube_positions:
+    bindings = cond_observable.condition_bindings
+    n_bits = len(bindings)
+    if n_bits == 0:
         raise TQECError(
-            "ConditionalAbstractObservable has no conditional_cube_positions."
+            "ConditionalAbstractObservable has no condition_bindings."
         )
-    cube_z_indices = sorted(p.z - min_z for p in cond_observable.conditional_cube_positions)
-    n_layers = len(root.children)
-    for z_idx in cube_z_indices:
-        if z_idx < 0 or z_idx >= n_layers:
-            raise TQECError(
-                f"ConditionalCorrelationSurface names a conditional cube at "
-                f"z={min_z + z_idx} that does not correspond to any z-layer "
-                f"in the tree (min_z={min_z}, layers={n_layers})."
-            )
-    recs_per_cube: list[list[int]] = []
-    for z_idx in cube_z_indices:
-        z_actual = min_z + z_idx
-        recs = condition_recs_by_z.get(z_actual)
-        if recs is None:
-            raise TQECError(
-                f"ConditionalCorrelationSurface references a conditional cube at "
-                f"z={z_actual} but no resolved condition_recs were produced for "
-                "that z-layer. Ensure the named cube is actually conditional."
-            )
-        recs_per_cube.append(list(recs))
+    branches = cond_observable.branches
+    expected_keys = {
+        tuple(bool((i >> j) & 1) for j in range(n_bits)) for i in range(2**n_bits)
+    }
+    if set(branches.keys()) != expected_keys:
+        raise TQECError(
+            "ConditionalAbstractObservable.branches must cover all "
+            f"2^{n_bits} truth-table keys."
+        )
 
-    max_idx = cube_z_indices[-1]
+    # anchor_z_by_bit: z-index (relative to min_z) where the i-th condition's
+    # IfBlock physically sits. Cube-anchored bits use cube.z; surface-anchored
+    # use anchor_z = max(condition span z) + 1. anchor_idx may equal
+    # len(root.children) when the condition lives at the final z-layer (the
+    # IfBlock then attaches to the last leaf of that layer — see anchor leaf
+    # selection below).
+    anchor_idx_by_bit = [b.anchor_z - min_z for b in bindings]
+    n_layers = len(root.children)
+    for bit, idx in enumerate(anchor_idx_by_bit):
+        if idx < 0 or idx > n_layers:
+            raise TQECError(
+                f"ConditionalCorrelationSurface bit {bit} anchors at "
+                f"z={min_z + idx} which is outside the tree's z range "
+                f"[{min_z}, {min_z + n_layers}]."
+            )
+
+    bits_in_z_order = sorted(range(n_bits), key=lambda b: anchor_idx_by_bit[b])
+    sorted_cube_z_indices = [anchor_idx_by_bit[b] for b in bits_in_z_order]
+
+    # Per-bit rec lists from the resolver pipeline (graph.py populates
+    # ``cond_observable.condition_recs`` before calling into the annotator).
+    if cond_observable.condition_recs is None or len(cond_observable.condition_recs) != n_bits:
+        raise TQECError(
+            "ConditionalAbstractObservable.condition_recs has not been "
+            "populated; call resolve_condition_recs (and the surface-anchored "
+            "resolver) before annotation."
+        )
+    recs_per_bit: list[list[int]] = [list(r) for r in cond_observable.condition_recs]
+
+    max_idx = sorted_cube_z_indices[-1]
+    # Cap max_idx so we don't try to collect entries beyond the tree.
+    max_walk_z = min(max_idx, n_layers - 1)
     entries, subtree_leaves = _collect_pre_cond_entries(root, k, max_idx + 1)
     tail_shifts_max = _compute_tail_shifts(entries)
     entry_by_leaf_id = {id(e.leaf): (e, i) for i, e in enumerate(entries)}
 
-    # For each cube, find the index of its last entry (in `entries`) and the
-    # count of measurements that happen AFTER that point up to the end of
-    # the walk. Subtracting that from tail_shifts_max translates rec offsets
-    # from the max-cube frame to this cube's IfBlock frame.
-    end_entry_idx_per_cube: list[int] = []
+    # For each z-sorted anchor, find the index of its last entry and the
+    # count of measurements after that entry up to the end of the walk.
+    # Subtracting tail_beyond from tail_shifts_max maps rec offsets from the
+    # max-anchor frame into that anchor's IfBlock frame.
+    end_entry_idx_per_sorted: list[int] = []
     j = 0
-    for cube_z_idx in cube_z_indices:
-        while j < len(entries) and entries[j].z <= cube_z_idx:
+    for anchor_idx in sorted_cube_z_indices:
+        while j < len(entries) and entries[j].z <= anchor_idx:
             j += 1
-        end_entry_idx_per_cube.append(j - 1)
-    tail_beyond_per_cube: list[int] = []
-    total_after = 0
+        end_entry_idx_per_sorted.append(j - 1)
     running_total = sum(e.num_measurements for e in entries)
     cumulative_through: list[int] = []
     cum = 0
     for e in entries:
         cum += e.num_measurements
         cumulative_through.append(cum)
-    for end_idx in end_entry_idx_per_cube:
+    tail_beyond_per_bit: list[int] = [0] * n_bits
+    for s, end_idx in enumerate(end_entry_idx_per_sorted):
         through = cumulative_through[end_idx] if end_idx >= 0 else 0
-        tail_beyond_per_cube.append(running_total - through)
-    del total_after  # not used
+        tail_beyond_per_bit[bits_in_z_order[s]] = running_total - through
 
-    # owner_for_z_idx[z_idx] = cube index that owns this z-layer
-    owner_for_z_idx: list[int] = [0] * (max_idx + 1)
-    c = 0
-    for z_idx in range(max_idx + 1):
-        while cube_z_indices[c] < z_idx:
-            c += 1
-        owner_for_z_idx[z_idx] = c
+    delta_per_bit: list[list[int]] = [[] for _ in range(n_bits)]
 
-    div_zero_per_cube: list[list[int]] = [[] for _ in cube_z_indices]
-    div_one_per_cube: list[list[int]] = [[] for _ in cube_z_indices]
-
-    def _collect_recs(leaf: LayerNode, qubits: set, target: list[int], cube_idx: int) -> None:
+    def _collect_recs(leaf: LayerNode, qubits: set, target: list[int], bit: int) -> None:
         entry, idx = entry_by_leaf_id[id(leaf)]
-        shift = tail_shifts_max[idx] - tail_beyond_per_cube[cube_idx]
+        shift = tail_shifts_max[idx] - tail_beyond_per_bit[bit]
         for q in qubits:
             if q not in entry.records:
                 continue
@@ -176,31 +192,48 @@ def annotate_conditional_observable(
 
     def _anchor_actions(
         leaves: list[LayerNode],
-        slice_zero: AbstractObservable,
-        slice_one: AbstractObservable,
+        slices: list[AbstractObservable],
     ) -> list[tuple[LayerNode, ObservableComponent]]:
         actions: list[tuple[LayerNode, ObservableComponent]] = [
             (leaves[0], ObservableComponent.BOTTOM_STABILIZERS)
         ]
         readout_leaf = leaves[-1]
-        if slice_zero.temporal_hadamard_pipes or slice_one.temporal_hadamard_pipes:
+        if any(sl.temporal_hadamard_pipes for sl in slices):
             readout_leaf = leaves[-2]
             actions.append((leaves[-1], ObservableComponent.REALIGNMENT))
         actions.append((readout_leaf, ObservableComponent.TOP_READOUTS))
         return actions
 
+    zero_key = tuple(False for _ in range(n_bits))
+    flip_keys = [tuple(j == i for j in range(n_bits)) for i in range(n_bits)]
+
     for z_idx, leaves in enumerate(subtree_leaves):
-        cube_owner = owner_for_z_idx[z_idx]
-        slice_zero = cond_observable.branch_zero.slice_at_z(z_idx)
-        slice_one = cond_observable.branch_one.slice_at_z(z_idx)
-        for anchor_leaf, component in _anchor_actions(leaves, slice_zero, slice_one):
+        slice_by_key = {key: obs.slice_at_z(z_idx) for key, obs in branches.items()}
+        for anchor_leaf, component in _anchor_actions(leaves, list(slice_by_key.values())):
             assert isinstance(anchor_leaf._layer, LayoutLayer)
             template, _ = anchor_leaf._layer.to_template_and_plaquettes()
-            qubits_zero = observable_builder.build(k, template, slice_zero, component)
-            qubits_one = observable_builder.build(k, template, slice_one, component)
-            shared = qubits_zero & qubits_one
-            div_zero = qubits_zero - shared
-            div_one = qubits_one - shared
+            qubits_by_key = {
+                key: observable_builder.build(k, template, sl, component)
+                for key, sl in slice_by_key.items()
+            }
+            shared = qubits_by_key[zero_key]
+            deltas: list[frozenset] = []
+            for i in range(n_bits):
+                deltas.append(frozenset(qubits_by_key[flip_keys[i]] ^ shared))
+            # Validate flat-XOR decomposability for every key.
+            for key, qubits in qubits_by_key.items():
+                predicted = shared
+                for i, bit in enumerate(key):
+                    if bit:
+                        predicted = predicted ^ deltas[i]
+                if predicted != qubits:
+                    raise TQECError(
+                        "ConditionalCorrelationSurface is not XOR-decomposable "
+                        f"across its {n_bits} conditions at z={min_z + z_idx}, "
+                        f"component={component.name}: O({key}) does not equal "
+                        "S ⊕ XOR_{i: key[i]} Δ_i. Only flat-XOR-separable "
+                        "observables are currently supported."
+                    )
             if shared:
                 circuit = anchor_leaf.get_annotations(k).circuit
                 assert circuit is not None
@@ -210,41 +243,32 @@ def annotate_conditional_observable(
                         shared, meas, observable_index
                     )
                 )
-            _collect_recs(anchor_leaf, div_zero, div_zero_per_cube[cube_owner], cube_owner)
-            _collect_recs(anchor_leaf, div_one, div_one_per_cube[cube_owner], cube_owner)
+            for bit, delta in enumerate(deltas):
+                _collect_recs(anchor_leaf, delta, delta_per_bit[bit], bit)
 
-    for c, cube_z_idx in enumerate(cube_z_indices):
-        d0 = div_zero_per_cube[c]
-        d1 = div_one_per_cube[c]
-        if not (d0 or d1):
+    for bit in range(n_bits):
+        delta_recs = delta_per_bit[bit]
+        if not delta_recs:
             continue
-        cube_leaf = subtree_leaves[cube_z_idx][-1]
-        then_body: list = []
-        else_body: list = []
-        if d1:
-            then_body.append(
-                stim.CircuitInstruction(
-                    "OBSERVABLE_INCLUDE",
-                    [stim.target_rec(o) for o in sorted(d1)],
-                    [observable_index],
-                )
+        # Anchor leaf for the IfBlock: last leaf at the binding's anchor z
+        # (clamped if the anchor sits beyond the walked range).
+        leaf_z = min(anchor_idx_by_bit[bit], len(subtree_leaves) - 1)
+        cube_leaf = subtree_leaves[leaf_z][-1]
+        then_body: list = [
+            stim.CircuitInstruction(
+                "OBSERVABLE_INCLUDE",
+                [stim.target_rec(o) for o in sorted(delta_recs)],
+                [observable_index],
             )
-        if d0:
-            else_body.append(
-                stim.CircuitInstruction(
-                    "OBSERVABLE_INCLUDE",
-                    [stim.target_rec(o) for o in sorted(d0)],
-                    [observable_index],
-                )
-            )
+        ]
         annotations = cube_leaf.get_annotations(k)
         if annotations.conditional_observables is None:
             annotations.conditional_observables = []
         annotations.conditional_observables.append(
             IfBlock(
-                condition_recs=recs_per_cube[c],
+                condition_recs=recs_per_bit[bit],
                 then_body=then_body,
-                else_body=else_body if else_body else None,
+                else_body=None,
             )
         )
 
