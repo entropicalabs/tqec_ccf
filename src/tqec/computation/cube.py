@@ -226,7 +226,7 @@ class ConditionalLeafCubeKind(Enum):
     # Y_ZXX = LeafCubeKind.Y_HALF_CUBE, ZXCube.ZXX
     # Y_XZX = LeafCubeKind.Y_HALF_CUBE, ZXCube.XZX
 
-    ZXZ_ZXX = ZXCube.ZXZ, ZXCube.XXZ
+    ZXZ_ZXX = ZXCube.ZXZ, ZXCube.ZXX
     XZZ_XZX = ZXCube.XZZ, ZXCube.XZX
     ZXX_ZXZ = ZXCube.ZXX, ZXCube.ZXZ
     XZX_XZZ = ZXCube.XZX, ZXCube.XZZ
@@ -322,8 +322,13 @@ class Cube:
         if self.condition is not None:
             if not self.is_conditional:
                 raise TQECError("Only a conditional cube can have a condition.")
-            # if any(cond_pos.z >= self.position.z for cond_pos in self.condition.positions):
-            #     raise TQECError("Condition must be in the past of the cube being conditioned.")
+            if any(
+                cond_pos.z >= self.position.z
+                for cond_pos in self.condition.positions
+            ):
+                raise TQECError(
+                    "Condition must be in the past of the cube being conditioned."
+                )
 
     def __str__(self) -> str:
         return f"{self.kind}{self.position}"
