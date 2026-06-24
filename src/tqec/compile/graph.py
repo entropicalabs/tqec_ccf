@@ -607,7 +607,11 @@ class TopologicalComputationGraph:
         """
         from tqec.compile.conditional.condition_recs import resolve_condition_recs
 
-        if not self._conditional_blocks:
+        # Fall back to the plain (non-conditional) path only if there are
+        # neither conditional cubes nor surface-anchored conditional
+        # observables. Surface-anchored ConditionalCorrelationSurface gates
+        # OBSERVABLE_INCLUDE lines without requiring a conditional cube.
+        if not self._conditional_blocks and not self._conditional_abstract_observables:
             circuit = self.generate_stim_circuit(
                 k,
                 manhattan_radius=manhattan_radius,
@@ -659,6 +663,36 @@ class TopologicalComputationGraph:
         condition_recs_by_z: dict[int, list[int]] = {
             pos.z: recs for pos, recs in resolved_condition_recs.items()
         }
+        # Per-condition recs for each ConditionalAbstractObservable: cube-
+        # anchored bits look up the cube path's recs (keyed by cube.z);
+        # surface-anchored bits invoke the surface resolver directly.
+        from tqec.compile.conditional.condition_recs import (  # noqa: PLC0415
+            resolve_surface_condition_recs,
+        )
+
+        for cao in self._conditional_abstract_observables:
+            per_bit: list[tuple[int, ...]] = []
+            for binding, obs in zip(
+                cao.condition_bindings, cao.resolved_conditions, strict=True
+            ):
+                if binding.cube_position is not None:
+                    recs = condition_recs_by_z[binding.cube_position.z]
+                else:
+                    recs = resolve_surface_condition_recs(
+                        layer_tree,
+                        k,
+                        obs,
+                        binding.anchor_z,
+                        self._observable_builder,
+                        debug_label=(
+                            f"ConditionalAbstractObservable bit "
+                            f"{binding.surface_index} (anchor_z="
+                            f"{binding.anchor_z})"
+                        ),
+                    )
+                per_bit.append(tuple(recs))
+            cao.condition_recs = tuple(per_bit)
+
         min_z = min(pos.z for pos in self._blocks.keys())
         cc = layer_tree.generate_conditional_circuit(
             k,
