@@ -155,7 +155,7 @@ def test_emit_moment_with_ceo_identical_branches_no_ifblock() -> None:
         qubit_to_block,
         global_i2q,
         branch_merged_instructions=_moment_insts("R 0 1"),
-        condition_rec=-1,
+        condition_recs=[-1],
     )
     assert all(not isinstance(e, IfBlock) for e in entries)
     assert len(entries) == 1
@@ -171,7 +171,7 @@ def test_emit_moment_with_ceo_weaves_ifblock_for_divergent_branch() -> None:
         qubit_to_block,
         global_i2q,
         branch_merged_instructions=_moment_insts("RX 0 1"),
-        condition_rec=-1,
+        condition_recs=[-1],
     )
     # R/RX are single-qubit gates -> two CEO slots (q0 and q1), each divergent
     # with matching (name, args) signatures across the two slots -> batched
@@ -179,7 +179,7 @@ def test_emit_moment_with_ceo_weaves_ifblock_for_divergent_branch() -> None:
     assert len(entries) == 1
     entry = entries[0]
     assert isinstance(entry, IfBlock)
-    assert entry.condition_rec == -1
+    assert entry.condition_recs == [-1]
     assert len(entry.then_body) == 1 and len(entry.else_body or []) == 1
     then_inst = entry.then_body[0]
     else_inst = (entry.else_body or [])[0]
@@ -190,8 +190,9 @@ def test_emit_moment_with_ceo_weaves_ifblock_for_divergent_branch() -> None:
 
 
 def test_emit_moment_with_ceo_does_not_batch_across_gate_signatures() -> None:
-    """Divergent slots with different per-branch (name, args) signatures stay
-    in separate IfBlocks; batching applies only to runs of same-signature slots."""
+    """Divergent slots with different per-branch (name, args) signatures used to
+    stay in separate IfBlocks; the same-condition merge post-pass collapses them
+    into a single IfBlock whose then/else bodies preserve per-slot ordering."""
     q0, q1 = GridQubit(0, 0), GridQubit(1, 0)
     qubit_to_block = {q0: BlockPosition2D(0, 0), q1: BlockPosition2D(0, 0)}
     global_i2q = {0: q0, 1: q1}
@@ -200,13 +201,18 @@ def test_emit_moment_with_ceo_does_not_batch_across_gate_signatures() -> None:
         qubit_to_block,
         global_i2q,
         branch_merged_instructions=_moment_insts("RX 0\nS 1"),
-        condition_rec=-1,
+        condition_recs=[-1],
     )
     if_blocks = [e for e in entries if isinstance(e, IfBlock)]
-    assert len(if_blocks) == 2
+    assert len(if_blocks) == 1
+    merged = if_blocks[0]
+    then_names = [inst.name for inst in merged.then_body]
+    else_names = [inst.name for inst in merged.else_body]
+    assert then_names == ["RX", "S"]
+    assert else_names == ["R", "H"]
 
 
-def test_emit_moment_with_ceo_branch_requires_condition_rec() -> None:
+def test_emit_moment_with_ceo_branch_requires_condition_recs() -> None:
     q0 = GridQubit(0, 0)
     qubit_to_block = {q0: BlockPosition2D(0, 0)}
     global_i2q = {0: q0}
@@ -229,7 +235,7 @@ def test_emit_moment_with_ceo_branch_length_mismatch_raises() -> None:
             qubit_to_block,
             global_i2q,
             branch_merged_instructions=_moment_insts("R 0"),
-            condition_rec=-1,
+            condition_recs=[-1],
         )
 
 
@@ -252,7 +258,7 @@ def test_merge_scheduled_circuits_per_branch_identical_branches() -> None:
         zero_circuits,
         one_circuits,
         qmap,
-        condition_rec=-1,
+        condition_recs=[-1],
         qubit_to_block=qubit_to_block,
     )
     assert list(schedule) == [0]
@@ -272,14 +278,14 @@ def test_merge_scheduled_circuits_per_branch_divergent_slot_emits_ifblock() -> N
         zero_circuits,
         one_circuits,
         qmap,
-        condition_rec=-3,
+        condition_recs=[-3],
         qubit_to_block=qubit_to_block,
     )
     assert list(schedule) == [0]
     assert len(moments_entries) == 1
     ifs = [e for e in moments_entries[0] if isinstance(e, IfBlock)]
     assert len(ifs) == 1
-    assert ifs[0].condition_rec == -3
+    assert ifs[0].condition_recs == [-3]
     assert ifs[0].then_body[0].name == "RX"
     assert (ifs[0].else_body or [])[0].name == "R"
 
@@ -297,6 +303,6 @@ def test_merge_scheduled_circuits_per_branch_schedule_mismatch_raises() -> None:
             zero_circuits,
             one_circuits,
             qmap,
-            condition_rec=-1,
+            condition_recs=[-1],
             qubit_to_block=qubit_to_block,
         )

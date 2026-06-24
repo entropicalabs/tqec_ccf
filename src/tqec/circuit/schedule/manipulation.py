@@ -204,7 +204,7 @@ def _emit_moment_with_ceo(
     global_i2q: Mapping[int, GridQubit],
     *,
     branch_merged_instructions: list[stim.CircuitInstruction] | None = None,
-    condition_rec: int | None = None,
+    condition_recs: list[int] | None = None,
 ) -> list[CircuitEntry]:
     """Produce a moment's instruction stream in Canonical Emission Order.
 
@@ -213,7 +213,7 @@ def _emit_moment_with_ceo(
     order. The non-conditional path returns only plain instructions and is
     byte-equivalent to the pre-refactor emitter.
 
-    When ``branch_merged_instructions`` is provided alongside ``condition_rec``:
+    When ``branch_merged_instructions`` is provided alongside ``condition_recs``:
     the staged CEO slots of both branches are walked in parallel; identical
     slots collapse into plain instructions exactly as in the single-branch path,
     and divergent slots emit an :class:`IfBlock` with the second-branch
@@ -241,9 +241,9 @@ def _emit_moment_with_ceo(
             result.append(stim.CircuitInstruction(name, flat, list(args)))
         return result
 
-    if condition_rec is None:
+    if condition_recs is None:
         raise TQECError(
-            "_emit_moment_with_ceo: branch_merged_instructions requires condition_rec."
+            "_emit_moment_with_ceo: branch_merged_instructions requires condition_recs."
         )
     passthrough_o, ceo_o = _stage_ceo_entries(
         branch_merged_instructions, qubit_to_block, global_i2q
@@ -304,12 +304,74 @@ def _emit_moment_with_ceo(
             one_inst = stim.CircuitInstruction(o_name, o_targets, list(o_args))
             result.append(
                 IfBlock(
-                    condition_rec=condition_rec,
+                    condition_recs=list(condition_recs),
                     then_body=[one_inst],
                     else_body=[zero_inst],
                 )
             )
-    return result
+    return _merge_same_condition_ifblocks(result)
+
+
+def _merge_same_condition_ifblocks(entries: list[CircuitEntry]) -> list[CircuitEntry]:
+    """Collapse runs of same-condition :class:`IfBlock` entries within a single
+    moment, hoisting intervening non-IfBlock entries into both branches.
+
+    Safety relies on the CEO target-ordering rule, which sorts multi-qubit
+    instruction targets by ``BlockPosition2D (y, x)`` then qubit-index
+    ascending. All instructions of a single cube emit contiguously;
+    instructions of other cubes on the same z-layer fall either entirely
+    before the first :class:`IfBlock` of the conditional cube or entirely
+    after the last one — never strictly between two same-condition
+    :class:`IfBlock`s. The hoisted "passthrough" entries are therefore
+    guaranteed to be same-cube non-flipping operations (e.g. the conditional
+    cube's matching ancilla rows). Duplicating them textually into both
+    branches is a semantic no-op: runtime fires exactly one branch and both
+    bodies contain identical operations on those passthrough slots, so the
+    physical schedule, measurement order, and downstream ``rec[-N]`` offsets
+    are unchanged.
+
+    Relies on the upstream guard at ``src/tqec/compile/graph.py:640-651``
+    that allows at most one conditional cube per z-layer. With multiple
+    conditional cubes a single moment could carry IfBlocks for different
+    conditions; the inner scan stops on a differing-condition IfBlock so the
+    transformation is still local, but that path is not exercised under the
+    current constraint.
+    """
+    out: list[CircuitEntry] = []
+    i = 0
+    while i < len(entries):
+        e = entries[i]
+        if not isinstance(e, IfBlock):
+            out.append(e)
+            i += 1
+            continue
+        cond = tuple(e.condition_recs)
+        then_body = list(e.then_body)
+        else_body = list(e.else_body)
+        j = i + 1
+        while j < len(entries):
+            nxt = entries[j]
+            if isinstance(nxt, IfBlock):
+                if tuple(nxt.condition_recs) == cond:
+                    mids = entries[i + 1 : j]
+                    then_body.extend(mids)
+                    else_body.extend(mids)
+                    then_body.extend(nxt.then_body)
+                    else_body.extend(nxt.else_body)
+                    del entries[i + 1 : j + 1]
+                    j = i + 1
+                    continue
+                break
+            j += 1
+        out.append(
+            IfBlock(
+                condition_recs=list(cond),
+                then_body=then_body,
+                else_body=else_body,
+            )
+        )
+        i += 1
+    return out
 
 
 def remove_duplicate_instructions(
@@ -495,7 +557,7 @@ def merge_scheduled_circuits_per_branch(
     one_circuits: list[ScheduledCircuit],
     global_qubit_map: QubitMap,
     *,
-    condition_rec: int,
+    condition_recs: list[int],
     mergeable_instructions: Iterable[str] = (),
     qubit_to_block: Mapping[GridQubit, BlockPosition2D],
 ) -> tuple[list[list[CircuitEntry]], Schedule]:
@@ -515,9 +577,10 @@ def merge_scheduled_circuits_per_branch(
         one_circuits: branch-one parallel list; same length and same per-slot
             qubit footprint as ``zero_circuits``.
         global_qubit_map: shared qubit map for both branches.
-        condition_rec: ``stim`` record offset that drives the woven IF/ELSE.
-            Convention: ``then_body`` runs when the condition is one,
-            ``else_body`` runs when it is zero.
+        condition_recs: ``stim`` record offsets whose XOR drives the woven
+            IF/ELSE. Convention: ``then_body`` runs when the XOR is one,
+            ``else_body`` runs when it is zero. A single-element list
+            renders as ``IF(rec[r])``.
         mergeable_instructions: as in :func:`merge_scheduled_circuits`.
         qubit_to_block: required; CEO needs block ownership to align slots
             between branches.
@@ -571,7 +634,7 @@ def merge_scheduled_circuits_per_branch(
             qubit_to_block,
             global_i2q.i2q,
             branch_merged_instructions=merged_o,
-            condition_rec=condition_rec,
+            condition_recs=condition_recs,
         )
         moments_entries.append(entries)
         schedule_out.append(schedule_z)
