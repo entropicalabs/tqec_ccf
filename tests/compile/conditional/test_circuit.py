@@ -27,7 +27,7 @@ def test_to_stim_text_simple_passthrough() -> None:
 def test_to_stim_text_with_if_else() -> None:
     inner_then = stim.CircuitInstruction("M", [stim.GateTarget(7)])
     inner_else = stim.CircuitInstruction("MX", [stim.GateTarget(7)])
-    block = IfBlock(condition_rec=-3, then_body=[inner_then], else_body=[inner_else])
+    block = IfBlock(condition_recs=[-3], then_body=[inner_then], else_body=[inner_else])
     c = ConditionalCircuit()
     c.append("CX", [1, 2])
     c.append_if(block)
@@ -45,9 +45,23 @@ def test_to_stim_text_with_if_else() -> None:
     assert text.splitlines() == expected
 
 
+def test_to_stim_text_multi_rec_xor() -> None:
+    inner = stim.CircuitInstruction("X", [stim.GateTarget(0)])
+    block = IfBlock(condition_recs=[-5, -2, -1], then_body=[inner])
+    c = ConditionalCircuit()
+    c.append_if(block)
+    text = c.to_stim_text()
+    assert "IF(rec[-5]^rec[-2]^rec[-1]) {" in text
+
+
+def test_ifblock_rejects_empty_condition_recs() -> None:
+    with pytest.raises(ValueError, match="at least one condition rec"):
+        IfBlock(condition_recs=[])
+
+
 def test_to_stim_circuit_strict_rejects_if_block() -> None:
     c = ConditionalCircuit()
-    c.append_if(IfBlock(condition_rec=-1))
+    c.append_if(IfBlock(condition_recs=[-1]))
     with pytest.raises(ValueError, match="IfBlock is still present"):
         c.to_stim_circuit_strict()
 

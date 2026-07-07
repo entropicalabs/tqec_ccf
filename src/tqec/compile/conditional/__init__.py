@@ -15,6 +15,10 @@ from tqec.compile.conditional.circuit import (
 )
 from tqec.compile.conditional.frame import ConditionId, PauliFrameTracker
 
+# Note: ``resolve_condition_recs`` is intentionally not re-exported here to
+# avoid a circular import via ``tqec.compile.blocks.layers.atomic.layout``.
+# Import it directly from ``tqec.compile.conditional.condition_recs``.
+
 __all__ = [
     "CircuitEntry",
     "ConditionId",

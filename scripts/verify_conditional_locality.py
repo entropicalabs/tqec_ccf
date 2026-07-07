@@ -31,7 +31,11 @@ from tqec.utils.position import Position3D
 
 
 def _condition() -> CorrelationSurface:
-    p = Position3D(0, 0, 1)
+    # TODO: cond cube here sits at z=0; mock at z=-1 to satisfy the
+    # structural causality check at Cube.__post_init__. Resolver yields no
+    # recs → placeholder rec[-1] fallback. Lift cond cube above z=0 for a
+    # real condition.
+    p = Position3D(0, 0, -1)
     return CorrelationSurface(span=frozenset([ZXEdge(ZXNode(p, Basis.Z), ZXNode(p, Basis.Z))]))
 
 
@@ -258,9 +262,14 @@ def main() -> None:
 
     g = _build_conditional_graph(pos_cond)
     cg = compile_block_graph(g, FIXED_BULK_CONVENTION, observables=None)
-    text = cg.generate_conditional_stim_text(k=k, condition_recs={pos: -1 for pos in cg._conditional_blocks})
+    text = cg.generate_conditional_stim_text(k=k)
 
-    branch_zero = resolve_if_else(text, conditions={-1: 0})
+    import re as _re
+
+    m = _re.search(r"IF\(([^)]+)\)", text)
+    assert m is not None
+    rec = int(m.group(1).split("^")[0].strip().lstrip("rec[").rstrip("]"))
+    branch_zero = resolve_if_else(text, conditions={rec: 0})
     qubit_map = QubitMap.from_circuit(branch_zero)
     footprint = _footprint(qubit_map, pos_cond)
 

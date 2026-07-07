@@ -27,16 +27,22 @@ if TYPE_CHECKING:
 
 @dataclass
 class IfBlock:
-    """An ``IF(rec[-k]) { ... } ELSE { ... }`` block.
+    """An ``IF(rec[-k]^rec[-j]^...) { ... } ELSE { ... }`` block.
 
-    ``condition_rec`` is the negative ``rec`` offset of the branch-selecting
-    measurement at the point the block is emitted.  ``else_body`` is optional;
-    when absent, only the ``IF`` arm is rendered.
+    ``condition_recs`` is the list of negative ``rec`` offsets whose XOR
+    selects the ``then_body`` branch at the point the block is emitted. A
+    single-element list renders as ``IF(rec[-k])``; multiple offsets render
+    as ``IF(rec[-a]^rec[-b]^...)``. ``else_body`` is optional; when absent,
+    only the ``IF`` arm is rendered.
     """
 
-    condition_rec: int
+    condition_recs: list[int]
     then_body: list[CircuitEntry] = field(default_factory=list)
     else_body: list[CircuitEntry] | None = None
+
+    def __post_init__(self) -> None:
+        if not self.condition_recs:
+            raise ValueError("IfBlock requires at least one condition rec offset.")
 
     def append(self, entry: CircuitEntry) -> None:
         self.then_body.append(entry)
@@ -146,7 +152,7 @@ def remap_entry_qubit_indices(
     """
     if isinstance(entry, IfBlock):
         return IfBlock(
-            condition_rec=entry.condition_rec,
+            condition_recs=list(entry.condition_recs),
             then_body=[remap_entry_qubit_indices(e, qubit_index_remap) for e in entry.then_body],
             else_body=(
                 [remap_entry_qubit_indices(e, qubit_index_remap) for e in entry.else_body]
@@ -167,7 +173,8 @@ def _render(entries: list[CircuitEntry], lines: list[str], indent: int) -> None:
     pad = "  " * indent
     for entry in entries:
         if isinstance(entry, IfBlock):
-            lines.append(f"{pad}IF(rec[{entry.condition_rec}]) {{")
+            cond = "^".join(f"rec[{r}]" for r in entry.condition_recs)
+            lines.append(f"{pad}IF({cond}) {{")
             _render(entry.then_body, lines, indent + 1)
             if entry.else_body is not None:
                 lines.append(f"{pad}}} ELSE {{")

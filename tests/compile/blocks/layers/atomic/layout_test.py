@@ -165,13 +165,13 @@ def test_to_conditional_circuit_requires_conditional_layers(
     pos1 = LayoutPosition2D.from_block_position(BlockPosition2D(0, 0))
     layer = LayoutLayer({pos1: empty_plaquette_layer}, LOGICAL_QUBIT_SHAPE)
     with pytest.raises(TQECError):
-        layer.to_conditional_circuit(k=1, condition_rec=-1)
+        layer.to_conditional_circuit(k=1, condition_recs=[-1])
 
 
 def test_to_conditional_circuit_weaves_ifblock_for_divergent_plaquette() -> None:
     """Exercise to_conditional_circuit on a LayoutLayer produced by the real
     compile pipeline for a single-cube conditional graph. Asserts at least one
-    IfBlock surfaces with the requested condition_rec.
+    IfBlock surfaces with the requested condition_recs.
     """
     from tqec.compile.blocks.layers.atomic.layout import LayoutLayer as _LL
     from tqec.compile.compile import compile_block_graph
@@ -210,11 +210,11 @@ def test_to_conditional_circuit_weaves_ifblock_for_divergent_plaquette() -> None
     # conditional layers and assert at least one surfaces an IfBlock.
     all_if_blocks: list[IfBlock] = []
     for ll in found_layers:
-        cc = ll.to_conditional_circuit(k=1, condition_rec=-7)
+        cc = ll.to_conditional_circuit(k=1, condition_recs=[-7])
         assert isinstance(cc, ConditionalCircuit)
         all_if_blocks.extend(e for e in cc.entries if isinstance(e, IfBlock))
     assert all_if_blocks, "expected at least one IfBlock for divergent plaquette content"
-    assert all(ib.condition_rec == -7 for ib in all_if_blocks)
+    assert all(ib.condition_recs == [-7] for ib in all_if_blocks)
 
 
 def test_scalable_num_moments(

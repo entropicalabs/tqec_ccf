@@ -254,7 +254,7 @@ class LayoutLayer(BaseLayer):
     def to_conditional_circuit(
         self,
         k: int,
-        condition_rec: int,
+        condition_recs: list[int],
         reschedule_measurements: bool = True,
     ) -> ConditionalCircuit:
         """Return the conditional quantum circuit representing the layer.
@@ -273,7 +273,7 @@ class LayoutLayer(BaseLayer):
 
         Args:
             k: scaling factor.
-            condition_rec: ``stim`` record offset selecting the branch.
+            condition_recs: ``stim`` record offsets whose XOR selects the branch.
             reschedule_measurements: as in :meth:`to_circuit`.
 
         Returns:
@@ -316,7 +316,7 @@ class LayoutLayer(BaseLayer):
             plaquettes_one,
             increments,
             plaquette_to_block=plaquette_to_block,
-            condition_rec=condition_rec,
+            condition_recs=condition_recs,
         )
         # Shift entries into the layer's qubit coordinate frame.
         from tqec.circuit.qubit import GridQubit

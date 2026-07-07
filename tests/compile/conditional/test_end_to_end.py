@@ -91,9 +91,7 @@ def _meas_target_sets(body: str) -> set[int]:
 def test_end_to_end_conditional_pair(pair_name: str) -> None:
     g = _graph(pair_name)
     cg = compile_block_graph(g, FIXED_BULK_CONVENTION, observables=None)
-    text = cg.generate_conditional_stim_text(
-        k=1, condition_recs={pos: -1 for pos in cg._conditional_blocks}
-    )
+    text = cg.generate_conditional_stim_text(k=1)
 
     blocks = _extract_if_else_blocks(text)
     assert blocks, f"{pair_name}: expected at least one IF/ELSE block"
@@ -112,7 +110,7 @@ def test_end_to_end_conditional_pair(pair_name: str) -> None:
     # conditional measurement.  Shared measurement layers (init / stabilizer
     # rounds) are fine -- they are not branch-divergent.  We just check no
     # measurement leak appears immediately after an IF/ELSE block closes.
-    assert "IF(rec[-1])" in text
+    assert "IF(rec[" in text
 
 
 def test_branch_zero_is_lowercase_branch_kind() -> None:
@@ -121,9 +119,7 @@ def test_branch_zero_is_lowercase_branch_kind() -> None:
     """
     g = _graph("XZX_XZZ")
     cg = compile_block_graph(g, FIXED_BULK_CONVENTION, observables=None)
-    text = cg.generate_conditional_stim_text(
-        k=1, condition_recs={pos: -1 for pos in cg._conditional_blocks}
-    )
+    text = cg.generate_conditional_stim_text(k=1)
     blocks = _extract_if_else_blocks(text)
     assert blocks
     # Find the block whose else_body contains measurement instructions

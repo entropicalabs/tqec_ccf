@@ -200,7 +200,7 @@ def generate_per_branch_circuit_from_instantiation(
     one_plaquettes: Plaquettes,
     increments: Shift2D,
     plaquette_to_block: Mapping[int, BlockPosition2D],
-    condition_rec: int,
+    condition_recs: list[int],
 ) -> tuple[list[list[CircuitEntry]], QubitMap]:
     """Per-branch sibling of :func:`generate_circuit_from_instantiation`.
 
@@ -219,7 +219,7 @@ def generate_per_branch_circuit_from_instantiation(
             ``zero_plaquettes`` at non-conditional indices.
         increments: as in :func:`generate_circuit_from_instantiation`.
         plaquette_to_block: required; CEO needs block ownership.
-        condition_rec: ``stim`` record offset selecting the branch.
+        condition_recs: ``stim`` record offsets whose XOR selects the branch.
 
     Returns:
         ``(moments_entries, qubit_map)`` where ``moments_entries[i]`` is the
@@ -250,7 +250,7 @@ def generate_per_branch_circuit_from_instantiation(
         zero_relabeled,
         one_relabeled,
         qubit_map,
-        condition_rec=condition_rec,
+        condition_recs=condition_recs,
         mergeable_instructions=mergeable_z | mergeable_o,
         qubit_to_block=qubit_to_block_z,
     )
