@@ -41,7 +41,12 @@ def make_t_gadget(
     y = Position3D(3, 0, -1)
 
     condition = CorrelationSurface(
-        span=frozenset({ZXEdge(ZXNode(p, Basis.Z), ZXNode(b1, Basis.Z))})
+        span=frozenset(
+            {
+                ZXEdge(ZXNode(p, Basis.Z), ZXNode(b1, Basis.Z)),
+                ZXEdge(ZXNode(t, Basis.Z), ZXNode(b1, Basis.Z)),
+            }
+        )
     )
 
     g = BlockGraph(f"t_gadget_{suffix}")
@@ -50,7 +55,7 @@ def make_t_gadget(
     g.add_cube(t, "XZX")  # T
     g.add_cube(r, "ZZX")
     g.add_cube(b2, "ZXX")
-    g.add_cube(c, ConditionalLeafCubeKind.ZXX_ZXZ, condition=condition)
+    g.add_cube(c, ConditionalLeafCubeKind.ZXZ_ZXX, condition=condition)
     g.add_cube(b3, "XZX")
     g.add_cube(y, "XZX")  # Y
 
@@ -62,7 +67,6 @@ def make_t_gadget(
     }
     f_es = {
         Basis.X: {(p, b1), (t, b1), (b1, r), (r, b3), (y, b3)},
-        Basis.Z: {(p, b1), (b1, r), (r, b2), (b2, c)},
     }
 
     def _obs_from_set(s: dict) -> CorrelationSurface:
@@ -93,7 +97,10 @@ def stack_two_gadgets() -> BlockGraph:
         for cube in gad.cubes:
             if cube.is_port:
                 continue
-            stacked.add_cube(cube.position, cube.kind, cube.label, cube.condition)
+            condition = (
+                _routed_condition(dz) if cube.is_conditional else cube.condition
+            )
+            stacked.add_cube(cube.position, cube.kind, cube.label, condition)
         for pipe in gad.pipes:
             # The port pipe (p->b1) references the skipped port; add it later,
             # once the spine cube at the port position exists.
@@ -139,23 +146,28 @@ def _spine_x_edges() -> frozenset[ZXEdge]:
     return _spine_edges(SPINE_BOTTOM, SPINE_TOP, Basis.X)
 
 
+def _routed_condition(dz: int) -> CorrelationSurface:
+    """Gadget condition at offset dz, routed down the spine to the input port z=0."""
+    gad = make_t_gadget(dz)[0].shift_by(dz=dz)
+    cond_cube = next(c for c in gad.cubes if c.is_conditional)
+    span = set(cond_cube.condition.span) | _spine_edges(SPINE_BOTTOM, dz, Basis.Z)
+    return CorrelationSurface(span=frozenset(span))
+
+
 def build_conditional_observable() -> ConditionalCorrelationSurface:
     """4-resolution observable: each key picks o_true/o_false per gadget, joined by the spine."""
     _, o_true_1, o_false_1 = make_t_gadget(GADGET1_DZ)
     _, o_true_2, o_false_2 = make_t_gadget(GADGET2_DZ)
 
-    # Per gadget: (false-arm span, true-arm span). The X leg is carried by the
-    # shared full-spine X membrane (below). o_false additionally has a Z leg,
-    # routed down the spine to the input port at z=0.
+    # Per gadget: (false-arm span, true-arm span). Both arms are X-only now; the
+    # X leg is carried by the shared full-spine X membrane (below).
     arms = {
         GADGET1_DZ: (
-            o_false_1.shift_by(dz=GADGET1_DZ).span
-            | _spine_edges(SPINE_BOTTOM, GADGET1_DZ, Basis.Z),
+            o_false_1.shift_by(dz=GADGET1_DZ).span,
             o_true_1.shift_by(dz=GADGET1_DZ).span,
         ),
         GADGET2_DZ: (
-            o_false_2.shift_by(dz=GADGET2_DZ).span
-            | _spine_edges(SPINE_BOTTOM, GADGET2_DZ, Basis.Z),
+            o_false_2.shift_by(dz=GADGET2_DZ).span,
             o_true_2.shift_by(dz=GADGET2_DZ).span,
         ),
     }
@@ -171,15 +183,9 @@ def build_conditional_observable() -> ConditionalCorrelationSurface:
         span = arms[GADGET1_DZ][b0] ^ arms[GADGET2_DZ][b1] ^ spine
         resolutions[(b0, b1)] = CorrelationSurface(span=frozenset(span))
 
-    def _condition(dz: int) -> CorrelationSurface:
-        edge = ZXEdge(
-            ZXNode(_spine_pos(dz), Basis.Z), ZXNode(Position3D(1, 0, dz), Basis.Z)
-        )
-        return CorrelationSurface(span=frozenset({edge}))
-
-    cond1, cond2 = _condition(GADGET1_DZ), _condition(GADGET2_DZ)
     return ConditionalCorrelationSurface(
-        conditions=(cond1, cond2), resolutions=resolutions
+        conditions=(_routed_condition(GADGET1_DZ), _routed_condition(GADGET2_DZ)),
+        resolutions=resolutions,
     )
 
 
