@@ -45,9 +45,11 @@ class IfBlock:
             raise ValueError("IfBlock requires at least one condition rec offset.")
 
     def append(self, entry: CircuitEntry) -> None:
+        """Append an entry to the ``then_body`` (``IF`` arm)."""
         self.then_body.append(entry)
 
     def append_else(self, entry: CircuitEntry) -> None:
+        """Append an entry to the ``else_body`` (``ELSE`` arm), creating it if absent."""
         if self.else_body is None:
             self.else_body = []
         self.else_body.append(entry)
@@ -77,10 +79,12 @@ class ConditionalCircuit:
         return self._qubit_map
 
     def set_qubit_map(self, qubit_map: "QubitMap") -> None:
+        """Set the local qubit map used for tree-level index remapping."""
         self._qubit_map = qubit_map
 
     @property
     def entries(self) -> list[CircuitEntry]:
+        """Return the underlying list of circuit entries."""
         return self._entries
 
     def __iter__(self) -> Iterator[CircuitEntry]:
@@ -101,9 +105,11 @@ class ConditionalCircuit:
         self._entries.append(stim.CircuitInstruction(name, ts, ag))
 
     def append_instruction(self, inst: stim.CircuitInstruction) -> None:
+        """Append an already-built :class:`stim.CircuitInstruction`."""
         self._entries.append(inst)
 
     def append_if(self, if_block: IfBlock) -> None:
+        """Append an :class:`IfBlock` entry."""
         self._entries.append(if_block)
 
     def append_instruction_or_if(self, entry: CircuitEntry) -> None:
@@ -113,6 +119,7 @@ class ConditionalCircuit:
         self._entries.append(entry)
 
     def extend(self, entries: list[CircuitEntry]) -> None:
+        """Append every entry in ``entries`` in order."""
         self._entries.extend(entries)
 
     def to_stim_text(self) -> str:

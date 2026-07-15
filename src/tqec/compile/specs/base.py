@@ -34,6 +34,8 @@ class CubeSpec:
             pipe at the top or bottom of a spatial cube is executed on the same
             timeslice as this cube. This information is needed for the fixed
             boundary convention.
+        condition: The correlation surface carried over from a conditional ``Cube``;
+            ``None`` for non-conditional specs.
 
     """
 

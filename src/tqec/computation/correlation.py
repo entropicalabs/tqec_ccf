@@ -136,6 +136,19 @@ class ConditionalCorrelationSurface:
     def shift_by(
         self, dx: int = 0, dy: int = 0, dz: int = 0
     ) -> "ConditionalCorrelationSurface":
+        """Shift a copy of ``self`` by the given offset in the x, y, z directions and return it.
+
+        Args:
+            dx: The offset in the x direction.
+            dy: The offset in the y direction.
+            dz: The offset in the z direction.
+
+        Returns:
+            A new ``ConditionalCorrelationSurface`` with all conditions and
+            resolutions shifted. The new surface will share no data with the
+            original surface.
+
+        """
         return ConditionalCorrelationSurface(
             conditions=tuple(c.shift_by(dx=dx, dy=dy, dz=dz) for c in self.conditions),
             resolutions={

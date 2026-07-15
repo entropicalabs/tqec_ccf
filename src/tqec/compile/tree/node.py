@@ -293,6 +293,10 @@ class LayerNode:
             k: scaling parameter.
             global_qubit_map: qubit map shared with the rest of the tree.
 
+        Returns:
+            A :class:`ConditionalCircuit` assembling this subtree, with
+            per-branch content preserved as :class:`IfBlock` entries.
+
         Raises:
             TQECError: when a :class:`RepeatedLayer` body contains a
                 conditional descendant. Current fixtures never hit this case;

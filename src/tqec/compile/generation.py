@@ -68,6 +68,9 @@ def generate_circuit(
         plaquettes: description of the computation that should happen at
             different time-slices of the quantum error correction experiment (or
             at least part of it).
+        plaquette_to_block: optional mapping from plaquette index to the owning
+            :class:`~tqec.utils.position.BlockPosition2D`, used to apply the
+            Canonical Emission Order when merging the per-plaquette circuits.
 
     Returns:
         a :class:`~.schedule.circuit.ScheduledCircuit` instance implementing the
@@ -116,6 +119,9 @@ def generate_circuit_from_instantiation(
             different time-slices of the quantum error correction experiment (or
             at least part of it).
         increments: the displacement between each plaquette origin.
+        plaquette_to_block: optional mapping from plaquette index to the owning
+            :class:`~tqec.utils.position.BlockPosition2D`, used to apply the
+            Canonical Emission Order when merging the per-plaquette circuits.
 
     Returns:
         a :class:`~.schedule.circuit.ScheduledCircuit` instance implementing the

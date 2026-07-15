@@ -306,6 +306,10 @@ class Cube:
             ports of the block graph. If the cube is a port, the label must be non-empty
             and unique within the block graph. The label can be any string, but duplicate
             labels are not allowed. Default is an empty string.
+        condition: The correlation surface whose outcome selects the active branch for a
+            conditional cube. Must be ``None`` for non-conditional cubes and non-``None``
+            for conditional ones (enforced in ``__post_init__``); every position of the
+            surface must lie in the past of the cube. Default is ``None``.
 
     """
 

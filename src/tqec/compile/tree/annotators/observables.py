@@ -98,6 +98,21 @@ def annotate_conditional_observable(
     ``IF(condition_recs_i) { OBSERVABLE_INCLUDE Δ_i }`` (no ELSE) at its
     owning cube's anchor leaf. Stim XORs all contributions into one logical
     observable.
+
+    Args:
+        root: root node of the tree.
+        k: distance parameter.
+        cond_observable: truth-table-indexed observable whose per-branch
+            resolutions and per-bit ``condition_recs`` drive the emission.
+        observable_index: index of the observable in the circuit.
+        observable_builder: builder that computes and constructs qubits whose
+            measurements will be included in the logical observable.
+        condition_recs_by_z: retained for backward compatibility only and no
+            longer read; per-bit measurement records are taken from
+            ``cond_observable.condition_recs``.
+        min_z: smallest z-layer index spanned by the tree, used to convert the
+            bindings' absolute anchor z into ``root.children`` offsets.
+
     """
     import stim  # local: avoid module-level dep when unused
 

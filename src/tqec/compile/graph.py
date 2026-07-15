@@ -604,6 +604,34 @@ class TopologicalComputationGraph:
         Single-pass implementation: delegates to
         :meth:`LayerTree.generate_conditional_circuit`. The non-conditional
         path falls through to :meth:`generate_stim_circuit`.
+
+        Args:
+            k: scale factor of the templates.
+            manhattan_radius: radius considered to compute detectors.
+                Detectors are not computed and added to the circuit if this
+                argument is negative.
+            detector_database: an instance to retrieve from / store in detectors
+                that are computed as part of the circuit generation. If not given,
+                the detectors are retrieved from/stored in the provided
+                ``database_path``.
+            database_path: specify where to save to after the calculation. This
+                defaults to :data:`.DEFAULT_DETECTOR_DATABASE_PATH`
+                if not specified. If detector_database is not passed in, the code
+                attempts to retrieve the database from this location. The user
+                may pass in the path either in str format, or as a Path instance.
+            do_not_use_database: if ``True``, even the default database will not be used.
+            only_use_database: if ``True``, only detectors from the database
+                will be used. An error will be raised if a situation that is not
+                registered in the database is encountered.
+            reschedule_measurements: whether to reschedule measurements in a ``LayoutLayer``
+                to be in the same moment. Since each plaquette may have its own measurement
+                schedule, setting this may be necessary for hardware that requires
+                measurements to be synchronous.
+
+        Returns:
+            The compiled Stim circuit rendered as text, with the conditional
+            cubes' branches emitted as ``IF``/``ELSE``-annotated blocks.
+
         """
         from tqec.compile.conditional.condition_recs import resolve_condition_recs
 
