@@ -363,11 +363,16 @@ def _final_round(
         gx, gy = (dq[0] - 1) / 2, (dq[1] - 1) / 2
         measure_basis[dq] = Basis.Z if gx + gy < distance else Basis.X
     standard_round(b, patch, tag, measure_data_basis=measure_basis)
+    # Bulk detectors: this round's ancilla measurement vs the previous round's
+    # (the final round still measures every stabilizer via its ancilla).
+    _bulk_detectors(b, patch, prev_tag, tag)
+    # Reconstruction detectors: a stabilizer whose data are all measured in its
+    # own basis is closed by the transversal data measurement.
     for s in patch.stabilizers:
         data = [d for d in s.ordered_data if d is not None]
         if all(measure_basis.get(d) == s.basis for d in data):
             b.detector(
-                [b.rec(prev_tag, s.ancilla)] + [b.rec(tag, d) for d in data],
+                [b.rec(tag, s.ancilla)] + [b.rec(tag, d) for d in data],
                 (s.ancilla[0], s.ancilla[1], 2),
             )
 

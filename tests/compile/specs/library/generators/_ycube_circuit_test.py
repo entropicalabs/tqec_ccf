@@ -142,3 +142,50 @@ def test_transition_measures_logical_y(distance: int) -> None:
     obs_recs = [b.rec("T", c) for c in flows.observable]
     flow = stim.Flow(input=inp, output=stim.PauliString(nq), measurements=obs_recs)
     assert b.circuit.has_flow(flow)
+
+
+def _oracle_y_cap_segment(distance: int, mem_rounds: int):
+    """The vendored-gen equivalent of ``y_cap_segment_circuit`` (Z-init memory +
+    transition + boundary + final), observable flow stripped, as a detector
+    parity oracle."""
+    from tests._vendor.midout import gen
+    from tests._vendor.midout.circuits.steps._patches import (
+        make_xtop_qubit_patch,
+        make_ztop_yboundary_patch,
+    )
+    from tests._vendor.midout.circuits.steps._measure_y_transition_round import (
+        make_y_transition_round_nesw_xzxz_to_xzzx,
+    )
+
+    d = distance
+    xtop = make_xtop_qubit_patch(distance=d)
+    ztop = make_ztop_yboundary_patch(distance=d)
+    trans = make_y_transition_round_nesw_xzxz_to_xzzx(distance=d)
+    trans = gen.Chunk(
+        circuit=trans.circuit,
+        q2i=trans.q2i,
+        flows=[f for f in trans.flows if f.obs_index is None],
+    )
+    chunks = [gen.standard_surface_code_chunk(xtop, init_data_basis="Z")]
+    chunks += [gen.standard_surface_code_chunk(xtop) for _ in range(mem_rounds - 1)]
+    chunks.append(trans)
+    chunks += [gen.standard_surface_code_chunk(ztop) for _ in range(d // 2)]
+    chunks.append(
+        gen.standard_surface_code_chunk(
+            ztop,
+            measure_data_basis={
+                q: "Z" if q.real + q.imag < d else "X" for q in ztop.data_set
+            },
+        )
+    )
+    return gen.compile_chunks_into_circuit(chunks, include_detectors=True).flattened()
+
+
+@pytest.mark.parametrize("distance", [3, 5])
+def test_y_cap_segment_detector_count_matches_oracle(distance: int) -> None:
+    """The native Y-cap segment must emit the same number of detectors as the
+    vendored gen oracle for the same recipe (Z-init memory + Y cap)."""
+    native = y_cap_segment_circuit(distance, mem_rounds=distance, init_basis=Basis.Z)
+    oracle = _oracle_y_cap_segment(distance, mem_rounds=distance)
+    assert native.num_detectors == oracle.num_detectors
+    assert native.num_qubits == oracle.num_qubits
