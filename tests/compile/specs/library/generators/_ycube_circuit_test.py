@@ -14,11 +14,18 @@ import pytest
 from tqec.compile.specs.library.generators._ycube_circuit import (
     memory_experiment_circuit,
     standard_round,
+    transition_round,
+    y_cap_segment_circuit,
+    _final_round,
     _Builder,
     _bulk_detectors,
     _first_round_detectors,
 )
-from tqec.compile.specs.library.generators.ycube import xtop_qubit_patch
+from tqec.compile.specs.library.generators.ycube import (
+    gidney_to_tqec,
+    xtop_qubit_patch,
+    ztop_yboundary_patch,
+)
 from tqec.utils.enums import Basis
 
 
@@ -87,3 +94,51 @@ def test_memory_experiment_has_full_code_distance(distance: int, basis: Basis) -
     )
     circuit.detector_error_model(decompose_errors=False)
     assert len(circuit.shortest_graphlike_error()) == distance
+
+
+@pytest.mark.parametrize("distance", [3, 5])
+@pytest.mark.parametrize("init_basis", [Basis.X, Basis.Z])
+def test_y_cap_segment_detectors_are_deterministic(distance: int, init_basis: Basis) -> None:
+    """The full Y-cap segment (memory + transition + boundary + final) must have
+    only deterministic detectors, including the transition seam detectors."""
+    circuit = y_cap_segment_circuit(distance, mem_rounds=distance, init_basis=init_basis)
+    circuit.detector_error_model(decompose_errors=False)
+
+
+def _cap_only_circuit(distance: int):
+    """[transition, boundary x d//2, final] with data qubits unreset, for
+    observable-flow checks. Returns (circuit, builder, transition flows)."""
+    xtop = xtop_qubit_patch(distance)
+    ztop = ztop_yboundary_patch(distance)
+    b = _Builder()
+    b.allocate(
+        set(xtop.data_qubits)
+        | {s.ancilla for s in xtop.stabilizers}
+        | set(ztop.data_qubits)
+        | {s.ancilla for s in ztop.stabilizers}
+    )
+    flows = transition_round(b, distance, "T")
+    prev = "T"
+    for i in range(distance // 2):
+        standard_round(b, ztop, f"b{i}")
+        prev = f"b{i}"
+    _final_round(b, ztop, prev, "F", distance)
+    return b, flows
+
+
+@pytest.mark.parametrize("distance", [3, 5])
+def test_transition_measures_logical_y(distance: int) -> None:
+    """The transition round's observable records must reconstruct exactly the
+    incoming logical-Y operator (Y at the corner, Z along the x-axis boundary,
+    X along the y-axis boundary), verified via stim's has_flow."""
+    b, flows = _cap_only_circuit(distance)
+    nq = max(b.q2i.values()) + 1
+    arr = ["I"] * nq
+    arr[b.q2i[gidney_to_tqec(0j)]] = "Y"
+    for q in range(1, distance):
+        arr[b.q2i[gidney_to_tqec(complex(q, 0))]] = "Z"
+        arr[b.q2i[gidney_to_tqec(complex(0, q))]] = "X"
+    inp = stim.PauliString("".join(arr))
+    obs_recs = [b.rec("T", c) for c in flows.observable]
+    flow = stim.Flow(input=inp, output=stim.PauliString(nq), measurements=obs_recs)
+    assert b.circuit.has_flow(flow)

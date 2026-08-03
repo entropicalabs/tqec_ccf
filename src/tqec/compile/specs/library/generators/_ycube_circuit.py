@@ -26,11 +26,19 @@ import stim
 from tqec.compile.specs.library.generators.ycube import (
     PatchGeometry,
     Stabilizer,
+    gidney_to_tqec,
     xtop_qubit_patch,
+    ztop_yboundary_patch,
 )
 from tqec.utils.enums import Basis
 
 Coord = tuple[int, int]
+
+# Gidney's diagonal directions in complex coordinates (DR, DL, UL, UR).
+_DR = 0.5 + 0.5j
+_DL = -0.5 + 0.5j
+_UL = -0.5 - 0.5j
+_UR = 0.5 - 0.5j
 
 
 @dataclass
@@ -169,6 +177,264 @@ def _first_round_detectors(
         data = [d for d in s.ordered_data if d is not None]
         if all(init_data_basis.get(d) == s.basis for d in data):
             b.detector([b.rec(tag, s.ancilla)], (s.ancilla[0], s.ancilla[1], 0))
+
+
+def _split_dl_md_ur(
+    ps: set[complex],
+) -> tuple[set[complex], set[complex], set[complex]]:
+    """Port of Gidney's ``_split_dl_md_ur``: partition measure qubits into
+    below-diagonal / on-diagonal / above-diagonal groups."""
+    dl: set[complex] = set()
+    md: set[complex] = set()
+    ur: set[complex] = set()
+    for m in ps:
+        if m.real > m.imag + 1:
+            ur.add(m)
+        elif m.real == m.imag or m.real == m.imag + 1:
+            md.add(m)
+        else:
+            dl.add(m)
+    return dl, md, ur
+
+
+@dataclass
+class TransitionFlows:
+    """The measurement records (as tqec coords, in the transition round) that
+    form each stabilizer's detector, matched to adjacent rounds by ancilla.
+
+    Attributes:
+        start: ``{xtop ancilla (complex) -> [tqec coords measured this round]}``.
+            Matched against the preceding memory round's measurement of the
+            same ancilla to form the seam detector.
+        end: ``{ztop ancilla (complex) -> [tqec coords measured this round]}``.
+            Matched against the following boundary round's measurement of the
+            same ancilla.
+        observable: tqec coords measured this round that flow into the logical-Y
+            observable.
+    """
+
+    start: dict[complex, list[Coord]]
+    end: dict[complex, list[Coord]]
+    observable: list[Coord]
+
+
+def transition_round(b: _Builder, distance: int, round_tag: str) -> TransitionFlows:
+    """Emit the Y-basis transition round (xtop patch -> degenerate ztop patch).
+
+    Direct port of Gidney's ``make_y_transition_round_nesw_xzxz_to_xzzx``: the
+    corner data qubit is measured in the Y basis and the patch is folded onto
+    the degenerate Y-boundary patch. Gate positions are computed in Gidney's
+    complex-plane convention and mapped to tqec integer coordinates on emission.
+    """
+    d = distance
+    start = xtop_qubit_patch(d)
+    end = ztop_yboundary_patch(d)
+    # `used`: every qubit either patch touches, in Gidney complex coords.
+    used: set[complex] = set()
+    for patch in (start, end):
+        for s in patch.stabilizers:
+            # reconstruct gidney data qubits from the stabilizer's gidney ancilla
+            used.add(s.gidney_ancilla)
+        for dq in patch.data_qubits:
+            used.add(complex((dq[0] - 1) / 2, (dq[1] - 1) / 2))
+
+    def mbasis(q: complex) -> str | None:
+        if q.real % 1 == 0:
+            return None
+        return "X" if int(q.real + q.imag) & 1 == 0 else "Z"
+
+    xs = {q for q in used if mbasis(q) == "X"}
+    zs = {q for q in used if mbasis(q) == "Z"}
+    top_row = {q for q in used if q.imag == -0.5}
+    right_col = {q for q in used if q.real == d - 0.5}
+
+    def toward(qs: set[complex], delta: complex, sign: int) -> list[tuple[complex, complex]]:
+        result = []
+        for q in qs:
+            if q + delta in used:
+                pair = (q, q + delta)
+                result.append(pair if sign == 1 else pair[::-1])
+        return result
+
+    xs_dl, xs_md, xs_ur = _split_dl_md_ur(xs)
+    zs_dl, zs_md, zs_ur = _split_dl_md_ur(zs)
+
+    def g(q: complex) -> Coord:
+        return gidney_to_tqec(q)
+
+    def e1(name: str, qs: set[complex]) -> None:
+        b.gate1(name, [g(q) for q in qs])
+
+    def e2(name: str, pairs: list[tuple[complex, complex]]) -> None:
+        b.gate2(name, [(g(a), g(bb)) for a, bb in pairs])
+
+    e1("RX", (xs - right_col) | top_row)
+    e1("R", (zs - top_row) | right_col)
+    b.tick()
+    e2("CX", toward(xs - right_col, _DL, +1))
+    e2("CX", toward(zs - top_row, _DL, -1))
+    b.tick()
+    e2("CX", toward(xs - right_col, _DR, +1))
+    e2("CX", toward(zs - top_row, _UL, -1))
+    b.tick()
+    e2("CX", toward(xs_ur | xs_md, _UL, -1))
+    e2("CX", toward(zs_ur, _DR, +1))
+    e2("XCY", toward(zs_md, _DR, +1))
+    e2("CX", toward(xs_dl, _UL, +1))
+    e2("CX", toward(zs_dl, _DR, -1))
+    b.tick()
+    e2("CX", toward(xs_ur, _DL, -1))
+    e2("CX", toward(zs_ur, _DL, +1))
+    e2("CX", toward(xs_dl, _UR, +1))
+    e2("CX", toward(zs_dl, _UR, -1))
+    b.tick()
+    e2("XCY", toward(xs_md - top_row, _DL, -1))
+    b.tick()
+    e1("H", {q for q in used if q.real > q.imag})
+    e1("SQRT_X", {q for q in used if q.real == q.imag and q.real % 1 == 0.5})
+    b.tick()
+
+    # Measurements: X-basis (xms), then the corner data qubit in Y, then Z-basis.
+    xms = (xs - top_row) | right_col
+    zms = (zs - right_col) | top_row
+    b.measure("MX", [g(q) for q in sorted(xms, key=lambda q: (q.imag, q.real))], round_tag)
+    b.measure("MY", [g(0j)], round_tag)
+    b.measure("M", [g(q) for q in sorted(zms, key=lambda q: (q.imag, q.real))], round_tag)
+
+    # Start flows: input stabilizers (xtop tiles) measured this round.
+    start_flows: dict[complex, list[Coord]] = {}
+    for s in start.stabilizers:
+        m = s.gidney_ancilla
+        if m.real == m.imag:
+            meas = [m, m + 1]
+        elif m.real == d - 0.5:
+            meas = [m]
+        elif m.imag == -0.5:
+            meas = [m]
+        elif m.real > m.imag and s.basis == Basis.X:
+            meas = [m - 1j]
+        elif m.real > m.imag and s.basis == Basis.Z:
+            meas = [m + 1]
+        elif m.real < m.imag:
+            meas = [m]
+        else:
+            raise NotImplementedError(f"unexpected start ancilla {m!r}")
+        start_flows[m] = [g(q) for q in meas]
+
+    # End flows: output stabilizers (ztop tiles) prepared this round.
+    end_flows: dict[complex, list[Coord]] = {}
+    for s in end.stabilizers:
+        m = s.gidney_ancilla
+        if m == 0.5 + 0.5j:
+            meas = [m, m + 1, m - 1j, m + _UL]
+        elif m == d - 0.5 + 0.5j:
+            meas = [m]
+        elif m == d - 1.5 - 0.5j:
+            meas = [m]
+        elif m.real == d - 0.5:
+            meas = [m, m - 1j]
+        elif m.imag == -0.5:
+            meas = [m, m + 1]
+        elif m.real == m.imag:
+            meas = [m, m + 1, m - 1j]
+        else:
+            meas = [m]
+        end_flows[m] = [g(q) for q in meas]
+
+    # Observable flow: logical Y = corner Y + xms records.
+    obs = [g(0j)] + [g(q) for q in xms]
+
+    return TransitionFlows(start=start_flows, end=end_flows, observable=obs)
+
+
+def _final_round(
+    b: _Builder, patch: PatchGeometry, prev_tag: str, tag: str, distance: int
+) -> None:
+    """Emit the transversal final data measurement on the degenerate patch and
+    the stabilizer-reconstruction detectors it enables.
+
+    Data qubit basis follows Gidney's anti-diagonal split: ``Z`` if
+    ``x + y < d`` else ``X`` (in Gidney coords). A stabilizer whose every data
+    qubit is measured in the stabilizer's own basis is reconstructed and paired
+    with its last ancilla measurement in ``prev_tag``.
+    """
+    measure_basis: dict[Coord, Basis] = {}
+    for dq in patch.data_qubits:
+        gx, gy = (dq[0] - 1) / 2, (dq[1] - 1) / 2
+        measure_basis[dq] = Basis.Z if gx + gy < distance else Basis.X
+    standard_round(b, patch, tag, measure_data_basis=measure_basis)
+    for s in patch.stabilizers:
+        data = [d for d in s.ordered_data if d is not None]
+        if all(measure_basis.get(d) == s.basis for d in data):
+            b.detector(
+                [b.rec(prev_tag, s.ancilla)] + [b.rec(tag, d) for d in data],
+                (s.ancilla[0], s.ancilla[1], 2),
+            )
+
+
+def y_cap_segment_circuit(
+    distance: int, mem_rounds: int, init_basis: Basis
+) -> stim.Circuit:
+    """Full standalone Y-cap experiment for validation.
+
+    Initialise the xtop patch data in ``init_basis``, run ``mem_rounds`` memory
+    rounds, then the Y-cap segment (transition, ``d//2`` boundary rounds, final
+    transversal measurement), wiring every detector including the transition
+    seam detectors. No logical observable is included (a lone Y cap has no
+    deterministic logical on a non-Y-eigenstate input); this validates that the
+    detector structure across the transition is deterministic.
+    """
+    d = distance
+    xtop = xtop_qubit_patch(d)
+    ztop = ztop_yboundary_patch(d)
+    b = _Builder()
+    all_coords = (
+        set(xtop.data_qubits)
+        | {s.ancilla for s in xtop.stabilizers}
+        | set(ztop.data_qubits)
+        | {s.ancilla for s in ztop.stabilizers}
+    )
+    b.allocate(all_coords)
+
+    init = {dq: init_basis for dq in xtop.data_qubits}
+    mem_tags = [f"m{i}" for i in range(mem_rounds)]
+    standard_round(b, xtop, mem_tags[0], init_data_basis=init)
+    _first_round_detectors(b, xtop, mem_tags[0], init)
+    for i in range(1, mem_rounds):
+        standard_round(b, xtop, mem_tags[i])
+        _bulk_detectors(b, xtop, mem_tags[i - 1], mem_tags[i])
+
+    # Transition round + seam detectors against the last memory round.
+    t_tag = "T"
+    flows = transition_round(b, d, t_tag)
+    for s in xtop.stabilizers:
+        m = s.gidney_ancilla
+        b.detector(
+            [b.rec(mem_tags[-1], s.ancilla)] + [b.rec(t_tag, c) for c in flows.start[m]],
+            (s.ancilla[0], s.ancilla[1], 0),
+        )
+
+    # Boundary (padding) rounds on the degenerate patch.
+    pad = d // 2
+    b_tags = [f"b{i}" for i in range(pad)]
+    prev = t_tag
+    for i in range(pad):
+        standard_round(b, ztop, b_tags[i])
+        if i == 0:
+            # First boundary round's start flows match the transition end flows.
+            for s in ztop.stabilizers:
+                m = s.gidney_ancilla
+                b.detector(
+                    [b.rec(t_tag, c) for c in flows.end[m]] + [b.rec(b_tags[0], s.ancilla)],
+                    (s.ancilla[0], s.ancilla[1], 0),
+                )
+        else:
+            _bulk_detectors(b, ztop, b_tags[i - 1], b_tags[i])
+        prev = b_tags[i]
+
+    # Final transversal data measurement.
+    _final_round(b, ztop, prev, "F", d)
+    return b.circuit
 
 
 def memory_experiment_circuit(distance: int, rounds: int, basis: Basis) -> stim.Circuit:
