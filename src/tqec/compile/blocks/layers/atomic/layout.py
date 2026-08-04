@@ -10,6 +10,7 @@ from tqec.circuit.schedule.circuit import ScheduledCircuit
 from tqec.compile.blocks.enums import SpatialBlockBorder
 from tqec.compile.blocks.layers.atomic.base import BaseLayer
 from tqec.compile.blocks.layers.atomic.plaquettes import PlaquetteLayer
+from tqec.compile.blocks.layers.atomic.raw import RawCircuitLayer
 from tqec.compile.blocks.positioning import (
     LayoutCubePosition2D,
     LayoutPipePosition2D,
@@ -376,6 +377,11 @@ class LayoutLayer(BaseLayer):
             quantum circuit representing the layer.
 
         """
+        raw_positions = [
+            pos for pos, layer in self.layers.items() if isinstance(layer, RawCircuitLayer)
+        ]
+        if raw_positions:
+            return self._raw_to_circuit(k, raw_positions)
         if reschedule_measurements:
             self.reschedule_measurements()
         template, plaquettes = self.to_template_and_plaquettes()
@@ -399,6 +405,35 @@ class LayoutLayer(BaseLayer):
         shift = Shift2D(mincube.x * (eshape.x - 1), mincube.y * (eshape.y - 1))
         shifted_circuit = scheduled_circuit.map_to_qubits(lambda q: q + shift)
         return shifted_circuit
+
+    def _raw_to_circuit(
+        self, k: int, raw_positions: list[LayoutPosition2D]
+    ) -> ScheduledCircuit:
+        """Emit a layer that carries a :class:`RawCircuitLayer` at a cube position.
+
+        The raw layer supplies a self-contained ``ScheduledCircuit`` in the local
+        element frame; it is shifted into this layer's qubit coordinate frame
+        exactly as the plaquette path shifts its generated circuit. Only the
+        single-cube-position case (one raw layer, no parallel plaquette content)
+        is supported -- the shape a lone Y cap needs.
+        """
+        if len(self.layers) != 1 or len(raw_positions) != 1:
+            raise NotImplementedError(
+                f"{type(self).__name__}.to_circuit only supports a single "
+                "RawCircuitLayer occupying the whole layer; got "
+                f"{len(raw_positions)} raw layer(s) among {len(self.layers)} "
+                "positions."
+            )
+        pos = raw_positions[0]
+        if not isinstance(pos, LayoutCubePosition2D):
+            raise NotImplementedError("A RawCircuitLayer is only supported at a cube position.")
+        raw_layer = self.layers[pos]
+        assert isinstance(raw_layer, RawCircuitLayer)
+        scheduled = raw_layer.circuit_factory(k)
+        mincube, _ = self.bounds
+        eshape = self.element_shape.to_shape_2d(k)
+        shift = Shift2D(mincube.x * (eshape.x - 1), mincube.y * (eshape.y - 1))
+        return scheduled.map_to_qubits(lambda q: q + shift)
 
     @property
     @override

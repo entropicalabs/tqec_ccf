@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 
 import stim
 
+from tqec.circuit.schedule.circuit import ScheduledCircuit
+from tqec.compile.blocks.layers.atomic.raw import RawCircuitLayer
 from tqec.compile.specs.library.generators.ycube import (
     PatchGeometry,
     Stabilizer,
@@ -31,8 +33,15 @@ from tqec.compile.specs.library.generators.ycube import (
     ztop_yboundary_patch,
 )
 from tqec.utils.enums import Basis
+from tqec.utils.scale import LinearFunction, PhysicalQubitScalable2D
 
 Coord = tuple[int, int]
+
+# The Y-cap raw slice occupies the same physical footprint as a memory cube
+# (element shape 4k+5) and 6k+15 moments (transition + d//2 boundary rounds +
+# final, each round ticked; d = 2k+1).
+_YCAP_ELEMENT_SHAPE = PhysicalQubitScalable2D(LinearFunction(4, 5), LinearFunction(4, 5))
+_YCAP_NUM_MOMENTS = LinearFunction(6, 15)
 
 # Gidney's diagonal directions in complex coordinates (DR, DL, UL, UR).
 _DR = 0.5 + 0.5j
@@ -154,6 +163,9 @@ def standard_round(
         qs = [q for q, bb in measure_data_basis.items() if bb == basis]
         b.measure(f"M{basis.value}", qs, round_tag)
     b.measure("M", z_anc, round_tag)
+    # Trailing TICK so the next round's resets land in a fresh moment (each
+    # moment holds at most one operation per qubit, as tqec's Moment requires).
+    b.tick()
 
 
 def _bulk_detectors(
@@ -300,6 +312,8 @@ def transition_round(b: _Builder, distance: int, round_tag: str) -> TransitionFl
     b.measure("MX", [g(q) for q in sorted(xms, key=lambda q: (q.imag, q.real))], round_tag)
     b.measure("MY", [g(0j)], round_tag)
     b.measure("M", [g(q) for q in sorted(zms, key=lambda q: (q.imag, q.real))], round_tag)
+    # Trailing TICK so the next round starts in a fresh moment.
+    b.tick()
 
     # Start flows: input stabilizers (xtop tiles) measured this round.
     start_flows: dict[complex, list[Coord]] = {}
@@ -504,6 +518,45 @@ def y_cap_raw_circuit(distance: int) -> tuple[stim.Circuit, dict[Coord, list[int
 
     _final_round(b, ztop, prev, "F", d)
     return b.circuit, seam_spec
+
+
+class YCapRawLayer(RawCircuitLayer):
+    """A :class:`RawCircuitLayer` implementing the Y-basis measurement cap.
+
+    Carries the raw ``[transition, boundary x d//2, final]`` slice (with all its
+    self-contained detectors) as its circuit, plus the ``seam_spec`` needed by
+    the detector annotator to close the transition's start flows against the
+    below cube's last memory round (which a plain ``circuit_factory`` cannot
+    see).
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            self._make_scheduled_circuit,
+            _YCAP_ELEMENT_SHAPE,
+            _YCAP_NUM_MOMENTS,
+        )
+
+    @property
+    def scalable_timesteps(self) -> LinearFunction:
+        # The cap spans a scalable number of rounds -- transition + d//2 boundary
+        # rounds + final = k + 2 for d = 2k + 1 -- even though it is emitted as a
+        # single raw circuit. Reporting this (instead of an atomic layer's fixed
+        # 1) makes the enclosing Block a valid, temporally scalable cube.
+        return LinearFunction(1, 2)
+
+    @staticmethod
+    def _make_scheduled_circuit(k: int) -> ScheduledCircuit:
+        circuit, _ = y_cap_raw_circuit(2 * k + 1)
+        return ScheduledCircuit.from_circuit(circuit)
+
+    @staticmethod
+    def seam_spec(k: int) -> dict[Coord, list[int]]:
+        """Below-cube ancilla coordinate (local element frame) -> raw-slice-
+        relative measurement record indices closing that stabilizer's seam
+        detector. See :func:`y_cap_raw_circuit`."""
+        _, seam = y_cap_raw_circuit(2 * k + 1)
+        return seam
 
 
 def memory_experiment_circuit(distance: int, rounds: int, basis: Basis) -> stim.Circuit:

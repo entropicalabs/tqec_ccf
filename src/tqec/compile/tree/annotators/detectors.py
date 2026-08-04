@@ -5,7 +5,10 @@ from dataclasses import dataclass, field
 from typing_extensions import override
 
 from tqec.circuit.measurement_map import MeasurementRecordsMap
+from tqec.circuit.qubit import GridQubit
 from tqec.compile.blocks.layers.atomic.layout import LayoutLayer
+from tqec.compile.blocks.layers.atomic.raw import RawCircuitLayer
+from tqec.utils.coordinates import StimCoordinates
 from tqec.compile.conditional.circuit import IfBlock
 from tqec.compile.detectors.compute import compute_detectors_for_fixed_radius
 from tqec.compile.detectors.database import DetectorDatabase
@@ -279,6 +282,15 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
         if annotations.circuit is None:
             raise TQECError("Cannot compute detectors without the circuit annotation.")
 
+        raw_layers = [
+            layer
+            for layer in node._layer.layers.values()
+            if isinstance(layer, RawCircuitLayer)
+        ]
+        if raw_layers:
+            self._annotate_raw_slice(node, annotations, raw_layers)
+            return
+
         template_zero, plaquettes_zero = node._layer.to_template_and_plaquettes()
         plaquettes_one_for_round: Plaquettes | None = None
         active_condition_recs: list[int] | None = None
@@ -373,6 +385,51 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
                     else_body=else_body if else_body else None,
                 )
             )
+
+    def _annotate_raw_slice(
+        self, node: LayerNode, annotations: object, raw_layers: list[RawCircuitLayer]
+    ) -> None:
+        """Handle a leaf whose layer carries a :class:`RawCircuitLayer`.
+
+        Such a slice (e.g. the Y-basis measurement cap) brings its own internal
+        detectors inside its circuit, so no template-based computation is done
+        here. The only detectors that must be added are the *seam* detectors,
+        which close the slice's start flows against the previous round's
+        measurements (invisible to a ``circuit_factory``). The layer exposes
+        them via a ``seam_spec(k)`` mapping each previous-round ancilla
+        coordinate to the raw-slice-relative record indices closing it.
+        """
+        if len(raw_layers) != 1:
+            raise TQECError("Only a single RawCircuitLayer per layer is supported.")
+        raw_layer = raw_layers[0]
+        raw_records = MeasurementRecordsMap.from_scheduled_circuit(annotations.circuit)
+        raw_total = annotations.circuit.get_circuit().num_measurements
+
+        seam_getter = getattr(raw_layer, "seam_spec", None)
+        if seam_getter is not None and len(self._lookback_stack) >= 1:
+            # Previous round's records (the below cube's last memory round).
+            _, _, prev_records = self._lookback_stack.lookback(1)
+            for anc_coord, raw_idxs in seam_getter(self._k).items():
+                gq = GridQubit(anc_coord[0], anc_coord[1])
+                if gq not in prev_records:
+                    raise TQECError(
+                        f"Y-cap seam detector references ancilla {anc_coord} that "
+                        "was not measured in the previous round; the below cube's "
+                        "last round does not match the Y patch."
+                    )
+                prev_offset = prev_records[gq][-1]
+                offsets = [prev_offset - raw_total] + [i - raw_total for i in raw_idxs]
+                annotations.detectors.append(
+                    DetectorAnnotation(
+                        StimCoordinates(float(anc_coord[0]), float(anc_coord[1]), 0.0),
+                        sorted(offsets),
+                    )
+                )
+
+        # Push this slice's own records so later rounds see a continuous stream.
+        # No template/plaquettes exist for a raw slice; a raw slice is currently
+        # always the topmost slice of its column, so nothing looks back through it.
+        self._lookback_stack.append(None, None, raw_records)  # type: ignore[arg-type]
 
     @override
     def enter_node(self, node: LayerNode) -> None:

@@ -86,7 +86,14 @@ class FixedBulkCubeBuilder(CubeBuilder):
         if kind is LeafCubeKind.PORT:
             raise TQECError("Cannot build a block for a Port.")
         elif kind is LeafCubeKind.Y_HALF_CUBE:
-            raise NotImplementedError("Y cube is not implemented.")
+            from tqec.compile.specs.library.generators._ycube_circuit import YCapRawLayer
+
+            # The Y-basis measurement cap is a single raw-circuit slice
+            # (transition + boundary padding + transversal final measurement).
+            # The below cube supplies the memory rounds via its own ZXCube path;
+            # this cube only emits the cap. Its temporal extent is fixed by the
+            # cap construction, not by block_temporal_height.
+            return Block([YCapRawLayer()])
         elif isinstance(kind, ConditionalLeafCubeKind):
             kind_zero, kind_one = kind.value
             condition = spec.condition
