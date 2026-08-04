@@ -88,12 +88,19 @@ class FixedBulkCubeBuilder(CubeBuilder):
         elif kind is LeafCubeKind.Y_HALF_CUBE:
             from tqec.compile.specs.library.generators._ycube_circuit import YCapRawLayer
 
-            # The Y-basis measurement cap is a single raw-circuit slice
-            # (transition + boundary padding + transversal final measurement).
-            # The below cube supplies the memory rounds via its own ZXCube path;
-            # this cube only emits the cap. Its temporal extent is fixed by the
-            # cap construction, not by block_temporal_height.
-            return Block([YCapRawLayer()])
+            # The Y-basis measurement cap is a raw-circuit slice (transition +
+            # boundary padding + transversal final measurement). It is preceded
+            # by one standard memory round (the "adapter"): this gives the block
+            # a Template for the temporal-pipe junction with the below cube, is
+            # replaced by that pipe's junction layer (a memory round -- exactly
+            # what the cap needs beneath it), and is the round the cap's seam
+            # detectors close against. Milestone 1 supports a ``ZX*`` below cube
+            # (identity patch orientation, Z observable HORIZONTAL).
+            adapter = PlaquetteLayer(
+                self._generator.get_memory_qubit_raw_template(),
+                self._generator.get_memory_qubit_plaquettes(Orientation.HORIZONTAL, None, None),
+            )
+            return Block([adapter, YCapRawLayer()])
         elif isinstance(kind, ConditionalLeafCubeKind):
             kind_zero, kind_one = kind.value
             condition = spec.condition
