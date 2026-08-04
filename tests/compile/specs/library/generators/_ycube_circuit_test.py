@@ -252,3 +252,51 @@ def test_raw_slice_plus_seam_matches_segment(distance: int) -> None:
     composed.detector_error_model(decompose_errors=False)
     segment = y_cap_segment_circuit(distance, mem_rounds=distance, init_basis=Basis.Z)
     assert composed.num_detectors == segment.num_detectors
+
+
+def _detector_signature(circuit: stim.Circuit, coord_map: dict[int, tuple]) -> set[frozenset]:
+    """Frame-independent detector fingerprint: each detector as the frozenset of
+    ``(qubit_coord, k-th-measurement-of-that-qubit)`` labels it references."""
+    times: dict[tuple, int] = {}
+    rec_id: dict[int, tuple] = {}
+    n = 0
+    for inst in circuit:
+        if inst.name in ("M", "MX", "MY", "MZ"):
+            for t in inst.targets_copy():
+                if t.is_qubit_target:
+                    c = coord_map[t.value]
+                    k = times.get(c, 0)
+                    times[c] = k + 1
+                    rec_id[n] = (c, k)
+                    n += 1
+    dets: set[frozenset] = set()
+    running = 0
+    for inst in circuit:
+        if inst.name in ("M", "MX", "MY", "MZ"):
+            running += sum(1 for t in inst.targets_copy() if t.is_qubit_target)
+        elif inst.name == "DETECTOR":
+            dets.add(frozenset(rec_id[running + t.value] for t in inst.targets_copy()))
+    return dets
+
+
+def _coord_map(circuit: stim.Circuit, transform) -> dict[int, tuple]:
+    return {
+        inst.targets_copy()[0].value: transform(*inst.gate_args_copy())
+        for inst in circuit
+        if inst.name == "QUBIT_COORDS"
+    }
+
+
+@pytest.mark.parametrize("distance", [3, 5])
+def test_raw_slice_detectors_match_oracle_exactly(distance: int) -> None:
+    """The native Y-cap slice (memory column + raw slice + seam) must have a
+    detector set identical to Gidney's gen oracle -- not merely the same count,
+    but the same detectors, each referencing the same (qubit, k-th-measurement)
+    labels once both are expressed in a common coordinate frame."""
+    native = _compose_below_and_raw(distance, distance, Basis.Z)
+    oracle = _oracle_y_cap_segment(distance, mem_rounds=distance)
+    native_sig = _detector_signature(native, _coord_map(native, lambda x, y, *r: (int(x), int(y))))
+    oracle_sig = _detector_signature(
+        oracle, _coord_map(oracle, lambda x, y, *r: gidney_to_tqec(complex(x, y)))
+    )
+    assert native_sig == oracle_sig
