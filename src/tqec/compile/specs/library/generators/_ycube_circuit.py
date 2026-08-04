@@ -442,6 +442,70 @@ def y_cap_segment_circuit(
     return b.circuit
 
 
+def y_cap_raw_circuit(distance: int) -> tuple[stim.Circuit, dict[Coord, list[int]]]:
+    """The raw Y-cap slice ``[transition, boundary x d//2, final]`` for a
+    ``RawCircuitLayer``, in tqec integer coordinates.
+
+    The data qubits are NOT reset here -- they carry the logical state in from
+    the below cube's memory column, which tqec emits natively. All detectors
+    that are internal to the slice are emitted here (transition end-flows vs the
+    first boundary round, boundary bulk, and the final round's bulk +
+    reconstruction), together with nothing that references a prior slice.
+
+    The transition round's *start* flows can only be closed against the below
+    cube's last memory round, which lives in a different slice and whose record
+    layout is not visible to a ``circuit_factory``. Those seam detectors are
+    therefore left for the detector annotator: this function returns a
+    ``seam_spec`` mapping each below-cube ancilla coordinate to the list of
+    *raw-slice-relative* measurement record indices (0-based within the returned
+    circuit) that, XORed with that ancilla's measurement in the previous round,
+    form the seam detector.
+
+    Returns:
+        ``(circuit, seam_spec)``.
+    """
+    d = distance
+    xtop = xtop_qubit_patch(d)
+    ztop = ztop_yboundary_patch(d)
+    b = _Builder()
+    b.allocate(
+        set(xtop.data_qubits)
+        | {s.ancilla for s in xtop.stabilizers}
+        | set(ztop.data_qubits)
+        | {s.ancilla for s in ztop.stabilizers}
+    )
+
+    t_tag = "T"
+    flows = transition_round(b, d, t_tag)
+
+    # Seam spec: below-cube ancilla coord -> raw-relative record indices of the
+    # transition measurements that close its stabilizer. gidney_to_tqec(m) is the
+    # coordinate the below round measured that same stabilizer's ancilla at.
+    seam_spec: dict[Coord, list[int]] = {}
+    for s in xtop.stabilizers:
+        m = s.gidney_ancilla
+        seam_spec[s.ancilla] = [b.rec(t_tag, c) for c in flows.start[m]]
+
+    pad = d // 2
+    b_tags = [f"b{i}" for i in range(pad)]
+    prev = t_tag
+    for i in range(pad):
+        standard_round(b, ztop, b_tags[i])
+        if i == 0:
+            for s in ztop.stabilizers:
+                m = s.gidney_ancilla
+                b.detector(
+                    [b.rec(t_tag, c) for c in flows.end[m]] + [b.rec(b_tags[0], s.ancilla)],
+                    (s.ancilla[0], s.ancilla[1], 0),
+                )
+        else:
+            _bulk_detectors(b, ztop, b_tags[i - 1], b_tags[i])
+        prev = b_tags[i]
+
+    _final_round(b, ztop, prev, "F", d)
+    return b.circuit, seam_spec
+
+
 def memory_experiment_circuit(distance: int, rounds: int, basis: Basis) -> stim.Circuit:
     """A self-contained surface-code memory experiment on the xtop patch.
 

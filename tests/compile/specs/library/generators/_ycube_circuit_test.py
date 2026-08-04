@@ -189,3 +189,66 @@ def test_y_cap_segment_detector_count_matches_oracle(distance: int) -> None:
     oracle = _oracle_y_cap_segment(distance, mem_rounds=distance)
     assert native.num_detectors == oracle.num_detectors
     assert native.num_qubits == oracle.num_qubits
+
+
+def _compose_below_and_raw(distance: int, mem_rounds: int, init_basis: Basis) -> stim.Circuit:
+    """Emulate what the detector annotator will do: a native below memory column,
+    the raw Y-cap slice appended, and the seam detectors formed from the raw
+    slice's seam_spec against the below column's last round."""
+    from tqec.compile.specs.library.generators._ycube_circuit import y_cap_raw_circuit
+
+    xtop = xtop_qubit_patch(distance)
+    b = _Builder()
+    b.allocate(set(xtop.data_qubits) | {s.ancilla for s in xtop.stabilizers})
+    init = {dq: init_basis for dq in xtop.data_qubits}
+    tags = [f"m{i}" for i in range(mem_rounds)]
+    standard_round(b, xtop, tags[0], init_data_basis=init)
+    _first_round_detectors(b, xtop, tags[0], init)
+    for i in range(1, mem_rounds):
+        standard_round(b, xtop, tags[i])
+        _bulk_detectors(b, xtop, tags[i - 1], tags[i])
+    last = tags[-1]
+
+    raw, seam = y_cap_raw_circuit(distance)
+    idx2coord = {
+        inst.targets_copy()[0].value: tuple(int(x) for x in inst.gate_args_copy())
+        for inst in raw
+        if inst.name == "QUBIT_COORDS"
+    }
+    b.allocate(set(idx2coord.values()))
+    raw_base = b.num_measurements
+    running = 0
+    for inst in raw:
+        if inst.name == "QUBIT_COORDS":
+            continue
+        if inst.name == "DETECTOR":
+            newt = [
+                stim.target_rec((raw_base + running + t.value) - (raw_base + running))
+                for t in inst.targets_copy()
+            ]
+            b.circuit.append("DETECTOR", newt, inst.gate_args_copy())
+            continue
+        targs = [b.q2i[idx2coord[t.value]] if t.is_qubit_target else t for t in inst.targets_copy()]
+        b.circuit.append(inst.name, targs, inst.gate_args_copy())
+        if inst.name in ("M", "MX", "MY", "MZ"):
+            running += sum(1 for t in inst.targets_copy() if t.is_qubit_target)
+    b.num_measurements = raw_base + running
+    for anc_coord, raw_idxs in seam.items():
+        recs = [b.rec(last, anc_coord)] + [raw_base + i for i in raw_idxs]
+        b.circuit.append(
+            "DETECTOR",
+            [stim.target_rec(r - b.num_measurements) for r in recs],
+            (anc_coord[0], anc_coord[1], 0),
+        )
+    return b.circuit
+
+
+@pytest.mark.parametrize("distance", [3, 5])
+def test_raw_slice_plus_seam_matches_segment(distance: int) -> None:
+    """The raw Y-cap slice + annotator-style seam detectors, composed onto a
+    native memory column, must be deterministic and carry the same number of
+    detectors as the monolithic y_cap_segment_circuit."""
+    composed = _compose_below_and_raw(distance, distance, Basis.Z)
+    composed.detector_error_model(decompose_errors=False)
+    segment = y_cap_segment_circuit(distance, mem_rounds=distance, init_basis=Basis.Z)
+    assert composed.num_detectors == segment.num_detectors
