@@ -273,6 +273,9 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
         self._min_z = min_z
         self._depth = 0
         self._z_index = -1
+        # Explicit multi-record end_spec handed forward by the transition round
+        # (Y cap), consumed by the next raw round. ``(end_spec, prev_total)``.
+        self._pending_end_spec: tuple[dict[tuple[int, int], list[int]], int] | None = None
 
     @override
     def visit_node(self, node: LayerNode) -> None:
@@ -391,13 +394,23 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
     ) -> None:
         """Handle a leaf whose layer carries a :class:`RawCircuitLayer`.
 
-        Such a slice (e.g. the Y-basis measurement cap) brings its own internal
-        detectors inside its circuit, so no template-based computation is done
-        here. The only detectors that must be added are the *seam* detectors,
-        which close the slice's start flows against the previous round's
-        measurements (invisible to a ``circuit_factory``). The layer exposes
-        them via a ``seam_spec(k)`` mapping each previous-round ancilla
-        coordinate to the raw-slice-relative record indices closing it.
+        The Y-basis measurement cap is sliced into per-round raw layers
+        (transition, boundary0, repeated boundary, final). A single round carries
+        no cross-round detectors: those *seam* / *bulk* detectors are formed here
+        from each round's flow specs, which close a round's ``start_spec`` against
+        the previous round's measurements. The previous round is either
+
+        * a *standard* round (the below memory round, a boundary round, or the
+          last boundary before the final round): its stabilizers are measured by
+          a single ancilla, recovered from the previous round's measurement
+          records keyed by ancilla coordinate (via the lookback stack); or
+        * the *transition* round, whose ``end_spec`` prepares each degenerate
+          stabilizer with multiple records not recoverable from a
+          coordinate-keyed record map, so it is handed forward explicitly via
+          ``self._pending_end_spec``.
+
+        Any detectors internal to a single round (the final round's stabilizer
+        reconstruction) stay inside the round's own circuit.
         """
         if len(raw_layers) != 1:
             raise TQECError("Only a single RawCircuitLayer per layer is supported.")
@@ -405,30 +418,53 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
         raw_records = MeasurementRecordsMap.from_scheduled_circuit(annotations.circuit)
         raw_total = annotations.circuit.get_circuit().num_measurements
 
-        seam_getter = getattr(raw_layer, "seam_spec", None)
-        if seam_getter is not None and len(self._lookback_stack) >= 1:
-            # Previous round's records (the below cube's last memory round).
-            _, _, prev_records = self._lookback_stack.lookback(1)
-            for anc_coord, raw_idxs in seam_getter(self._k).items():
-                gq = GridQubit(anc_coord[0], anc_coord[1])
-                if gq not in prev_records:
-                    raise TQECError(
-                        f"Y-cap seam detector references ancilla {anc_coord} that "
-                        "was not measured in the previous round; the below cube's "
-                        "last round does not match the Y patch."
-                    )
-                prev_offset = prev_records[gq][-1]
-                offsets = [prev_offset - raw_total] + [i - raw_total for i in raw_idxs]
-                annotations.detectors.append(
-                    DetectorAnnotation(
-                        StimCoordinates(float(anc_coord[0]), float(anc_coord[1]), 0.0),
-                        sorted(offsets),
-                    )
-                )
+        start_getter = getattr(raw_layer, "start_spec", None)
+        start_spec = start_getter(self._k) if start_getter is not None else {}
 
-        # Push this slice's own records so later rounds see a continuous stream.
-        # No template/plaquettes exist for a raw slice; a raw slice is currently
-        # always the topmost slice of its column, so nothing looks back through it.
+        if start_spec:
+            if self._pending_end_spec is not None:
+                # Previous round is the transition round: match against its
+                # explicit multi-record end_spec.
+                prev_end, prev_total = self._pending_end_spec
+                for anc_coord, cur_idxs in start_spec.items():
+                    if anc_coord not in prev_end:
+                        continue
+                    prev_offsets = [i - prev_total - raw_total for i in prev_end[anc_coord]]
+                    cur_offsets = [i - raw_total for i in cur_idxs]
+                    annotations.detectors.append(
+                        DetectorAnnotation(
+                            StimCoordinates(float(anc_coord[0]), float(anc_coord[1]), 0.0),
+                            sorted(prev_offsets + cur_offsets),
+                        )
+                    )
+            else:
+                # Previous round is a standard round: recover each stabilizer's
+                # ancilla measurement from the previous round's record map.
+                _, _, prev_records = self._lookback_stack.lookback(1)
+                for anc_coord, cur_idxs in start_spec.items():
+                    gq = GridQubit(anc_coord[0], anc_coord[1])
+                    if gq not in prev_records:
+                        raise TQECError(
+                            f"Y-cap seam detector references ancilla {anc_coord} "
+                            "that was not measured in the previous round; the "
+                            "below round does not match the Y patch."
+                        )
+                    prev_offset = prev_records[gq][-1]
+                    offsets = [prev_offset - raw_total] + [i - raw_total for i in cur_idxs]
+                    annotations.detectors.append(
+                        DetectorAnnotation(
+                            StimCoordinates(float(anc_coord[0]), float(anc_coord[1]), 0.0),
+                            sorted(offsets),
+                        )
+                    )
+
+        # Hand this round's explicit end_spec forward, if any (only the
+        # transition round has one). Cleared once consumed by the next round.
+        end_getter = getattr(raw_layer, "end_spec", None)
+        end_spec = end_getter(self._k) if end_getter is not None else None
+        self._pending_end_spec = (end_spec, raw_total) if end_spec is not None else None
+
+        # Push this slice's own records so later rounds can look back through it.
         self._lookback_stack.append(None, None, raw_records)  # type: ignore[arg-type]
 
     @override
