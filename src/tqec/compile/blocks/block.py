@@ -251,29 +251,106 @@ class ConditionalBlock(Block):
         return ConditionalBlock(new_zero, new_one, self._condition)
 
 
+def _flatten_block_layers(block: Block, k: int) -> list[BaseLayer]:
+    """Expand a block's layer sequence into one atomic layer per timestep at the
+    concrete scaling factor ``k`` (unrolling every ``RepeatedLayer``)."""
+    flat: list[BaseLayer] = []
+    for layer in block.layer_sequence:
+        if isinstance(layer, RepeatedLayer):
+            internal = layer.internal_layer
+            if not isinstance(internal, BaseLayer):
+                raise NotImplementedError(
+                    "Flattening a RepeatedLayer whose internal layer is composed "
+                    "is not supported for mismatched-schedule merges."
+                )
+            flat.extend([internal] * layer.repetitions.integer_eval(k))
+        elif isinstance(layer, BaseLayer):
+            flat.append(layer)
+        else:
+            raise NotImplementedError(
+                f"Cannot flatten layer of type {type(layer).__name__} for a "
+                "mismatched-schedule merge."
+            )
+    return flat
+
+
+def _block_pad_body(block: Block) -> BaseLayer:
+    """The repeatable bulk round used to pad a block that is shorter than the
+    merged slice: the internal layer of its (single) ``RepeatedLayer``.
+
+    Padding with an extra copy of this round is physics-preserving: for a memory
+    cube it is another memory round before the final measurement; for a Y cap it
+    is another boundary (padding) round on the degenerate patch before the
+    transversal final round.
+    """
+    repeated = [layer for layer in block.layer_sequence if isinstance(layer, RepeatedLayer)]
+    if len(repeated) != 1:
+        raise NotImplementedError(
+            "Padding a block for a mismatched-schedule merge requires exactly one "
+            f"RepeatedLayer to draw the bulk round from; found {len(repeated)}."
+        )
+    internal = repeated[0].internal_layer
+    if not isinstance(internal, BaseLayer):
+        raise NotImplementedError("RepeatedLayer internal layer must be atomic to pad.")
+    return internal
+
+
+def _merge_mismatched_block_layers(
+    blocks_in_parallel: Mapping[LayoutPosition2D, Block],
+    scalable_qubit_shape: PhysicalQubitScalable2D,
+    k: int,
+) -> list[LayoutLayer | BaseComposedLayer]:
+    """Merge parallel blocks with mismatched temporal schedules by flattening
+    each block at the concrete ``k`` and start-aligning them.
+
+    The merged slice runs for ``max`` rounds over the parallel blocks; every
+    shorter block is padded (with extra bulk rounds inserted just before its
+    final border round) so that all blocks reach the slice duration and its
+    final border round stays last. This lets a shorter Y-basis measurement cap
+    ``[transition, boundary0, boundary x (k-1), final]`` (``k+2`` rounds) coexist
+    with a continuing memory cube ``[init, mem x (2k-1), measure]`` (``2k+1``
+    rounds): the cap's rounds start-align with the memory column and the memory
+    column's trailing rounds run alongside extra cap boundary rounds.
+    """
+    flats = {pos: _flatten_block_layers(block, k) for pos, block in blocks_in_parallel.items()}
+    duration = max(len(flat) for flat in flats.values())
+    for pos, flat in flats.items():
+        extra = duration - len(flat)
+        if extra:
+            body = _block_pad_body(blocks_in_parallel[pos])
+            flats[pos] = flat[:-1] + [body] * extra + flat[-1:]
+    merged: list[LayoutLayer | BaseComposedLayer] = []
+    for i in range(duration):
+        layers = {pos: flat[i] for pos, flat in flats.items()}
+        merged.append(merge_base_layers(layers, scalable_qubit_shape))
+    return merged
+
+
 def merge_parallel_block_layers(
     blocks_in_parallel: Mapping[LayoutPosition2D, Block],
     scalable_qubit_shape: PhysicalQubitScalable2D,
+    k: int | None = None,
 ) -> list[LayoutLayer | BaseComposedLayer]:
     """Merge several stacks of layers executed in parallel into one stack of larger layers.
 
     Args:
-        blocks_in_parallel: a 2-dimensional arrangement of blocks. Each of the
-            provided block MUST have the exact same duration (also called
-            "temporal footprint", or number of atomic layers).
+        blocks_in_parallel: a 2-dimensional arrangement of blocks. Blocks that
+            share the exact same temporal schedule are merged into a scalable
+            structure. Blocks with mismatched schedules (a Y-basis measurement
+            cap alongside a continuing memory cube) are flattened and merged at
+            the concrete ``k`` (which must then be provided).
         scalable_qubit_shape: scalable shape of a scalable qubit. Considered
             valid across the whole domain.
+        k: scaling factor. Only consulted when the provided blocks have
+            mismatched temporal schedules, in which case it is required.
 
     Returns:
         a stack of layers representing the same slice of computation as the
         provided ``blocks_in_parallel``.
 
     Raises:
-        TQECError: if two items from the provided ``blocks_in_parallel`` do
-            not have the same temporal footprint.
-        NotImplementedError: if the provided blocks cannot be merged due to a
-            code branch not being implemented yet (and not due to a logical
-            error making the blocks unmergeable).
+        NotImplementedError: if the provided blocks have mismatched schedules but
+            no ``k`` was provided to flatten them.
 
     """
     if not blocks_in_parallel:
@@ -283,12 +360,14 @@ def merge_parallel_block_layers(
         for block in blocks_in_parallel.values()
     )
     if len(internal_layers_schedules) != 1:
-        raise NotImplementedError(
-            "merge_parallel_block_layers only supports merging blocks that have "
-            "layers with a matching temporal schedule. Found the following "
-            "different temporal schedules in the provided blocks: "
-            f"{internal_layers_schedules}."
-        )
+        if k is None:
+            raise NotImplementedError(
+                "merge_parallel_block_layers only supports merging blocks that "
+                "have layers with a matching temporal schedule, unless a concrete "
+                "k is provided to flatten them. Found the following different "
+                f"temporal schedules in the provided blocks: {internal_layers_schedules}."
+            )
+        return _merge_mismatched_block_layers(blocks_in_parallel, scalable_qubit_shape, k)
     schedule: Final = next(iter(internal_layers_schedules))
     merged_layers: list[LayoutLayer | BaseComposedLayer] = []
     for i in range(len(schedule)):

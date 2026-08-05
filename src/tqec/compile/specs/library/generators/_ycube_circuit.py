@@ -537,16 +537,25 @@ def y_cap_raw_circuit(distance: int) -> tuple[stim.Circuit, dict[Coord, list[int
 # The only detectors internal to a round are the final round's stabilizer
 # reconstruction detectors (they reference only the final round's own records).
 #
-# Flow specs (all keyed by tqec ancilla coordinate, values are 0-based record
-# indices within the round's own circuit):
-#   start_spec : the records this round contributes to a stabilizer, matched
+# Flow specs (all keyed by tqec ancilla coordinate; values are lists of *qubit
+# coordinates* measured this round, in the round's local element frame):
+#   start_spec : the qubits this round measures to detect a stabilizer, matched
 #                against the *previous* round's measurement of the same ancilla.
-#   end_spec   : the records this round contributes preparing a stabilizer, to
-#                be matched by the *next* round's start_spec. Only the transition
-#                round has a non-trivial (multi-record) end_spec; standard rounds
+#   end_spec   : the qubits this round measures preparing a stabilizer, to be
+#                matched by the *next* round's start_spec. Only the transition
+#                round has a non-trivial (multi-qubit) end_spec; standard rounds
 #                measure each stabilizer with a single ancilla, so their
-#                successors recover the match from the measurement records
-#                keyed by coordinate (no explicit end_spec needed).
+#                successors recover the match from the measurement records keyed
+#                by coordinate.
+#   reconstruction_spec : (final round only) the ancilla + transversally-measured
+#                data qubits that reconstruct a stabilizer within the final round.
+#
+# Values are *coordinates*, not record indices, because when a Y cap coexists
+# with a memory cube the two rounds' measurements are interleaved by
+# ``merge_scheduled_circuits`` -- so a local record index no longer identifies
+# the right measurement, but a qubit coordinate always does (each qubit is
+# measured at most once per round). The detector annotator resolves each
+# coordinate against the merged round's measurement-record map.
 
 _TRANSITION_NUM_MOMENTS = LinearFunction(0, 8)
 _STANDARD_NUM_MOMENTS = LinearFunction(0, 6)
@@ -586,19 +595,13 @@ def transition_raw_slice(
         | {s.ancilla for s in ztop.stabilizers}
     )
     flows = transition_round(b, d, "T")
-    start_spec = {
-        s.ancilla: [b.rec("T", c) for c in flows.start[s.gidney_ancilla]]
-        for s in xtop.stabilizers
-    }
-    end_spec = {
-        s.ancilla: [b.rec("T", c) for c in flows.end[s.gidney_ancilla]]
-        for s in ztop.stabilizers
-    }
-    observable_spec = [b.rec("T", c) for c in flows.observable]
+    start_spec = {s.ancilla: list(flows.start[s.gidney_ancilla]) for s in xtop.stabilizers}
+    end_spec = {s.ancilla: list(flows.end[s.gidney_ancilla]) for s in ztop.stabilizers}
+    observable_spec = list(flows.observable)
     return _strip_trailing_tick(b.circuit), start_spec, end_spec, observable_spec
 
 
-def boundary_raw_slice(distance: int) -> tuple[stim.Circuit, dict[Coord, list[int]]]:
+def boundary_raw_slice(distance: int) -> tuple[stim.Circuit, dict[Coord, list[Coord]]]:
     """A single boundary (padding) round on the degenerate patch, plus its
     ``start_spec`` (each stabilizer measured by its ancilla once)."""
     d = distance
@@ -606,16 +609,22 @@ def boundary_raw_slice(distance: int) -> tuple[stim.Circuit, dict[Coord, list[in
     b = _Builder()
     b.allocate(set(ztop.data_qubits) | {s.ancilla for s in ztop.stabilizers})
     standard_round(b, ztop, "B")
-    start_spec = {s.ancilla: [b.rec("B", s.ancilla)] for s in ztop.stabilizers}
+    start_spec = {s.ancilla: [s.ancilla] for s in ztop.stabilizers}
     return _strip_trailing_tick(b.circuit), start_spec
 
 
-def final_raw_slice(distance: int) -> tuple[stim.Circuit, dict[Coord, list[int]]]:
-    """The transversal final data measurement round, plus its ``start_spec``.
+def final_raw_slice(
+    distance: int,
+) -> tuple[stim.Circuit, dict[Coord, list[Coord]], dict[Coord, list[Coord]]]:
+    """The transversal final data measurement round, plus its ``start_spec`` and
+    ``reconstruction_spec``.
 
-    Emits the stabilizer-reconstruction detectors inline (they reference only
-    this round's records); the bulk detector against the last boundary round is
-    left to the annotator (via ``start_spec`` matched by ancilla coordinate).
+    The bulk detector against the last boundary round is left to the annotator
+    (via ``start_spec`` matched by ancilla coordinate). The stabilizer-
+    reconstruction detectors are also emitted by the annotator (via
+    ``reconstruction_spec``) rather than inline, because when the cap coexists
+    with a memory cube the merged round interleaves both patches' measurements
+    and a local record index would no longer be valid.
     """
     d = distance
     ztop = ztop_yboundary_patch(d)
@@ -626,79 +635,96 @@ def final_raw_slice(distance: int) -> tuple[stim.Circuit, dict[Coord, list[int]]
         gx, gy = (dq[0] - 1) / 2, (dq[1] - 1) / 2
         measure_basis[dq] = Basis.Z if gx + gy < d else Basis.X
     standard_round(b, ztop, "F", measure_data_basis=measure_basis)
+    start_spec = {s.ancilla: [s.ancilla] for s in ztop.stabilizers}
+    reconstruction_spec: dict[Coord, list[Coord]] = {}
     for s in ztop.stabilizers:
         data = [dd for dd in s.ordered_data if dd is not None]
         if all(measure_basis.get(dd) == s.basis for dd in data):
-            b.detector(
-                [b.rec("F", s.ancilla)] + [b.rec("F", dd) for dd in data],
-                (s.ancilla[0], s.ancilla[1], 2),
-            )
-    start_spec = {s.ancilla: [b.rec("F", s.ancilla)] for s in ztop.stabilizers}
-    return _strip_trailing_tick(b.circuit), start_spec
+            reconstruction_spec[s.ancilla] = [s.ancilla, *data]
+    return _strip_trailing_tick(b.circuit), start_spec, reconstruction_spec
 
 
 class _YRoundRawLayer(RawCircuitLayer):
     """One round of the Y-basis measurement cap, as a :class:`RawCircuitLayer`.
 
     Exposes the round's flow specs (``start_spec`` / ``end_spec`` /
-    ``observable_spec``) so the detector annotator can form the cross-round
-    detectors the sliced structure no longer carries inline.
+    ``observable_spec`` / ``reconstruction_spec``) so the detector annotator can
+    form the cross-round detectors the sliced structure no longer carries inline.
+    All spec values are qubit coordinates in the local element frame.
     """
 
     def __init__(
         self,
-        slice_factory: Callable[[int], tuple[stim.Circuit, dict[Coord, list[int]]]],
+        circuit_factory: Callable[[int], stim.Circuit],
         num_moments: LinearFunction,
     ) -> None:
-        self._slice_factory = slice_factory
+        self._make_circuit = circuit_factory
         super().__init__(self._make_scheduled_circuit, _YCAP_ELEMENT_SHAPE, num_moments)
 
     def _make_scheduled_circuit(self, k: int) -> ScheduledCircuit:
-        circuit = self._slice_factory(2 * k + 1)[0]
-        return ScheduledCircuit.from_circuit(circuit)
+        return ScheduledCircuit.from_circuit(self._make_circuit(2 * k + 1))
 
-    def start_spec(self, k: int) -> dict[Coord, list[int]]:
-        """Records matched against the previous round's measurement of the same
+    def start_spec(self, k: int) -> dict[Coord, list[Coord]]:
+        """Qubits matched against the previous round's measurement of the same
         ancilla (keyed by tqec ancilla coordinate)."""
-        return self._slice_factory(2 * k + 1)[1]
+        return {}
 
-    def end_spec(self, k: int) -> dict[Coord, list[int]] | None:
-        """Multi-record preparation spec handed to the next round, or ``None``
+    def end_spec(self, k: int) -> dict[Coord, list[Coord]] | None:
+        """Multi-qubit preparation spec handed to the next round, or ``None``
         when the successor recovers the match from measurement records by
         coordinate (every standard round)."""
         return None
 
-    def observable_spec(self, k: int) -> list[int] | None:
-        """Records reconstructing the logical-Y operator, or ``None``."""
+    def observable_spec(self, k: int) -> list[Coord] | None:
+        """Qubits reconstructing the logical-Y operator, or ``None``."""
+        return None
+
+    def reconstruction_spec(self, k: int) -> dict[Coord, list[Coord]] | None:
+        """Stabilizer-reconstruction spec internal to this round, or ``None``."""
         return None
 
 
 class _TransitionRawLayer(_YRoundRawLayer):
     def __init__(self) -> None:
-        super().__init__(
-            lambda d: (transition_raw_slice(d)[0], transition_raw_slice(d)[1]),
-            _TRANSITION_NUM_MOMENTS,
-        )
+        super().__init__(lambda d: transition_raw_slice(d)[0], _TRANSITION_NUM_MOMENTS)
 
-    def end_spec(self, k: int) -> dict[Coord, list[int]] | None:
+    def start_spec(self, k: int) -> dict[Coord, list[Coord]]:
+        return transition_raw_slice(2 * k + 1)[1]
+
+    def end_spec(self, k: int) -> dict[Coord, list[Coord]] | None:
         return transition_raw_slice(2 * k + 1)[2]
 
-    def observable_spec(self, k: int) -> list[int] | None:
+    def observable_spec(self, k: int) -> list[Coord] | None:
         return transition_raw_slice(2 * k + 1)[3]
+
+
+class _BoundaryRawLayer(_YRoundRawLayer):
+    def __init__(self) -> None:
+        super().__init__(lambda d: boundary_raw_slice(d)[0], _STANDARD_NUM_MOMENTS)
+
+    def start_spec(self, k: int) -> dict[Coord, list[Coord]]:
+        return boundary_raw_slice(2 * k + 1)[1]
+
+
+class _FinalRawLayer(_YRoundRawLayer):
+    def __init__(self) -> None:
+        super().__init__(lambda d: final_raw_slice(d)[0], _STANDARD_NUM_MOMENTS)
+
+    def start_spec(self, k: int) -> dict[Coord, list[Coord]]:
+        return final_raw_slice(2 * k + 1)[1]
+
+    def reconstruction_spec(self, k: int) -> dict[Coord, list[Coord]] | None:
+        return final_raw_slice(2 * k + 1)[2]
 
 
 def make_y_cap_layers() -> list[BaseLayer | BaseComposedLayer]:
     """Build the sliced Y-cap layer sequence ``[transition, boundary0,
     RepeatedLayer(boundary, k-1), final]`` (``k`` boundary rounds in total)."""
-    transition = _TransitionRawLayer()
-    boundary0 = _YRoundRawLayer(boundary_raw_slice, _STANDARD_NUM_MOMENTS)
-    boundary_rep = _YRoundRawLayer(boundary_raw_slice, _STANDARD_NUM_MOMENTS)
-    final = _YRoundRawLayer(final_raw_slice, _STANDARD_NUM_MOMENTS)
     return [
-        transition,
-        boundary0,
-        RepeatedLayer(boundary_rep, LinearFunction(1, -1)),
-        final,
+        _TransitionRawLayer(),
+        _BoundaryRawLayer(),
+        RepeatedLayer(_BoundaryRawLayer(), LinearFunction(1, -1)),
+        _FinalRawLayer(),
     ]
 
 

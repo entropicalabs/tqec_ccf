@@ -381,7 +381,9 @@ class LayoutLayer(BaseLayer):
             pos for pos, layer in self.layers.items() if isinstance(layer, RawCircuitLayer)
         ]
         if raw_positions:
-            return self._raw_to_circuit(k, raw_positions)
+            if len(self.layers) == len(raw_positions):
+                return self._raw_to_circuit(k, raw_positions)
+            return self._mixed_to_circuit(k, raw_positions, reschedule_measurements)
         if reschedule_measurements:
             self.reschedule_measurements()
         template, plaquettes = self.to_template_and_plaquettes()
@@ -434,6 +436,55 @@ class LayoutLayer(BaseLayer):
         eshape = self.element_shape.to_shape_2d(k)
         shift = Shift2D(mincube.x * (eshape.x - 1), mincube.y * (eshape.y - 1))
         return scheduled.map_to_qubits(lambda q: q + shift)
+
+    def _mixed_to_circuit(
+        self, k: int, raw_positions: list[LayoutPosition2D], reschedule_measurements: bool
+    ) -> ScheduledCircuit:
+        """Emit a layer that carries a mix of :class:`RawCircuitLayer` (a Y-cap
+        round) and :class:`PlaquetteLayer` (a coexisting memory round) at
+        distinct cube positions.
+
+        The plaquette positions are rendered via the standard template path; each
+        raw position supplies its own ``ScheduledCircuit``. All circuits are
+        placed into a common qubit frame (shifted by their cube position) and
+        merged moment-by-moment (schedule-aligned), so a shorter raw round simply
+        contributes no operations to the trailing moments of a longer plaquette
+        round (and vice versa).
+        """
+        from tqec.circuit.schedule.manipulation import (
+            merge_scheduled_circuits,
+            relabel_circuits_qubit_indices,
+        )
+
+        eshape = self.element_shape.to_shape_2d(k)
+        mincube, _ = self.bounds
+
+        circuits: list[ScheduledCircuit] = []
+        plaquette_layers = {
+            pos: layer
+            for pos, layer in self.layers.items()
+            if not isinstance(layer, RawCircuitLayer)
+        }
+        if plaquette_layers:
+            plaquette_only = LayoutLayer(plaquette_layers, self.element_shape)
+            circuits.append(plaquette_only.to_circuit(k, reschedule_measurements))
+
+        for pos in raw_positions:
+            if not isinstance(pos, LayoutCubePosition2D):
+                raise NotImplementedError(
+                    "A RawCircuitLayer is only supported at a cube position."
+                )
+            raw_layer = self.layers[pos]
+            assert isinstance(raw_layer, RawCircuitLayer)
+            block_pos = pos.to_block_position()
+            shift = Shift2D(
+                (block_pos.x - mincube.x) * (eshape.x - 1),
+                (block_pos.y - mincube.y) * (eshape.y - 1),
+            )
+            circuits.append(raw_layer.circuit_factory(k).map_to_qubits(lambda q: q + shift))
+
+        relabeled, qubit_map = relabel_circuits_qubit_indices(circuits)
+        return merge_scheduled_circuits(relabeled, qubit_map)
 
     @property
     @override

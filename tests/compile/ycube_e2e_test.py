@@ -44,3 +44,39 @@ def test_y_capped_column_has_no_mpp() -> None:
     """The native Y cap uses no fictitious multi-qubit Pauli measurements."""
     circuit = compile_block_graph(_y_capped_column(), observables="auto").generate_stim_circuit(k=1)
     assert not any(inst.name == "MPP" for inst in circuit.flattened())
+
+
+def _two_y_caps_with_main_column() -> BlockGraph:
+    """The notebook cells 7-8 graph: a 5-cube main column (x=0) with two Y caps
+    on side branches (x=1) at z=2 and z=4, each coexisting in a z-slice with a
+    continuing main-column memory cube (mismatched temporal schedules)."""
+    g = BlockGraph("two_y_caps")
+    b = [Position3D(0, 0, i) for i in range(5)]
+    c1, c3 = Position3D(1, 0, 1), Position3D(1, 0, 3)
+    y2, y4 = Position3D(1, 0, 2), Position3D(1, 0, 4)
+    for p in b:
+        g.add_cube(p, ZXCube.from_str("ZXZ"))
+    g.add_cube(c1, ZXCube.from_str("ZXZ"))
+    g.add_cube(c3, ZXCube.from_str("ZXZ"))
+    g.add_cube(y2, LeafCubeKind.Y_HALF_CUBE)
+    g.add_cube(y4, LeafCubeKind.Y_HALF_CUBE)
+    for i in range(4):
+        g.add_pipe(b[i], b[i + 1])
+    g.add_pipe(b[1], c1)
+    g.add_pipe(b[3], c3)
+    g.add_pipe(c1, y2)
+    g.add_pipe(c3, y4)
+    return g
+
+
+@pytest.mark.parametrize("k", [1, 2])
+def test_two_y_caps_coexistence_compiles_dem_clean(k: int) -> None:
+    """Two Y caps coexisting with a continuing memory column (mismatched
+    temporal schedules) compile to a circuit whose detectors are all
+    deterministic, with no MPP."""
+    circuit = compile_block_graph(
+        _two_y_caps_with_main_column(), observables=[]
+    ).generate_stim_circuit(k=k)
+    assert circuit.num_detectors > 0
+    circuit.detector_error_model(decompose_errors=False)  # raises if non-deterministic
+    assert not any(inst.name == "MPP" for inst in circuit.flattened())
