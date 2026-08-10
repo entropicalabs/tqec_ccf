@@ -19,6 +19,7 @@ surface-code round and the memory experiment used to validate the machinery.
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -226,7 +227,10 @@ class TransitionFlows:
             Matched against the following boundary round's measurement of the
             same ancilla.
         observable: tqec coords measured this round that flow into the logical-Y
-            observable.
+            observable, in Gidney's representative (corner Y plus the X-basis
+            ancillas). The compiler emits a different representative, matched to
+            the observable builder's middle-line convention --- see
+            :func:`_tqec_logical_y_observable_spec`.
     """
 
     start: dict[complex, list[Coord]]
@@ -573,17 +577,62 @@ def _strip_trailing_tick(circuit: stim.Circuit) -> stim.Circuit:
     return circuit
 
 
-def transition_raw_slice(
-    distance: int,
-) -> tuple[stim.Circuit, dict[Coord, list[int]], dict[Coord, list[int]], list[int]]:
-    """The single transition round as a standalone circuit plus its flow specs.
+def _measurement_coordinates(circuit: stim.Circuit) -> list[Coord]:
+    """The tqec coordinate measured by each measurement of ``circuit``, in order."""
+    qubit_coords = circuit.get_final_qubit_coordinates()
+    coords: list[Coord] = []
+    for instruction in circuit.flattened():
+        if instruction.name not in ("M", "MX", "MY", "MZ"):
+            continue
+        for target in instruction.targets_copy():
+            c = qubit_coords[target.qubit_value]
+            coords.append((int(c[0]), int(c[1])))
+    return coords
 
-    Returns ``(circuit, start_spec, end_spec, observable_spec)`` where
-    ``start_spec`` closes the transition against the below memory round (the
-    seam), ``end_spec`` prepares the degenerate patch stabilizers for the first
-    boundary round, and ``observable_spec`` are the records reconstructing the
-    logical-Y operator.
+
+@functools.cache
+def _tqec_logical_y_observable_spec(distance: int) -> tuple[Coord, ...]:
+    """The transition-round records measuring the logical Y operator *in tqec's
+    representative*.
+
+    :func:`transition_round` reports a logical-Y flow of its own
+    (``TransitionFlows.observable``, Gidney's corner-Y plus X-ancilla
+    representative). That is a valid logical Y, but it is not the representative
+    the rest of the compiler uses: an incoming correlation surface is lowered by
+    the observable builder onto the patch's *middle* lines --- the X sheet onto
+    the data column ``x = d`` and the Z sheet onto the data row ``y = d`` (see
+    ``build_regular_cube_top_readout_qubits``). The two representatives differ by
+    a product of input-patch stabilizers, so combining Gidney's readout with the
+    builder's host measurements leaves the observable non-deterministic.
+
+    Rather than hard-code that stabilizer correction, ask ``stim`` for the
+    records implementing the flow ``X(column x=d) . Z(row y=d) -> I`` through the
+    transition round. Any solution is equally valid --- solutions differ only by
+    sets that are deterministic within the round --- and it is exact and correct
+    at every distance by construction.
     """
+    d = distance
+    circuit, _ = _build_transition_round(d)
+    index_of = {
+        (int(c[0]), int(c[1])): q for q, c in circuit.get_final_qubit_coordinates().items()
+    }
+    target = stim.PauliString(circuit.num_qubits)
+    for y in range(1, 2 * d, 2):
+        target[index_of[(d, y)]] = "X"
+    for x in range(1, 2 * d, 2):
+        qubit = index_of[(x, d)]
+        # The centre qubit carries both sheets, i.e. X . Z = Y.
+        target[qubit] = "Y" if target[qubit] == 1 else "Z"
+    (solution,) = stim.Circuit.solve_flow_measurements(
+        circuit,
+        [stim.Flow(input=target, output=stim.PauliString(circuit.num_qubits))],
+    )
+    coords = _measurement_coordinates(circuit)
+    return tuple(sorted(coords[i] for i in solution))
+
+
+def _build_transition_round(distance: int) -> tuple[stim.Circuit, TransitionFlows]:
+    """The transition round on its own (no trailing ``TICK``) and its flows."""
     d = distance
     xtop = xtop_qubit_patch(d)
     ztop = ztop_yboundary_patch(d)
@@ -595,10 +644,28 @@ def transition_raw_slice(
         | {s.ancilla for s in ztop.stabilizers}
     )
     flows = transition_round(b, d, "T")
+    return _strip_trailing_tick(b.circuit), flows
+
+
+def transition_raw_slice(
+    distance: int,
+) -> tuple[stim.Circuit, dict[Coord, list[int]], dict[Coord, list[int]], list[int]]:
+    """The single transition round as a standalone circuit plus its flow specs.
+
+    Returns ``(circuit, start_spec, end_spec, observable_spec)`` where
+    ``start_spec`` closes the transition against the below memory round (the
+    seam), ``end_spec`` prepares the degenerate patch stabilizers for the first
+    boundary round, and ``observable_spec`` are the records reconstructing the
+    logical-Y operator in the representative the observable builder uses (see
+    :func:`_tqec_logical_y_observable_spec`).
+    """
+    d = distance
+    circuit, flows = _build_transition_round(d)
+    xtop = xtop_qubit_patch(d)
+    ztop = ztop_yboundary_patch(d)
     start_spec = {s.ancilla: list(flows.start[s.gidney_ancilla]) for s in xtop.stabilizers}
     end_spec = {s.ancilla: list(flows.end[s.gidney_ancilla]) for s in ztop.stabilizers}
-    observable_spec = list(flows.observable)
-    return _strip_trailing_tick(b.circuit), start_spec, end_spec, observable_spec
+    return circuit, start_spec, end_spec, list(_tqec_logical_y_observable_spec(d))
 
 
 def boundary_raw_slice(distance: int) -> tuple[stim.Circuit, dict[Coord, list[Coord]]]:

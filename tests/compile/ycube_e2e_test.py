@@ -12,6 +12,7 @@ import pytest
 
 from tqec import BlockGraph, compile_block_graph
 from tqec.computation.cube import LeafCubeKind, ZXCube
+from tqec.utils.noise_model import NoiseModel
 from tqec.utils.position import Position3D
 
 
@@ -80,3 +81,36 @@ def test_two_y_caps_coexistence_compiles_dem_clean(k: int) -> None:
     assert circuit.num_detectors > 0
     circuit.detector_error_model(decompose_errors=False)  # raises if non-deterministic
     assert not any(inst.name == "MPP" for inst in circuit.flattened())
+
+
+def _zzyy_surface() -> tuple[BlockGraph, list]:
+    graph = _two_y_caps_with_main_column()
+    surfaces = graph.find_correlation_surfaces()
+    assert [cs.external_stabilizer_on_graph(graph) for cs in surfaces] == ["ZZYY"]
+    return graph, surfaces
+
+
+@pytest.mark.parametrize("k", [1, 2])
+def test_two_y_caps_observable_is_deterministic(k: int) -> None:
+    """The closed ``Z_in . Z_out . Y_cap1 . Y_cap2`` surface (the S^2 = Z algebra)
+    lowers to a single observable that takes the same value on every shot."""
+    graph, surfaces = _zzyy_surface()
+    circuit = compile_block_graph(graph, observables=surfaces).generate_stim_circuit(k=k)
+    assert circuit.num_observables == 1
+    circuit.detector_error_model(decompose_errors=False)
+    _, observables = circuit.compile_detector_sampler().sample(
+        1000, separate_observables=True
+    )
+    assert len({bool(v) for v in observables.reshape(-1)}) == 1
+
+
+@pytest.mark.parametrize("k", [1, 2])
+def test_two_y_caps_observable_preserves_distance(k: int) -> None:
+    """The Y seam does not collapse the code distance of the closed surface."""
+    graph, surfaces = _zzyy_surface()
+    circuit = compile_block_graph(graph, observables=surfaces).generate_stim_circuit(k=k)
+    noisy = NoiseModel.uniform_depolarizing(0.001).noisy_circuit(circuit)
+    error = noisy.shortest_graphlike_error(
+        ignore_ungraphlike_errors=False, canonicalize_circuit_errors=True
+    )
+    assert len(error) == 2 * k + 1
