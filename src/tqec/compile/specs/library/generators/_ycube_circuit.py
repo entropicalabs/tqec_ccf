@@ -867,6 +867,27 @@ class YHalfCubeBlock(Block):
         super().__init__(layer_sequence, trimmed_spatial_borders)
         self.template = template
 
+    @property
+    @override
+    def releases_its_qubits(self) -> bool:
+        # The cap's final round measures every data qubit of the degenerate
+        # patch transversally, so nothing of it survives into later rounds.
+        return True
+
+    @override
+    def with_temporal_borders_replaced(
+        self,
+        border_replacements: Mapping[TemporalBlockBorder, BaseLayer | None],
+    ) -> YHalfCubeBlock | None:
+        # Keep the subclass: the merged slice reads ``releases_its_qubits`` off
+        # the block *after* the pipe below has been substituted in.
+        if not border_replacements:
+            return self
+        layers = self._layers_with_temporal_borders_replaced(border_replacements)
+        if not layers:
+            return None
+        return YHalfCubeBlock(layers, self.trimmed_spatial_borders, self.template)
+
     @override
     def with_spatial_borders_trimmed(
         self, borders: Iterable[SpatialBlockBorder]

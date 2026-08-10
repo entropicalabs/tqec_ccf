@@ -45,6 +45,23 @@ class Block(SequencedLayers):
 
     """
 
+    @property
+    def releases_its_qubits(self) -> bool:
+        """Whether the block's last layer measures out every data qubit it owns.
+
+        A block that does is finished when its layers run out: in a merged slice
+        whose duration is set by a longer neighbour, its position can simply be
+        **absent** from the trailing layers rather than padded with idle rounds.
+        A block that does not (an ordinary memory cube, whose patch carries a
+        logical state onwards to the next z-layer) must stay present for the
+        whole slice and is padded instead.
+
+        Defaults to ``False``, which is always the safe answer --- padding is
+        physics-preserving either way, just longer.
+
+        """
+        return False
+
     @override
     def with_spatial_borders_trimmed(self, borders: Iterable[SpatialBlockBorder]) -> Block:
         return Block(
@@ -303,25 +320,35 @@ def _merge_mismatched_block_layers(
     """Merge parallel blocks with mismatched temporal schedules by flattening
     each block at the concrete ``k`` and start-aligning them.
 
-    The merged slice runs for ``max`` rounds over the parallel blocks; every
-    shorter block is padded (with extra bulk rounds inserted just before its
-    final border round) so that all blocks reach the slice duration and its
-    final border round stays last. This lets a shorter Y-basis measurement cap
-    ``[transition, boundary0, boundary x (k-1), final]`` (``k+2`` rounds) coexist
-    with a continuing memory cube ``[init, mem x (2k-1), measure]`` (``2k+1``
-    rounds): the cap's rounds start-align with the memory column and the memory
-    column's trailing rounds run alongside extra cap boundary rounds.
+    The merged slice runs for ``max`` rounds over the parallel blocks, and every
+    block is start-aligned. A block shorter than the slice is handled one of two
+    ways, according to :attr:`Block.releases_its_qubits`:
+
+    - a block that measures out its data qubits (a Y-basis measurement cap) is
+      finished when its layers run out, and is simply **absent** from the
+      trailing merged layers;
+    - a block that carries a logical state onwards (an ordinary memory cube) must
+      stay present, and is **padded** with extra bulk rounds inserted just before
+      its final border round so that round stays last.
+
+    This lets a Y cap coexist with a continuing memory cube whatever their
+    relative lengths: at small ``k`` the cap outlasts the column and the column is
+    padded; at larger ``k`` the column outlasts the cap, which drops out and
+    leaves the column to finish the slice alone.
     """
     flats = {pos: _flatten_block_layers(block, k) for pos, block in blocks_in_parallel.items()}
     duration = max(len(flat) for flat in flats.values())
     for pos, flat in flats.items():
         extra = duration - len(flat)
-        if extra:
-            body = _block_pad_body(blocks_in_parallel[pos])
-            flats[pos] = flat[:-1] + [body] * extra + flat[-1:]
+        if not extra or blocks_in_parallel[pos].releases_its_qubits:
+            # A block that measures out its data qubits is done when its layers
+            # run out; it is simply absent from the trailing merged layers.
+            continue
+        body = _block_pad_body(blocks_in_parallel[pos])
+        flats[pos] = flat[:-1] + [body] * extra + flat[-1:]
     merged: list[LayoutLayer | BaseComposedLayer] = []
     for i in range(duration):
-        layers = {pos: flat[i] for pos, flat in flats.items()}
+        layers = {pos: flat[i] for pos, flat in flats.items() if i < len(flat)}
         merged.append(merge_base_layers(layers, scalable_qubit_shape))
     return merged
 

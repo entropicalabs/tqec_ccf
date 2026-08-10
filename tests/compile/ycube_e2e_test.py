@@ -187,3 +187,47 @@ def test_two_y_caps_observable_preserves_distance(k: int, kind: str) -> None:
         ignore_ungraphlike_errors=False, canonicalize_circuit_errors=True
     )
     assert len(error) == 2 * k + 1
+
+
+def test_y_cap_releases_its_qubits_but_a_memory_cube_does_not() -> None:
+    """Only a block whose last layer measures out its data qubits may be absent
+    from the trailing layers of a merged slice."""
+    from tqec.compile.blocks.positioning import LayoutPosition3D
+    from tqec.utils.position import BlockPosition3D
+
+    graph = _two_y_caps_with_main_column()
+    compiled = compile_block_graph(graph, observables=[])
+    y_block = compiled._blocks[
+        LayoutPosition3D.from_block_position(BlockPosition3D(1, 0, 2))
+    ]
+    memory_block = compiled._blocks[
+        LayoutPosition3D.from_block_position(BlockPosition3D(0, 0, 2))
+    ]
+    assert y_block.releases_its_qubits is True
+    assert memory_block.releases_its_qubits is False
+
+
+def test_finished_y_cap_is_absent_from_the_trailing_merged_layers() -> None:
+    """At k=3 the Y cap (k+3 = 6 rounds) is shorter than the memory column it
+    shares a z-slice with (2k+1 = 7). It must drop out of the slice's last layer
+    rather than idle through it on padded boundary rounds."""
+    from tqec.compile.blocks.layers.atomic.layout import LayoutLayer
+
+    k = 3
+    tree = compile_block_graph(
+        _two_y_caps_with_main_column(), observables=[]
+    ).to_layer_tree(k=k)
+
+    def leaves(node):  # type: ignore[no-untyped-def]
+        return [node] if node.is_leaf else [n for c in node.children for n in leaves(c)]
+
+    slice_leaves = leaves(tree._root.children[2])  # z = 2
+    positions = []
+    for leaf in slice_leaves:
+        assert isinstance(leaf._layer, LayoutLayer)
+        positions.append(set(leaf._layer.layers))
+    assert len(positions) == 7
+    # The cap contributes to the first six layers and is gone from the last.
+    assert len(positions[0]) == 2
+    assert len(positions[-1]) == 1
+    assert positions[-1] < positions[0]
