@@ -47,6 +47,35 @@ def test_y_capped_column_has_no_mpp() -> None:
     assert not any(inst.name == "MPP" for inst in circuit.flattened())
 
 
+@pytest.mark.parametrize("k", [1, 2])
+def test_temporal_pipe_does_not_overwrite_the_transition_round(k: int) -> None:
+    """The temporal pipe below a Y cap must *prepend* its junction round, not
+    replace the cap's first layer.
+
+    For an ordinary cube the pipe substitutes the ``Z_NEGATIVE`` border, i.e.
+    ``layer_sequence[0]``. A Y cap's first layer is the transition round, and
+    since ``RawCircuitLayer`` is a ``BaseLayer`` the substitution machinery
+    accepts it without complaint, dropping the Y measurement. The transition
+    round is the only source of ``MY`` in the circuit, so counting them pins the
+    behaviour: exactly one per Y cube, at every ``k``.
+
+    (Substituting rather than prepending currently also trips the seam-detector
+    check before this assertion is reached. That check is incidental --- it
+    depends on the junction round's plaquettes disagreeing with the transition's
+    expected ancillas --- so the ``MY`` count is asserted as the direct
+    invariant.)
+    """
+    for graph, expected_y_cubes in (
+        (_y_capped_column(), 1),
+        (_two_y_caps_with_main_column(), 2),
+    ):
+        circuit = compile_block_graph(graph, observables="auto").generate_stim_circuit(k=k)
+        my_targets = sum(
+            len(inst.targets_copy()) for inst in circuit.flattened() if inst.name == "MY"
+        )
+        assert my_targets == expected_y_cubes
+
+
 def _two_y_caps_with_main_column() -> BlockGraph:
     """The notebook cells 7-8 graph: a 5-cube main column (x=0) with two Y caps
     on side branches (x=1) at z=2 and z=4, each coexisting in a z-slice with a

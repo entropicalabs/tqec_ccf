@@ -20,12 +20,15 @@ surface-code round and the memory experiment used to validate the machinery.
 from __future__ import annotations
 
 import functools
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 import stim
+from typing_extensions import override
 
 from tqec.circuit.schedule.circuit import ScheduledCircuit
+from tqec.compile.blocks.block import Block
+from tqec.compile.blocks.enums import SpatialBlockBorder, TemporalBlockBorder
 from tqec.compile.blocks.layers.atomic.base import BaseLayer
 from tqec.compile.blocks.layers.atomic.raw import RawCircuitLayer
 from tqec.compile.blocks.layers.composed.base import BaseComposedLayer
@@ -37,6 +40,7 @@ from tqec.compile.specs.library.generators.ycube import (
     xtop_qubit_patch,
     ztop_yboundary_patch,
 )
+from tqec.templates.base import RectangularTemplate
 from tqec.utils.enums import Basis
 from tqec.utils.scale import LinearFunction, PhysicalQubitScalable2D
 
@@ -793,6 +797,70 @@ def make_y_cap_layers() -> list[BaseLayer | BaseComposedLayer]:
         RepeatedLayer(_BoundaryRawLayer(), LinearFunction(1, -1)),
         _FinalRawLayer(),
     ]
+
+
+class YHalfCubeBlock(Block):
+    """A Y-basis measurement cap, which *gains* its junction round rather than
+    having its first round overwritten.
+
+    For an ordinary cube, a temporal pipe below replaces the block's
+    ``Z_NEGATIVE`` border --- ``layer_sequence[0]`` --- with the pipe's junction
+    layer. A Y cap has no round to spare there: its first layer is the transition
+    round, and letting the substitution proceed would overwrite it with a memory
+    round. Nothing in the substitution machinery objects (``RawCircuitLayer`` is
+    a ``BaseLayer``, so ``get_atomic_temporal_border`` happily returns it); the
+    loss only surfaces further downstream, as a seam-detector mismatch.
+
+    Earlier revisions dodged this by prefixing the cap with a hard-coded memory
+    "adapter" round that existed only to absorb the substitution. That forced the
+    adapter's orientation to be guessed (it was pinned to ``HORIZONTAL``, i.e. a
+    ``ZX*`` cube below). Prepending instead lets the junction round come from the
+    pipe itself, whose kind is derived from the cube below, so no orientation is
+    assumed here. The resulting layer sequence is identical to the one the
+    adapter produced.
+
+    ``template`` is the block's spatial footprint, needed to build the
+    :class:`~tqec.compile.specs.base.PipeSpec` of the temporal pipe below (raw
+    layers carry no template of their own). It describes shape only --- the
+    orientation lives in the plaquettes, which the pipe supplies --- so carrying
+    it here reintroduces no orientation assumption.
+    """
+
+    def __init__(
+        self,
+        layer_sequence: Sequence[BaseLayer | BaseComposedLayer],
+        trimmed_spatial_borders: frozenset[SpatialBlockBorder] = frozenset(),
+        template: RectangularTemplate | None = None,
+    ) -> None:
+        super().__init__(layer_sequence, trimmed_spatial_borders)
+        self.template = template
+
+    @override
+    def with_spatial_borders_trimmed(
+        self, borders: Iterable[SpatialBlockBorder]
+    ) -> YHalfCubeBlock:
+        # Keep the subclass so a later temporal substitution still prepends.
+        return YHalfCubeBlock(
+            self._layers_with_spatial_borders_trimmed(borders),
+            self.trimmed_spatial_borders | frozenset(borders),
+            self.template,
+        )
+
+    @override
+    def _layers_with_temporal_borders_replaced(
+        self,
+        border_replacements: Mapping[TemporalBlockBorder, BaseLayer | None],
+    ) -> list[BaseLayer | BaseComposedLayer]:
+        below = border_replacements.get(TemporalBlockBorder.Z_NEGATIVE)
+        remaining = {
+            border: layer
+            for border, layer in border_replacements.items()
+            if border is not TemporalBlockBorder.Z_NEGATIVE
+        }
+        layers = super()._layers_with_temporal_borders_replaced(remaining)
+        if below is not None:
+            layers.insert(0, below)
+        return layers
 
 
 def memory_experiment_circuit(distance: int, rounds: int, basis: Basis) -> stim.Circuit:

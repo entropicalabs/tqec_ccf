@@ -155,11 +155,11 @@ def _get_template_from_layer(
     """
     if isinstance(root, BaseLayer):
         if isinstance(root, RawCircuitLayer):
-            # A raw-circuit layer (e.g. the Y-basis measurement cap) carries no
-            # Template. It is skipped when recovering a block's template; a
-            # block that mixes a raw layer with plaquette layers (the Y cube:
-            # adapter memory round + raw cap) yields the plaquette layer's
-            # template for the temporal-pipe junction.
+            # A raw-circuit layer (e.g. one round of the Y-basis measurement cap)
+            # carries no Template. It is skipped when recovering a block's
+            # template; a block that mixes raw layers with plaquette layers (a Y
+            # cap once its junction round has been prepended) yields the
+            # plaquette layer's template for the temporal-pipe junction.
             return None
         if not isinstance(root, PlaquetteLayer):
             raise TQECError(
@@ -168,6 +168,13 @@ def _get_template_from_layer(
             )
         return root.template
     elif isinstance(root, SequencedLayers):
+        # A block built only from raw layers (the Y-basis measurement cap) has no
+        # plaquette layer to recover a template from, so it declares its spatial
+        # footprint directly. Checked before walking the layers, which would
+        # otherwise find nothing and raise.
+        declared = getattr(root, "template", None)
+        if isinstance(declared, RectangularTemplate):
+            return declared
         possible_templates = {
             template
             for layer in root.layer_sequence

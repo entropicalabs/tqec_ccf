@@ -87,24 +87,21 @@ class FixedBulkCubeBuilder(CubeBuilder):
             raise TQECError("Cannot build a block for a Port.")
         elif kind is LeafCubeKind.Y_HALF_CUBE:
             from tqec.compile.specs.library.generators._ycube_circuit import (
+                YHalfCubeBlock,
                 make_y_cap_layers,
             )
 
             # The Y-basis measurement cap is sliced into per-round raw layers
             # (transition + boundary0 + RepeatedLayer(boundary, k-1) + final) so
             # the compile tree and the parallel-block merge treat it like any
-            # cube. It is preceded by one standard memory round (the "adapter"):
-            # this gives the block a Template for the temporal-pipe junction with
-            # the below cube, is replaced by that pipe's junction layer (a memory
-            # round -- exactly what the cap needs beneath it), and is the round
-            # the transition's seam detectors close against. Milestone 1 supports
-            # a ``ZX*`` below cube (identity patch orientation, Z observable
-            # HORIZONTAL).
-            adapter = PlaquetteLayer(
-                self._generator.get_memory_qubit_raw_template(),
-                self._generator.get_memory_qubit_plaquettes(Orientation.HORIZONTAL, None, None),
+            # cube. The memory round the cap needs beneath it -- the round the
+            # transition's seam detectors close against -- is the temporal pipe's
+            # junction layer, which ``YHalfCubeBlock`` prepends instead of letting
+            # it overwrite the transition round.
+            return YHalfCubeBlock(
+                make_y_cap_layers(),
+                template=self._generator.get_memory_qubit_raw_template(),
             )
-            return Block([adapter, *make_y_cap_layers()])
         elif isinstance(kind, ConditionalLeafCubeKind):
             kind_zero, kind_one = kind.value
             condition = spec.condition
