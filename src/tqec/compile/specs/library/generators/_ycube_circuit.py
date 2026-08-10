@@ -37,6 +37,7 @@ from tqec.compile.specs.library.generators.ycube import (
     PatchGeometry,
     Stabilizer,
     gidney_to_tqec,
+    tqec_to_gidney,
     xtop_qubit_patch,
     ztop_yboundary_patch,
 )
@@ -242,7 +243,9 @@ class TransitionFlows:
     observable: list[Coord]
 
 
-def transition_round(b: _Builder, distance: int, round_tag: str) -> TransitionFlows:
+def transition_round(
+    b: _Builder, distance: int, round_tag: str, transposed: bool = False
+) -> TransitionFlows:
     """Emit the Y-basis transition round (xtop patch -> degenerate ztop patch).
 
     Direct port of Gidney's ``make_y_transition_round_nesw_xzxz_to_xzzx``: the
@@ -251,8 +254,8 @@ def transition_round(b: _Builder, distance: int, round_tag: str) -> TransitionFl
     complex-plane convention and mapped to tqec integer coordinates on emission.
     """
     d = distance
-    start = xtop_qubit_patch(d)
-    end = ztop_yboundary_patch(d)
+    start = xtop_qubit_patch(d, transposed)
+    end = ztop_yboundary_patch(d, transposed)
     # `used`: every qubit either patch touches, in Gidney complex coords.
     used: set[complex] = set()
     for patch in (start, end):
@@ -260,7 +263,7 @@ def transition_round(b: _Builder, distance: int, round_tag: str) -> TransitionFl
             # reconstruct gidney data qubits from the stabilizer's gidney ancilla
             used.add(s.gidney_ancilla)
         for dq in patch.data_qubits:
-            used.add(complex((dq[0] - 1) / 2, (dq[1] - 1) / 2))
+            used.add(tqec_to_gidney(dq, transposed))
 
     def mbasis(q: complex) -> str | None:
         if q.real % 1 == 0:
@@ -284,7 +287,7 @@ def transition_round(b: _Builder, distance: int, round_tag: str) -> TransitionFl
     zs_dl, zs_md, zs_ur = _split_dl_md_ur(zs)
 
     def g(q: complex) -> Coord:
-        return gidney_to_tqec(q)
+        return gidney_to_tqec(q, transposed)
 
     def e1(name: str, qs: set[complex]) -> None:
         b.gate1(name, [g(q) for q in qs])
@@ -374,7 +377,12 @@ def transition_round(b: _Builder, distance: int, round_tag: str) -> TransitionFl
 
 
 def _final_round(
-    b: _Builder, patch: PatchGeometry, prev_tag: str, tag: str, distance: int
+    b: _Builder,
+    patch: PatchGeometry,
+    prev_tag: str,
+    tag: str,
+    distance: int,
+    transposed: bool = False,
 ) -> None:
     """Emit the transversal final data measurement on the degenerate patch and
     the stabilizer-reconstruction detectors it enables.
@@ -386,8 +394,8 @@ def _final_round(
     """
     measure_basis: dict[Coord, Basis] = {}
     for dq in patch.data_qubits:
-        gx, gy = (dq[0] - 1) / 2, (dq[1] - 1) / 2
-        measure_basis[dq] = Basis.Z if gx + gy < distance else Basis.X
+        g = tqec_to_gidney(dq, transposed)
+        measure_basis[dq] = Basis.Z if g.real + g.imag < distance else Basis.X
     standard_round(b, patch, tag, measure_data_basis=measure_basis)
     # Bulk detectors: this round's ancilla measurement vs the previous round's
     # (the final round still measures every stabilizer via its ancilla).
@@ -595,7 +603,9 @@ def _measurement_coordinates(circuit: stim.Circuit) -> list[Coord]:
 
 
 @functools.cache
-def _tqec_logical_y_observable_spec(distance: int) -> tuple[Coord, ...]:
+def _tqec_logical_y_observable_spec(
+    distance: int, transposed: bool = False
+) -> tuple[Coord, ...]:
     """The transition-round records measuring the logical Y operator *in tqec's
     representative*.
 
@@ -616,15 +626,19 @@ def _tqec_logical_y_observable_spec(distance: int) -> tuple[Coord, ...]:
     at every distance by construction.
     """
     d = distance
-    circuit, _ = _build_transition_round(d)
+    circuit, _ = _build_transition_round(d, transposed)
     index_of = {
         (int(c[0]), int(c[1])): q for q, c in circuit.get_final_qubit_coordinates().items()
     }
     target = stim.PauliString(circuit.num_qubits)
-    for y in range(1, 2 * d, 2):
-        target[index_of[(d, y)]] = "X"
-    for x in range(1, 2 * d, 2):
-        qubit = index_of[(x, d)]
+    # Expressed on the Gidney lattice and mapped through ``gidney_to_tqec`` so
+    # that both middle lines follow the patch's orientation rather than being
+    # pinned to a fixed tqec row/column.
+    middle = (d - 1) // 2
+    for i in range(d):
+        target[index_of[gidney_to_tqec(complex(middle, i), transposed)]] = "X"
+    for i in range(d):
+        qubit = index_of[gidney_to_tqec(complex(i, middle), transposed)]
         # The centre qubit carries both sheets, i.e. X . Z = Y.
         target[qubit] = "Y" if target[qubit] == 1 else "Z"
     (solution,) = stim.Circuit.solve_flow_measurements(
@@ -635,11 +649,13 @@ def _tqec_logical_y_observable_spec(distance: int) -> tuple[Coord, ...]:
     return tuple(sorted(coords[i] for i in solution))
 
 
-def _build_transition_round(distance: int) -> tuple[stim.Circuit, TransitionFlows]:
+def _build_transition_round(
+    distance: int, transposed: bool = False
+) -> tuple[stim.Circuit, TransitionFlows]:
     """The transition round on its own (no trailing ``TICK``) and its flows."""
     d = distance
-    xtop = xtop_qubit_patch(d)
-    ztop = ztop_yboundary_patch(d)
+    xtop = xtop_qubit_patch(d, transposed)
+    ztop = ztop_yboundary_patch(d, transposed)
     b = _Builder()
     b.allocate(
         set(xtop.data_qubits)
@@ -647,12 +663,12 @@ def _build_transition_round(distance: int) -> tuple[stim.Circuit, TransitionFlow
         | set(ztop.data_qubits)
         | {s.ancilla for s in ztop.stabilizers}
     )
-    flows = transition_round(b, d, "T")
+    flows = transition_round(b, d, "T", transposed)
     return _strip_trailing_tick(b.circuit), flows
 
 
 def transition_raw_slice(
-    distance: int,
+    distance: int, transposed: bool = False
 ) -> tuple[stim.Circuit, dict[Coord, list[int]], dict[Coord, list[int]], list[int]]:
     """The single transition round as a standalone circuit plus its flow specs.
 
@@ -664,19 +680,26 @@ def transition_raw_slice(
     :func:`_tqec_logical_y_observable_spec`).
     """
     d = distance
-    circuit, flows = _build_transition_round(d)
-    xtop = xtop_qubit_patch(d)
-    ztop = ztop_yboundary_patch(d)
+    circuit, flows = _build_transition_round(d, transposed)
+    xtop = xtop_qubit_patch(d, transposed)
+    ztop = ztop_yboundary_patch(d, transposed)
     start_spec = {s.ancilla: list(flows.start[s.gidney_ancilla]) for s in xtop.stabilizers}
     end_spec = {s.ancilla: list(flows.end[s.gidney_ancilla]) for s in ztop.stabilizers}
-    return circuit, start_spec, end_spec, list(_tqec_logical_y_observable_spec(d))
+    return (
+        circuit,
+        start_spec,
+        end_spec,
+        list(_tqec_logical_y_observable_spec(d, transposed)),
+    )
 
 
-def boundary_raw_slice(distance: int) -> tuple[stim.Circuit, dict[Coord, list[Coord]]]:
+def boundary_raw_slice(
+    distance: int, transposed: bool = False
+) -> tuple[stim.Circuit, dict[Coord, list[Coord]]]:
     """A single boundary (padding) round on the degenerate patch, plus its
     ``start_spec`` (each stabilizer measured by its ancilla once)."""
     d = distance
-    ztop = ztop_yboundary_patch(d)
+    ztop = ztop_yboundary_patch(d, transposed)
     b = _Builder()
     b.allocate(set(ztop.data_qubits) | {s.ancilla for s in ztop.stabilizers})
     standard_round(b, ztop, "B")
@@ -685,7 +708,7 @@ def boundary_raw_slice(distance: int) -> tuple[stim.Circuit, dict[Coord, list[Co
 
 
 def final_raw_slice(
-    distance: int,
+    distance: int, transposed: bool = False
 ) -> tuple[stim.Circuit, dict[Coord, list[Coord]], dict[Coord, list[Coord]]]:
     """The transversal final data measurement round, plus its ``start_spec`` and
     ``reconstruction_spec``.
@@ -698,13 +721,13 @@ def final_raw_slice(
     and a local record index would no longer be valid.
     """
     d = distance
-    ztop = ztop_yboundary_patch(d)
+    ztop = ztop_yboundary_patch(d, transposed)
     b = _Builder()
     b.allocate(set(ztop.data_qubits) | {s.ancilla for s in ztop.stabilizers})
     measure_basis: dict[Coord, Basis] = {}
     for dq in ztop.data_qubits:
-        gx, gy = (dq[0] - 1) / 2, (dq[1] - 1) / 2
-        measure_basis[dq] = Basis.Z if gx + gy < d else Basis.X
+        g = tqec_to_gidney(dq, transposed)
+        measure_basis[dq] = Basis.Z if g.real + g.imag < d else Basis.X
     standard_round(b, ztop, "F", measure_data_basis=measure_basis)
     start_spec = {s.ancilla: [s.ancilla] for s in ztop.stabilizers}
     reconstruction_spec: dict[Coord, list[Coord]] = {}
@@ -756,46 +779,55 @@ class _YRoundRawLayer(RawCircuitLayer):
 
 
 class _TransitionRawLayer(_YRoundRawLayer):
-    def __init__(self) -> None:
-        super().__init__(lambda d: transition_raw_slice(d)[0], _TRANSITION_NUM_MOMENTS)
+    def __init__(self, transposed: bool = False) -> None:
+        self._transposed = transposed
+        super().__init__(
+            lambda d: transition_raw_slice(d, transposed)[0], _TRANSITION_NUM_MOMENTS
+        )
 
     def start_spec(self, k: int) -> dict[Coord, list[Coord]]:
-        return transition_raw_slice(2 * k + 1)[1]
+        return transition_raw_slice(2 * k + 1, self._transposed)[1]
 
     def end_spec(self, k: int) -> dict[Coord, list[Coord]] | None:
-        return transition_raw_slice(2 * k + 1)[2]
+        return transition_raw_slice(2 * k + 1, self._transposed)[2]
 
     def observable_spec(self, k: int) -> list[Coord] | None:
-        return transition_raw_slice(2 * k + 1)[3]
+        return transition_raw_slice(2 * k + 1, self._transposed)[3]
 
 
 class _BoundaryRawLayer(_YRoundRawLayer):
-    def __init__(self) -> None:
-        super().__init__(lambda d: boundary_raw_slice(d)[0], _STANDARD_NUM_MOMENTS)
+    def __init__(self, transposed: bool = False) -> None:
+        self._transposed = transposed
+        super().__init__(
+            lambda d: boundary_raw_slice(d, transposed)[0], _STANDARD_NUM_MOMENTS
+        )
 
     def start_spec(self, k: int) -> dict[Coord, list[Coord]]:
-        return boundary_raw_slice(2 * k + 1)[1]
+        return boundary_raw_slice(2 * k + 1, self._transposed)[1]
 
 
 class _FinalRawLayer(_YRoundRawLayer):
-    def __init__(self) -> None:
-        super().__init__(lambda d: final_raw_slice(d)[0], _STANDARD_NUM_MOMENTS)
+    def __init__(self, transposed: bool = False) -> None:
+        self._transposed = transposed
+        super().__init__(
+            lambda d: final_raw_slice(d, transposed)[0], _STANDARD_NUM_MOMENTS
+        )
 
     def start_spec(self, k: int) -> dict[Coord, list[Coord]]:
-        return final_raw_slice(2 * k + 1)[1]
+        return final_raw_slice(2 * k + 1, self._transposed)[1]
 
     def reconstruction_spec(self, k: int) -> dict[Coord, list[Coord]] | None:
-        return final_raw_slice(2 * k + 1)[2]
+        return final_raw_slice(2 * k + 1, self._transposed)[2]
 
 
-def make_y_cap_layers() -> list[BaseLayer | BaseComposedLayer]:
+def make_y_cap_layers(transposed: bool = False) -> list[BaseLayer | BaseComposedLayer]:
     """Build the sliced Y-cap layer sequence ``[transition, boundary0,
     RepeatedLayer(boundary, k-1), final]`` (``k`` boundary rounds in total)."""
     return [
-        _TransitionRawLayer(),
-        _BoundaryRawLayer(),
-        RepeatedLayer(_BoundaryRawLayer(), LinearFunction(1, -1)),
-        _FinalRawLayer(),
+        _TransitionRawLayer(transposed),
+        _BoundaryRawLayer(transposed),
+        RepeatedLayer(_BoundaryRawLayer(transposed), LinearFunction(1, -1)),
+        _FinalRawLayer(transposed),
     ]
 
 

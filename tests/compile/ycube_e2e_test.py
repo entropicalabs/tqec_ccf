@@ -11,17 +11,50 @@ from __future__ import annotations
 import pytest
 
 from tqec import BlockGraph, compile_block_graph
+from tqec.compile.specs.base import CubeSpec
 from tqec.computation.cube import LeafCubeKind, ZXCube
 from tqec.utils.noise_model import NoiseModel
 from tqec.utils.position import Position3D
 
 
-def _y_capped_column() -> BlockGraph:
+def _y_capped_column(kind: str = "ZXZ") -> BlockGraph:
     g = BlockGraph("y_capped_column")
-    g.add_cube(Position3D(0, 0, 0), ZXCube.from_str("ZXZ"))
+    g.add_cube(Position3D(0, 0, 0), ZXCube.from_str(kind))
     g.add_cube(Position3D(0, 0, 1), LeafCubeKind.Y_HALF_CUBE)
     g.add_pipe(Position3D(0, 0, 0), Position3D(0, 0, 1))
     return g
+
+
+# Both spatial orientations of the cube below the cap. ``ZX*`` is the one
+# Gidney's construction is written for; ``XZ*`` needs the reflected patch.
+_BELOW_KINDS = ["ZXZ", "ZXX", "XZX", "XZZ"]
+
+
+@pytest.mark.parametrize("kind", _BELOW_KINDS)
+def test_y_cap_compiles_over_either_patch_orientation(kind: str) -> None:
+    """The Y cap follows the orientation of the cube below it.
+
+    A cap over an ``XZ*`` cube runs on the diagonal reflection of the patch
+    Gidney's construction assumes; ``CubeSpec.y_cap_transposed`` selects it. All
+    four below-cube kinds must give a fully deterministic circuit with no MPP.
+    """
+    circuit = compile_block_graph(
+        _y_capped_column(kind), observables="auto"
+    ).generate_stim_circuit(k=1)
+    circuit.detector_error_model(decompose_errors=False)
+    assert not any(inst.name == "MPP" for inst in circuit.flattened())
+
+
+def test_y_cap_transposed_is_derived_from_the_cube_below() -> None:
+    """``y_cap_transposed`` is set from the below cube's ``x`` boundary basis, and
+    is never set for the cube below itself."""
+    for kind, expected in (("ZXZ", False), ("ZXX", False), ("XZX", True), ("XZZ", True)):
+        graph = _y_capped_column(kind)
+        specs = {
+            cube.position: CubeSpec.from_cube(cube, graph) for cube in graph.cubes
+        }
+        assert specs[Position3D(0, 0, 1)].y_cap_transposed is expected, kind
+        assert specs[Position3D(0, 0, 0)].y_cap_transposed is False, kind
 
 
 @pytest.mark.parametrize("k", [1, 2])
@@ -76,7 +109,7 @@ def test_temporal_pipe_does_not_overwrite_the_transition_round(k: int) -> None:
         assert my_targets == expected_y_cubes
 
 
-def _two_y_caps_with_main_column() -> BlockGraph:
+def _two_y_caps_with_main_column(kind: str = "ZXZ") -> BlockGraph:
     """The notebook cells 7-8 graph: a 5-cube main column (x=0) with two Y caps
     on side branches (x=1) at z=2 and z=4, each coexisting in a z-slice with a
     continuing main-column memory cube (mismatched temporal schedules)."""
@@ -85,9 +118,9 @@ def _two_y_caps_with_main_column() -> BlockGraph:
     c1, c3 = Position3D(1, 0, 1), Position3D(1, 0, 3)
     y2, y4 = Position3D(1, 0, 2), Position3D(1, 0, 4)
     for p in b:
-        g.add_cube(p, ZXCube.from_str("ZXZ"))
-    g.add_cube(c1, ZXCube.from_str("ZXZ"))
-    g.add_cube(c3, ZXCube.from_str("ZXZ"))
+        g.add_cube(p, ZXCube.from_str(kind))
+    g.add_cube(c1, ZXCube.from_str(kind))
+    g.add_cube(c3, ZXCube.from_str(kind))
     g.add_cube(y2, LeafCubeKind.Y_HALF_CUBE)
     g.add_cube(y4, LeafCubeKind.Y_HALF_CUBE)
     for i in range(4):
@@ -99,31 +132,41 @@ def _two_y_caps_with_main_column() -> BlockGraph:
     return g
 
 
+@pytest.mark.parametrize("kind", ["ZXZ", "XZX"])
 @pytest.mark.parametrize("k", [1, 2])
-def test_two_y_caps_coexistence_compiles_dem_clean(k: int) -> None:
+def test_two_y_caps_coexistence_compiles_dem_clean(k: int, kind: str) -> None:
     """Two Y caps coexisting with a continuing memory column (mismatched
     temporal schedules) compile to a circuit whose detectors are all
     deterministic, with no MPP."""
     circuit = compile_block_graph(
-        _two_y_caps_with_main_column(), observables=[]
+        _two_y_caps_with_main_column(kind), observables=[]
     ).generate_stim_circuit(k=k)
     assert circuit.num_detectors > 0
     circuit.detector_error_model(decompose_errors=False)  # raises if non-deterministic
     assert not any(inst.name == "MPP" for inst in circuit.flattened())
 
 
-def _zzyy_surface() -> tuple[BlockGraph, list]:
-    graph = _two_y_caps_with_main_column()
+# The closed surface is the S^2 = Z algebra of the two gadgets. Its basis on the
+# main column follows that column's top face: ``ZZYY`` for ``ZXZ``, ``XXYY`` for
+# the transposed ``XZX``.
+_SURFACE_BY_KIND = {"ZXZ": "ZZYY", "XZX": "XXYY"}
+
+
+def _closed_surface(kind: str = "ZXZ") -> tuple[BlockGraph, list]:
+    graph = _two_y_caps_with_main_column(kind)
     surfaces = graph.find_correlation_surfaces()
-    assert [cs.external_stabilizer_on_graph(graph) for cs in surfaces] == ["ZZYY"]
+    assert [cs.external_stabilizer_on_graph(graph) for cs in surfaces] == [
+        _SURFACE_BY_KIND[kind]
+    ]
     return graph, surfaces
 
 
+@pytest.mark.parametrize("kind", ["ZXZ", "XZX"])
 @pytest.mark.parametrize("k", [1, 2])
-def test_two_y_caps_observable_is_deterministic(k: int) -> None:
-    """The closed ``Z_in . Z_out . Y_cap1 . Y_cap2`` surface (the S^2 = Z algebra)
+def test_two_y_caps_observable_is_deterministic(k: int, kind: str) -> None:
+    """The closed ``in . out . Y_cap1 . Y_cap2`` surface (the S^2 = Z algebra)
     lowers to a single observable that takes the same value on every shot."""
-    graph, surfaces = _zzyy_surface()
+    graph, surfaces = _closed_surface(kind)
     circuit = compile_block_graph(graph, observables=surfaces).generate_stim_circuit(k=k)
     assert circuit.num_observables == 1
     circuit.detector_error_model(decompose_errors=False)
@@ -133,10 +176,11 @@ def test_two_y_caps_observable_is_deterministic(k: int) -> None:
     assert len({bool(v) for v in observables.reshape(-1)}) == 1
 
 
+@pytest.mark.parametrize("kind", ["ZXZ", "XZX"])
 @pytest.mark.parametrize("k", [1, 2])
-def test_two_y_caps_observable_preserves_distance(k: int) -> None:
+def test_two_y_caps_observable_preserves_distance(k: int, kind: str) -> None:
     """The Y seam does not collapse the code distance of the closed surface."""
-    graph, surfaces = _zzyy_surface()
+    graph, surfaces = _closed_surface(kind)
     circuit = compile_block_graph(graph, observables=surfaces).generate_stim_circuit(k=k)
     noisy = NoiseModel.uniform_depolarizing(0.001).noisy_circuit(circuit)
     error = noisy.shortest_graphlike_error(

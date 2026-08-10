@@ -99,7 +99,7 @@ class FixedBulkCubeBuilder(CubeBuilder):
             # junction layer, which ``YHalfCubeBlock`` prepends instead of letting
             # it overwrite the transition round.
             return YHalfCubeBlock(
-                make_y_cap_layers(),
+                make_y_cap_layers(spec.y_cap_transposed),
                 template=self._generator.get_memory_qubit_raw_template(),
             )
         elif isinstance(kind, ConditionalLeafCubeKind):

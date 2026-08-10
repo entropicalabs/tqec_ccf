@@ -9,12 +9,33 @@ from tqec.computation.block_graph import BlockGraph
 from tqec.computation.cube import Cube, CubeKind, ZXCube
 from tqec.computation.pipe import PipeKind
 from tqec.templates.base import RectangularTemplate
+from tqec.utils.enums import Basis
 from tqec.utils.exceptions import TQECError
-from tqec.utils.position import Direction3D
+from tqec.utils.position import Direction3D, Position3D
 from tqec.utils.scale import LinearFunction
 
 if TYPE_CHECKING:
     from tqec.computation.correlation import CorrelationSurface
+
+
+def _y_cap_is_transposed(cube: Cube, graph: BlockGraph) -> bool:
+    """Whether a ``Y_HALF_CUBE``'s patch must be reflected across its main diagonal.
+
+    A Y cap continues the patch of the cube below it, so it inherits that cube's
+    spatial orientation. Gidney's construction is written for a ``ZX*`` cube
+    (spatial boundaries normal to ``x`` in ``Z``); an ``XZ*`` cube needs the
+    reflection. Returns ``False`` for any other cube kind, and for a Y cube with
+    no cube below (a Y-basis *initialisation*, which is lowered elsewhere).
+    """
+    if not cube.is_y_cube:
+        return False
+    below = Position3D(cube.position.x, cube.position.y, cube.position.z - 1)
+    if not graph.has_pipe_between(below, cube.position):
+        return False
+    below_kind = graph[below].kind
+    if not isinstance(below_kind, ZXCube):
+        return False
+    return below_kind.x == Basis.X
 
 
 @dataclass(frozen=True)
@@ -36,6 +57,12 @@ class CubeSpec:
             boundary convention.
         condition: The correlation surface carried over from a conditional ``Cube``;
             ``None`` for non-conditional specs.
+        y_cap_transposed: For a ``Y_HALF_CUBE`` only: whether the cap's patch is
+            reflected across its main diagonal. The Y cap runs on the patch of
+            the cube below it, and Gidney's construction is written for a ``ZX*``
+            cube (left/right boundaries in ``Z``). An ``XZ*`` cube below has those
+            boundaries in ``X`` and needs the reflected patch. ``False`` for every
+            other cube kind, and for a Y cube with no cube below it.
 
     """
 
@@ -43,6 +70,7 @@ class CubeSpec:
     spatial_arms: SpatialArms = SpatialArms.NONE
     has_spatial_up_or_down_pipe_in_timeslice: bool = False
     condition: "CorrelationSurface | None" = None
+    y_cap_transposed: bool = False
 
     def __post_init__(self) -> None:
         if self.spatial_arms != SpatialArms.NONE:
@@ -72,6 +100,7 @@ class CubeSpec:
                 cube.kind,
                 has_spatial_up_or_down_pipe_in_timeslice=has_spatial_up_or_down_pipe_in_timeslice,
                 condition=cube.condition,
+                y_cap_transposed=_y_cap_is_transposed(cube, graph),
             )
         spatial_arms = SpatialArms.from_cube_in_graph(cube, graph)
         return CubeSpec(

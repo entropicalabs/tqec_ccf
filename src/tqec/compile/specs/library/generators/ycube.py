@@ -45,12 +45,20 @@ _DIRS: tuple[complex, ...] = tuple((0.5 + 0.5j) * 1j**d for d in range(4))
 _DR, _DL, _UL, _UR = _DIRS
 
 
-def gidney_to_tqec(q: complex) -> tuple[int, int]:
+def gidney_to_tqec(q: complex, transposed: bool = False) -> tuple[int, int]:
     """Map a Gidney complex-plane qubit coordinate to a tqec integer grid point.
 
     Args:
         q: a qubit coordinate in Gidney's convention (data qubits at integer
             points, ancillas at half-integer points).
+        transposed: reflect the lattice across its main diagonal, swapping the
+            two axes. Gidney's construction is written for a patch whose left and
+            right boundaries are ``Z`` (a ``ZX*`` cube below the cap). A ``XZ*``
+            cube has those boundaries in ``X``, and its patch is exactly this
+            reflection --- verified by the junction round's ancilla coordinates
+            matching the reflected patch position for position. Reflecting here
+            reorients the whole cap, since every coordinate it emits (circuit,
+            patches and flow specs alike) is mapped through this function.
 
     Returns:
         the ``(x, y)`` tqec grid coordinate. Data qubits land on odd-odd points,
@@ -59,7 +67,17 @@ def gidney_to_tqec(q: complex) -> tuple[int, int]:
     """
     x = 2 * q.real + 1
     y = 2 * q.imag + 1
+    if transposed:
+        x, y = y, x
     return (int(round(x)), int(round(y)))
+
+
+def tqec_to_gidney(coord: tuple[int, int], transposed: bool = False) -> complex:
+    """Inverse of :func:`gidney_to_tqec`, for the same ``transposed`` setting."""
+    x, y = coord
+    if transposed:
+        x, y = y, x
+    return complex((x - 1) / 2, (y - 1) / 2)
 
 
 def _checkerboard_basis(m: complex) -> Basis:
@@ -112,6 +130,7 @@ def _rectangular_patch(
     left_basis: Basis,
     right_basis: Basis,
     order_func,
+    transposed: bool = False,
 ) -> PatchGeometry:
     """Dependency-free port of Gidney's ``rectangular_surface_code_patch``.
 
@@ -149,12 +168,14 @@ def _rectangular_patch(
     for m in sorted(measure_qubits, key=lambda q: (q.imag, q.real)):
         basis = _checkerboard_basis(m)
         ordered = tuple(
-            gidney_to_tqec(m + d) if (d is not None and (m + d) in data_qubits) else None
+            gidney_to_tqec(m + d, transposed)
+            if (d is not None and (m + d) in data_qubits)
+            else None
             for d in order_func(m)
         )
         stabilizers.append(
             Stabilizer(
-                ancilla=gidney_to_tqec(m),
+                ancilla=gidney_to_tqec(m, transposed),
                 basis=basis,
                 ordered_data=ordered,
                 gidney_ancilla=m,
@@ -162,7 +183,7 @@ def _rectangular_patch(
         )
     return PatchGeometry(
         distance=distance,
-        data_qubits=frozenset(gidney_to_tqec(q) for q in data_qubits),
+        data_qubits=frozenset(gidney_to_tqec(q, transposed) for q in data_qubits),
         stabilizers=tuple(stabilizers),
     )
 
@@ -179,7 +200,7 @@ def _ztop_order(m: complex) -> list[complex]:
     return order_s if _checkerboard_basis(m) == Basis.X else order_n
 
 
-def xtop_qubit_patch(distance: int) -> PatchGeometry:
+def xtop_qubit_patch(distance: int, transposed: bool = False) -> PatchGeometry:
     """The ``xtop`` qubit patch used during memory rounds (N=X, E=Z, S=X, W=Z).
 
     Dependency-free port of ``make_xtop_qubit_patch`` in tqec coordinates.
@@ -191,10 +212,11 @@ def xtop_qubit_patch(distance: int) -> PatchGeometry:
         bot_basis=Basis.X,
         left_basis=Basis.Z,
         order_func=_xtop_order,
+        transposed=transposed,
     )
 
 
-def ztop_yboundary_patch(distance: int) -> PatchGeometry:
+def ztop_yboundary_patch(distance: int, transposed: bool = False) -> PatchGeometry:
     """The degenerate ``ztop`` Y-boundary patch after the transition (N=Z, E=X, S=X, W=Z).
 
     Dependency-free port of ``make_ztop_yboundary_patch`` in tqec coordinates.
@@ -206,4 +228,5 @@ def ztop_yboundary_patch(distance: int) -> PatchGeometry:
         bot_basis=Basis.X,
         left_basis=Basis.Z,
         order_func=_ztop_order,
+        transposed=transposed,
     )
