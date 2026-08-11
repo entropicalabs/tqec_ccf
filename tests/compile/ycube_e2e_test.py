@@ -9,11 +9,13 @@ property).
 from __future__ import annotations
 
 import pytest
+import stim
 
 from tqec import BlockGraph, compile_block_graph
 from tqec.compile.blocks.layers.atomic.layout import LayoutLayer
 from tqec.compile.blocks.positioning import LayoutPosition3D
 from tqec.compile.specs.base import CubeSpec
+from tqec.compile.tree.node import LayerNode
 from tqec.computation.cube import LeafCubeKind, ZXCube
 from tqec.utils.noise_model import NoiseModel
 from tqec.utils.position import BlockPosition3D, Position3D
@@ -120,9 +122,11 @@ def test_temporal_pipe_does_not_overwrite_the_transition_round(k: int) -> None:
         (_two_y_caps_with_main_column(), 2),
     ):
         circuit = compile_block_graph(graph, observables="auto").generate_stim_circuit(k=k)
-        my_targets = sum(
-            len(inst.targets_copy()) for inst in circuit.flattened() if inst.name == "MY"
-        )
+        my_targets = 0
+        for inst in circuit.flattened():
+            assert isinstance(inst, stim.CircuitInstruction), "flattened yields instructions"
+            if inst.name == "MY":
+                my_targets += len(inst.targets_copy())
         assert my_targets == expected_y_cubes
 
 
@@ -233,7 +237,7 @@ def test_finished_y_cap_is_absent_from_the_trailing_merged_layers() -> None:
     k = 3
     tree = compile_block_graph(_two_y_caps_with_main_column(), observables=[]).to_layer_tree(k=k)
 
-    def leaves(node):  # type: ignore[no-untyped-def]
+    def leaves(node: LayerNode) -> list[LayerNode]:
         return [node] if node.is_leaf else [n for c in node.children for n in leaves(c)]
 
     slice_leaves = leaves(tree._root.children[2])  # z = 2

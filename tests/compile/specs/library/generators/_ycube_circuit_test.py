@@ -82,10 +82,26 @@ def _memory_experiment_with_logical(distance: int, rounds: int, basis: Basis) ->
     return b.circuit
 
 
+def _instructions(circuit: stim.Circuit) -> list[stim.CircuitInstruction]:
+    """Return a circuit's instructions, which none of these circuits nest."""
+    instructions: list[stim.CircuitInstruction] = []
+    for instruction in circuit:
+        assert isinstance(instruction, stim.CircuitInstruction), "unexpected REPEAT block"
+        instructions.append(instruction)
+    return instructions
+
+
 def _with_depolarizing_noise(circuit: stim.Circuit, p: float = 0.001) -> stim.Circuit:
-    all_q = sorted({t.value for inst in circuit for t in inst.targets_copy() if t.is_qubit_target})
+    all_q = sorted(
+        {
+            t.value
+            for inst in _instructions(circuit)
+            for t in inst.targets_copy()
+            if t.is_qubit_target
+        }
+    )
     out = stim.Circuit()
-    for inst in circuit:
+    for inst in _instructions(circuit):
         out.append(inst)
         if inst.name == "TICK":
             out.append("DEPOLARIZE1", all_q, p)
@@ -221,14 +237,14 @@ def _compose_below_and_raw(distance: int, mem_rounds: int, init_basis: Basis) ->
 
     raw, seam = y_cap_raw_circuit(distance)
     idx2coord = {
-        inst.targets_copy()[0].value: tuple(int(x) for x in inst.gate_args_copy())
-        for inst in raw
+        inst.targets_copy()[0].value: (int(inst.gate_args_copy()[0]), int(inst.gate_args_copy()[1]))
+        for inst in _instructions(raw)
         if inst.name == "QUBIT_COORDS"
     }
     b.allocate(set(idx2coord.values()))
     raw_base = b.num_measurements
     running = 0
-    for inst in raw:
+    for inst in _instructions(raw):
         if inst.name == "QUBIT_COORDS":
             continue
         if inst.name == "DETECTOR":
@@ -275,7 +291,7 @@ def _detector_signature(circuit: stim.Circuit, coord_map: dict[int, tuple]) -> s
     times: dict[tuple, int] = {}
     rec_id: dict[int, tuple] = {}
     n = 0
-    for inst in circuit:
+    for inst in _instructions(circuit):
         if inst.name in ("M", "MX", "MY", "MZ"):
             for t in inst.targets_copy():
                 if t.is_qubit_target:
@@ -286,7 +302,7 @@ def _detector_signature(circuit: stim.Circuit, coord_map: dict[int, tuple]) -> s
                     n += 1
     dets: set[frozenset] = set()
     running = 0
-    for inst in circuit:
+    for inst in _instructions(circuit):
         if inst.name in ("M", "MX", "MY", "MZ"):
             running += sum(1 for t in inst.targets_copy() if t.is_qubit_target)
         elif inst.name == "DETECTOR":
@@ -297,7 +313,7 @@ def _detector_signature(circuit: stim.Circuit, coord_map: dict[int, tuple]) -> s
 def _coord_map(circuit: stim.Circuit, transform) -> dict[int, tuple]:
     return {
         inst.targets_copy()[0].value: transform(*inst.gate_args_copy())
-        for inst in circuit
+        for inst in _instructions(circuit)
         if inst.name == "QUBIT_COORDS"
     }
 
