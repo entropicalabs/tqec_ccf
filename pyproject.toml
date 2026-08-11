@@ -151,7 +151,9 @@ exclude_also = [
 [tool.ruff]
 # exclude = ["__init__.py"]
 line-length = 100
-exclude = ["*.ipynb"]
+# tests/_vendor holds third-party code kept verbatim (see tests/_vendor/NOTICE.md);
+# it is a test oracle, never imported by src/, and must not be reformatted.
+exclude = ["*.ipynb", "tests/_vendor"]
 
 [tool.ruff.lint]
 select = ["I", "E", "W", "D", "F", "PL", "NPY", "N", "PERF", "RUF", "UP"]
@@ -202,6 +204,11 @@ ignore = [
 # Disabling for the moment, will see in the future if these warnings can be re-enabled without hurting the documentation.
 "src/tqec/compile/specs/library/generators/*" = ["D205"]
 "src/tqec/compile/observables/*" = ["D205"]
+
+[tool.ty.src]
+# Same rationale as the ruff exclusion above: vendored oracle code, kept as
+# published, is not type-checked.
+exclude = ["tests/_vendor"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

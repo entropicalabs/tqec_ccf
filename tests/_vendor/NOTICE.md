@@ -14,9 +14,9 @@ Source obtained from the author-provided artifact archive
 This code is used **only as a verification oracle for tests** — it is the
 ground-truth generator for the surface-code Y-basis measurement circuits and
 their stabilizer flows, against which tqec's own native Y-half-cube
-implementation (`src/tqec/compile/specs/library/generators/fixed_bulk.py`) is
-cross-checked. **It is never imported by `src/tqec/` and never ships on the
-compile path.** It lives under `tests/` for this reason.
+implementation (`src/tqec/compile/specs/library/generators/ycube.py` and
+`_ycube_circuit.py`) is cross-checked. **It is never imported by `src/tqec/`
+and never ships on the compile path.** It lives under `tests/` for this reason.
 
 ## Modifications
 
