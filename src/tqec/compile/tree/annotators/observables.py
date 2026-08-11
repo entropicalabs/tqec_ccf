@@ -3,7 +3,8 @@ import dataclasses
 from tqec.circuit.measurement_map import MeasurementRecordsMap
 from tqec.circuit.qubit import GridQubit
 from tqec.compile.blocks.layers.atomic.layout import LayoutLayer
-from tqec.compile.blocks.layers.atomic.raw import RawCircuitLayer
+from tqec.compile.blocks.layers.atomic.raw import FlowSpecLayer, RawCircuitLayer
+from tqec.compile.blocks.positioning import LayoutCubePosition2D
 from tqec.compile.conditional.circuit import IfBlock
 from tqec.compile.observables.abstract_observable import (
     AbstractObservable,
@@ -19,17 +20,24 @@ from tqec.templates.layout import LayoutTemplate
 from tqec.utils.exceptions import TQECError
 
 
-def _template_from_node(node: LayerNode, k: int) -> LayoutTemplate | None:
-    """Return the plaquette template of a leaf, tolerating a mix of raw Y-cap
-    rounds and plaquette rounds (the raw positions carry no template and are
-    dropped). ``None`` when the leaf is entirely raw (a lone Y cap)."""
+def _template_from_node(node: LayerNode) -> LayoutTemplate | None:
+    """Return the plaquette template of a leaf.
+
+    A leaf mixing raw Y-cap rounds with plaquette rounds is tolerated: the raw
+    positions carry no template and are dropped. Returns ``None`` when the leaf
+    is entirely raw (a lone Y cap).
+    """
     layout = node._layer
     assert isinstance(layout, LayoutLayer)
-    raw_positions = {p for p, l in layout.layers.items() if isinstance(l, RawCircuitLayer)}
+    raw_positions = {
+        pos for pos, layer in layout.layers.items() if isinstance(layer, RawCircuitLayer)
+    }
     if not raw_positions:
         template, _ = layout.to_template_and_plaquettes()
         return template
-    plaquette_layers = {p: l for p, l in layout.layers.items() if p not in raw_positions}
+    plaquette_layers = {
+        pos: layer for pos, layer in layout.layers.items() if pos not in raw_positions
+    }
     if not plaquette_layers:
         return None
     sub = LayoutLayer(plaquette_layers, layout.element_shape)
@@ -46,11 +54,16 @@ def _annotate_y_cube_readouts(
     """Include a Y-basis measurement cap's logical-Y readout in the observable.
 
     A Y cube's logical readout is *not* the final-round data measurement (the
-    normal top-readout path); it is the transition round's logical-Y record set
-    (corner measured in Y plus the top-row / left-column boundary). This finds
-    the transition round leaf in the z-slice, reads its ``observable_spec``
-    (qubit coordinates in the local element frame), shifts them to the cube's
-    position and XORs their measurements into the observable.
+    normal top-readout path); it is the set of transition-round records that
+    reconstruct the logical Y operator, published by that round as its
+    ``observable_spec``. The representative used there is the one the observable
+    builder expects for an arriving correlation surface --- the patch's middle
+    lines --- rather than Gidney's corner-anchored one; see
+    ``_tqec_logical_y_observable_spec``.
+
+    This walks the z-slice's leaves for the round carrying such a spec, shifts
+    its qubit coordinates (given in the local element frame) to the cube's
+    position, and XORs the matching measurements into the observable.
     """
     if not any(c.cube.is_y_cube for c in obs_slice.top_readout_cubes):
         return
@@ -59,12 +72,13 @@ def _annotate_y_cube_readouts(
         if not isinstance(layout, LayoutLayer):
             continue
         for pos, layer in layout.layers.items():
-            spec_getter = getattr(layer, "observable_spec", None)
-            if spec_getter is None:
+            if not isinstance(layer, FlowSpecLayer):
                 continue
-            spec = spec_getter(k)
+            spec = layer.observable_spec(k)
             if not spec:
                 continue
+            if not isinstance(pos, LayoutCubePosition2D):
+                raise TQECError("A RawCircuitLayer is only supported at a cube position.")
             eshape = layout.element_shape.to_shape_2d(k)
             mincube, _ = layout.bounds
             bp = pos.to_block_position()
@@ -369,7 +383,7 @@ def _annotate_observable_at_node(
     assert circuit is not None
     measurement_record = MeasurementRecordsMap.from_scheduled_circuit(circuit)
     assert isinstance(node._layer, LayoutLayer)
-    template = _template_from_node(node, k)
+    template = _template_from_node(node)
     if template is None:
         return
     # Y cubes contribute via their transition-round logical readout, handled by
@@ -377,9 +391,7 @@ def _annotate_observable_at_node(
     # does not pick up the final-round data measurements at their position.
     obs_slice = dataclasses.replace(
         obs_slice,
-        top_readout_cubes=frozenset(
-            c for c in obs_slice.top_readout_cubes if not c.cube.is_y_cube
-        ),
+        top_readout_cubes=frozenset(c for c in obs_slice.top_readout_cubes if not c.cube.is_y_cube),
     )
     obs_qubits = observable_builder.build(k, template, obs_slice, component)
     if obs_qubits:

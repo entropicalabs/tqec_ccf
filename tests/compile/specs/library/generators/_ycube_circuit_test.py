@@ -7,19 +7,27 @@ checking it is a well-formed, full-distance surface code.
 
 from __future__ import annotations
 
+import pytest
 import stim
 
-import pytest
-
+from tests._vendor.midout import gen
+from tests._vendor.midout.circuits.steps._measure_y_transition_round import (
+    make_y_transition_round_nesw_xzxz_to_xzzx,
+)
+from tests._vendor.midout.circuits.steps._patches import (
+    make_xtop_qubit_patch,
+    make_ztop_yboundary_patch,
+)
 from tqec.compile.specs.library.generators._ycube_circuit import (
+    _Builder,
+    _bulk_detectors,
+    _final_round,
+    _first_round_detectors,
     memory_experiment_circuit,
     standard_round,
     transition_round,
+    y_cap_raw_circuit,
     y_cap_segment_circuit,
-    _final_round,
-    _Builder,
-    _bulk_detectors,
-    _first_round_detectors,
 )
 from tqec.compile.specs.library.generators.ycube import (
     gidney_to_tqec,
@@ -32,8 +40,10 @@ from tqec.utils.enums import Basis
 @pytest.mark.parametrize("distance", [3, 5])
 @pytest.mark.parametrize("basis", [Basis.X, Basis.Z])
 def test_memory_experiment_detectors_are_deterministic(distance: int, basis: Basis) -> None:
-    """A noiseless memory experiment must have only deterministic detectors,
-    i.e. its detector error model builds without error."""
+    """A noiseless memory experiment has only deterministic detectors.
+
+    Equivalently, its detector error model builds without error.
+    """
     circuit = memory_experiment_circuit(distance, rounds=distance, basis=basis)
     # Raises ValueError if any detector/observable is non-deterministic.
     circuit.detector_error_model(decompose_errors=False)
@@ -73,9 +83,7 @@ def _memory_experiment_with_logical(distance: int, rounds: int, basis: Basis) ->
 
 
 def _with_depolarizing_noise(circuit: stim.Circuit, p: float = 0.001) -> stim.Circuit:
-    all_q = sorted(
-        {t.value for inst in circuit for t in inst.targets_copy() if t.is_qubit_target}
-    )
+    all_q = sorted({t.value for inst in circuit for t in inst.targets_copy() if t.is_qubit_target})
     out = stim.Circuit()
     for inst in circuit:
         out.append(inst)
@@ -87,11 +95,11 @@ def _with_depolarizing_noise(circuit: stim.Circuit, p: float = 0.001) -> stim.Ci
 @pytest.mark.parametrize("distance", [3, 5])
 @pytest.mark.parametrize("basis", [Basis.X, Basis.Z])
 def test_memory_experiment_has_full_code_distance(distance: int, basis: Basis) -> None:
-    """The memory experiment must be a genuine distance-``d`` code: the shortest
-    graphlike logical error has weight ``d``."""
-    circuit = _with_depolarizing_noise(
-        _memory_experiment_with_logical(distance, distance, basis)
-    )
+    """The memory experiment is a genuine distance-``d`` code.
+
+    That is, its shortest graphlike logical error has weight ``d``.
+    """
+    circuit = _with_depolarizing_noise(_memory_experiment_with_logical(distance, distance, basis))
     circuit.detector_error_model(decompose_errors=False)
     assert len(circuit.shortest_graphlike_error()) == distance
 
@@ -99,15 +107,20 @@ def test_memory_experiment_has_full_code_distance(distance: int, basis: Basis) -
 @pytest.mark.parametrize("distance", [3, 5])
 @pytest.mark.parametrize("init_basis", [Basis.X, Basis.Z])
 def test_y_cap_segment_detectors_are_deterministic(distance: int, init_basis: Basis) -> None:
-    """The full Y-cap segment (memory + transition + boundary + final) must have
-    only deterministic detectors, including the transition seam detectors."""
+    """The full Y-cap segment has only deterministic detectors.
+
+    The segment is memory + transition + boundary + final, and the transition
+    seam detectors are included in the check.
+    """
     circuit = y_cap_segment_circuit(distance, mem_rounds=distance, init_basis=init_basis)
     circuit.detector_error_model(decompose_errors=False)
 
 
 def _cap_only_circuit(distance: int):
-    """[transition, boundary x d//2, final] with data qubits unreset, for
-    observable-flow checks. Returns (circuit, builder, transition flows)."""
+    """Build ``[transition, boundary x d//2, final]`` with data qubits unreset.
+
+    Used for observable-flow checks. Returns ``(builder, transition flows)``.
+    """
     xtop = xtop_qubit_patch(distance)
     ztop = ztop_yboundary_patch(distance)
     b = _Builder()
@@ -128,9 +141,12 @@ def _cap_only_circuit(distance: int):
 
 @pytest.mark.parametrize("distance", [3, 5])
 def test_transition_measures_logical_y(distance: int) -> None:
-    """The transition round's observable records must reconstruct exactly the
-    incoming logical-Y operator (Y at the corner, Z along the x-axis boundary,
-    X along the y-axis boundary), verified via stim's has_flow."""
+    """The transition round's observable records reconstruct the logical Y.
+
+    The incoming operator is Y at the corner, Z along the x-axis boundary and X
+    along the y-axis boundary; the reconstruction is verified with stim's
+    ``has_flow``.
+    """
     b, flows = _cap_only_circuit(distance)
     nq = max(b.q2i.values()) + 1
     arr = ["I"] * nq
@@ -145,18 +161,11 @@ def test_transition_measures_logical_y(distance: int) -> None:
 
 
 def _oracle_y_cap_segment(distance: int, mem_rounds: int):
-    """The vendored-gen equivalent of ``y_cap_segment_circuit`` (Z-init memory +
-    transition + boundary + final), observable flow stripped, as a detector
-    parity oracle."""
-    from tests._vendor.midout import gen
-    from tests._vendor.midout.circuits.steps._patches import (
-        make_xtop_qubit_patch,
-        make_ztop_yboundary_patch,
-    )
-    from tests._vendor.midout.circuits.steps._measure_y_transition_round import (
-        make_y_transition_round_nesw_xzxz_to_xzzx,
-    )
+    """Build the vendored-gen equivalent of ``y_cap_segment_circuit``.
 
+    That is Z-init memory + transition + boundary + final, with the observable
+    flow stripped, used as a detector-parity oracle.
+    """
     d = distance
     xtop = make_xtop_qubit_patch(distance=d)
     ztop = make_ztop_yboundary_patch(distance=d)
@@ -173,9 +182,7 @@ def _oracle_y_cap_segment(distance: int, mem_rounds: int):
     chunks.append(
         gen.standard_surface_code_chunk(
             ztop,
-            measure_data_basis={
-                q: "Z" if q.real + q.imag < d else "X" for q in ztop.data_set
-            },
+            measure_data_basis={q: "Z" if q.real + q.imag < d else "X" for q in ztop.data_set},
         )
     )
     return gen.compile_chunks_into_circuit(chunks, include_detectors=True).flattened()
@@ -183,8 +190,10 @@ def _oracle_y_cap_segment(distance: int, mem_rounds: int):
 
 @pytest.mark.parametrize("distance", [3, 5])
 def test_y_cap_segment_detector_count_matches_oracle(distance: int) -> None:
-    """The native Y-cap segment must emit the same number of detectors as the
-    vendored gen oracle for the same recipe (Z-init memory + Y cap)."""
+    """The native Y-cap segment emits as many detectors as the oracle.
+
+    Both are built from the same recipe: Z-init memory + Y cap.
+    """
     native = y_cap_segment_circuit(distance, mem_rounds=distance, init_basis=Basis.Z)
     oracle = _oracle_y_cap_segment(distance, mem_rounds=distance)
     assert native.num_detectors == oracle.num_detectors
@@ -192,11 +201,12 @@ def test_y_cap_segment_detector_count_matches_oracle(distance: int) -> None:
 
 
 def _compose_below_and_raw(distance: int, mem_rounds: int, init_basis: Basis) -> stim.Circuit:
-    """Emulate what the detector annotator will do: a native below memory column,
-    the raw Y-cap slice appended, and the seam detectors formed from the raw
-    slice's seam_spec against the below column's last round."""
-    from tqec.compile.specs.library.generators._ycube_circuit import y_cap_raw_circuit
+    """Emulate what the detector annotator does.
 
+    A native below memory column, the raw Y-cap slice appended, and the seam
+    detectors formed from the raw slice's ``seam_spec`` against the below
+    column's last round.
+    """
     xtop = xtop_qubit_patch(distance)
     b = _Builder()
     b.allocate(set(xtop.data_qubits) | {s.ancilla for s in xtop.stabilizers})
@@ -245,9 +255,11 @@ def _compose_below_and_raw(distance: int, mem_rounds: int, init_basis: Basis) ->
 
 @pytest.mark.parametrize("distance", [3, 5])
 def test_raw_slice_plus_seam_matches_segment(distance: int) -> None:
-    """The raw Y-cap slice + annotator-style seam detectors, composed onto a
-    native memory column, must be deterministic and carry the same number of
-    detectors as the monolithic y_cap_segment_circuit."""
+    """The raw Y-cap slice composes onto a native memory column.
+
+    With annotator-style seam detectors it must be deterministic and carry as
+    many detectors as the monolithic ``y_cap_segment_circuit``.
+    """
     composed = _compose_below_and_raw(distance, distance, Basis.Z)
     composed.detector_error_model(decompose_errors=False)
     segment = y_cap_segment_circuit(distance, mem_rounds=distance, init_basis=Basis.Z)
@@ -255,8 +267,11 @@ def test_raw_slice_plus_seam_matches_segment(distance: int) -> None:
 
 
 def _detector_signature(circuit: stim.Circuit, coord_map: dict[int, tuple]) -> set[frozenset]:
-    """Frame-independent detector fingerprint: each detector as the frozenset of
-    ``(qubit_coord, k-th-measurement-of-that-qubit)`` labels it references."""
+    """Return a frame-independent detector fingerprint.
+
+    Each detector becomes the frozenset of the
+    ``(qubit_coord, k-th-measurement-of-that-qubit)`` labels it references.
+    """
     times: dict[tuple, int] = {}
     rec_id: dict[int, tuple] = {}
     n = 0
@@ -289,10 +304,13 @@ def _coord_map(circuit: stim.Circuit, transform) -> dict[int, tuple]:
 
 @pytest.mark.parametrize("distance", [3, 5])
 def test_raw_slice_detectors_match_oracle_exactly(distance: int) -> None:
-    """The native Y-cap slice (memory column + raw slice + seam) must have a
-    detector set identical to Gidney's gen oracle -- not merely the same count,
-    but the same detectors, each referencing the same (qubit, k-th-measurement)
-    labels once both are expressed in a common coordinate frame."""
+    """The native Y-cap slice has the same detector set as the oracle.
+
+    The slice is memory column + raw slice + seam. Not merely the same count:
+    the same detectors, each referencing the same
+    ``(qubit, k-th-measurement)`` labels once both are expressed in a common
+    coordinate frame.
+    """
     native = _compose_below_and_raw(distance, distance, Basis.Z)
     oracle = _oracle_y_cap_segment(distance, mem_rounds=distance)
     native_sig = _detector_signature(native, _coord_map(native, lambda x, y, *r: (int(x), int(y))))

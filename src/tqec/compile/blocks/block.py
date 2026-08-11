@@ -20,6 +20,7 @@ from tqec.compile.blocks.layers.merge import (
     merge_composed_layers,
 )
 from tqec.compile.blocks.positioning import LayoutPosition2D
+from tqec.templates.base import RectangularTemplate
 from tqec.utils.exceptions import TQECError
 from tqec.utils.scale import LinearFunction, PhysicalQubitScalable2D
 
@@ -61,6 +62,19 @@ class Block(SequencedLayers):
 
         """
         return False
+
+    @property
+    def declared_template(self) -> RectangularTemplate | None:
+        """The block's spatial footprint, when the block states it itself.
+
+        A block's template is normally recovered from its
+        :class:`~tqec.compile.blocks.layers.atomic.plaquettes.PlaquetteLayer`
+        layers. A block built only from raw circuits (the Y-basis measurement
+        cap) has none, so it declares the footprint here instead. ``None`` for
+        every ordinary block.
+
+        """
+        return None
 
     @override
     def with_spatial_borders_trimmed(self, borders: Iterable[SpatialBlockBorder]) -> Block:
@@ -269,8 +283,10 @@ class ConditionalBlock(Block):
 
 
 def _flatten_block_layers(block: Block, k: int) -> list[BaseLayer]:
-    """Expand a block's layer sequence into one atomic layer per timestep at the
-    concrete scaling factor ``k`` (unrolling every ``RepeatedLayer``)."""
+    """Expand a block's layer sequence into one atomic layer per timestep.
+
+    Every ``RepeatedLayer`` is unrolled at the concrete scaling factor ``k``.
+    """
     flat: list[BaseLayer] = []
     for layer in block.layer_sequence:
         if isinstance(layer, RepeatedLayer):
@@ -292,9 +308,9 @@ def _flatten_block_layers(block: Block, k: int) -> list[BaseLayer]:
 
 
 def _block_pad_body(block: Block) -> BaseLayer:
-    """The repeatable bulk round used to pad a block that is shorter than the
-    merged slice: the internal layer of its (single) ``RepeatedLayer``.
+    """Return the bulk round used to pad a block shorter than the merged slice.
 
+    That round is the internal layer of the block's (single) ``RepeatedLayer``.
     Padding with an extra copy of this round is physics-preserving: for a memory
     cube it is another memory round before the final measurement; for a Y cap it
     is another boundary (padding) round on the degenerate patch before the
@@ -317,12 +333,12 @@ def _merge_mismatched_block_layers(
     scalable_qubit_shape: PhysicalQubitScalable2D,
     k: int,
 ) -> list[LayoutLayer | BaseComposedLayer]:
-    """Merge parallel blocks with mismatched temporal schedules by flattening
-    each block at the concrete ``k`` and start-aligning them.
+    """Merge parallel blocks whose temporal schedules do not match.
 
-    The merged slice runs for ``max`` rounds over the parallel blocks, and every
-    block is start-aligned. A block shorter than the slice is handled one of two
-    ways, according to :attr:`Block.releases_its_qubits`:
+    Each block is flattened at the concrete ``k`` and start-aligned. The merged
+    slice runs for ``max`` rounds over the parallel blocks. A block shorter than
+    the slice is handled one of two ways, according to
+    :attr:`Block.releases_its_qubits`:
 
     - a block that measures out its data qubits (a Y-basis measurement cap) is
       finished when its layers run out, and is simply **absent** from the

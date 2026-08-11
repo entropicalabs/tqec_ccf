@@ -14,9 +14,10 @@ the constructions here are reimplemented directly and verified against a
 vendored copy of ``gen`` used purely as a test oracle
 (``tests/_vendor/midout``); see ``tests/compile/specs/library/generators``.
 
-This first layer provides the **geometry** only: the surface-code patch
-(data qubits, stabilizers) reproduced in tqec integer coordinates. The circuit
-(gate schedules, detectors, observable) is built on top of it.
+This module provides the **geometry** only: the surface-code patch (data
+qubits, stabilizers) reproduced in tqec integer coordinates. The circuits built
+on top of it (gate schedules, detectors, observable) live in
+:mod:`tqec.compile.specs.library.generators._ycube_circuit`.
 
 ## Coordinate frame
 
@@ -69,7 +70,7 @@ def gidney_to_tqec(q: complex, transposed: bool = False) -> tuple[int, int]:
     y = 2 * q.imag + 1
     if transposed:
         x, y = y, x
-    return (int(round(x)), int(round(y)))
+    return (round(x), round(y))
 
 
 def tqec_to_gidney(coord: tuple[int, int], transposed: bool = False) -> complex:
@@ -99,6 +100,7 @@ class Stabilizer:
         gidney_ancilla: the original Gidney complex coordinate of the ancilla,
             retained so callers can reproduce Gidney's position-arithmetic flow
             rules (which are stated in Gidney coordinates).
+
     """
 
     ancilla: tuple[int, int]
@@ -115,6 +117,7 @@ class PatchGeometry:
         distance: the code distance ``d``.
         data_qubits: every data-qubit ``(x, y)`` coordinate in the patch.
         stabilizers: every stabilizer of the patch.
+
     """
 
     distance: int
@@ -160,9 +163,7 @@ def _rectangular_patch(
         if is_boundary(m, Basis.X) <= (_checkerboard_basis(m) == Basis.X)
         if is_boundary(m, Basis.Z) <= (_checkerboard_basis(m) == Basis.Z)
     }
-    data_qubits = {
-        q for q in possible_data if sum((q + d) in measure_qubits for d in _DIRS) > 1
-    }
+    data_qubits = {q for q in possible_data if sum((q + d) in measure_qubits for d in _DIRS) > 1}
 
     stabilizers: list[Stabilizer] = []
     for m in sorted(measure_qubits, key=lambda q: (q.imag, q.real)):
@@ -201,7 +202,7 @@ def _ztop_order(m: complex) -> list[complex]:
 
 
 def xtop_qubit_patch(distance: int, transposed: bool = False) -> PatchGeometry:
-    """The ``xtop`` qubit patch used during memory rounds (N=X, E=Z, S=X, W=Z).
+    """Build the ``xtop`` qubit patch used during memory rounds (N=X, E=Z, S=X, W=Z).
 
     Dependency-free port of ``make_xtop_qubit_patch`` in tqec coordinates.
     """
@@ -217,7 +218,8 @@ def xtop_qubit_patch(distance: int, transposed: bool = False) -> PatchGeometry:
 
 
 def ztop_yboundary_patch(distance: int, transposed: bool = False) -> PatchGeometry:
-    """The degenerate ``ztop`` Y-boundary patch after the transition (N=Z, E=X, S=X, W=Z).
+    """Build the degenerate ``ztop`` Y-boundary patch after the transition
+    (N=Z, E=X, S=X, W=Z).
 
     Dependency-free port of ``make_ztop_yboundary_patch`` in tqec coordinates.
     """

@@ -10,6 +10,10 @@ from __future__ import annotations
 
 import pytest
 
+from tests._vendor.midout.circuits.steps._patches import (
+    make_xtop_qubit_patch,
+    make_ztop_yboundary_patch,
+)
 from tqec.compile.specs.library.generators.ycube import (
     gidney_to_tqec,
     xtop_qubit_patch,
@@ -17,21 +21,15 @@ from tqec.compile.specs.library.generators.ycube import (
 )
 from tqec.utils.enums import Basis
 
-from tests._vendor.midout.circuits.steps._patches import (
-    make_xtop_qubit_patch,
-    make_ztop_yboundary_patch,
-)
-
 
 def _oracle_summary(patch):
-    """(data set, {ancilla_tqec: (basis, ordered_data_tqec)}) from a gen.Patch."""
+    """Return ``(data set, {ancilla_tqec: (basis, ordered_data_tqec)})`` from a patch."""
     data = {gidney_to_tqec(q) for q in patch.data_set}
     stabs = {}
     for tile in patch.tiles:
         m = tile.measurement_qubit
         ordered = tuple(
-            gidney_to_tqec(d) if d is not None else None
-            for d in tile.ordered_data_qubits
+            gidney_to_tqec(d) if d is not None else None for d in tile.ordered_data_qubits
         )
         stabs[gidney_to_tqec(m)] = (tile.basis, ordered)
     return data, stabs
@@ -39,9 +37,7 @@ def _oracle_summary(patch):
 
 def _native_summary(geom):
     data = set(geom.data_qubits)
-    stabs = {
-        s.ancilla: (s.basis.value, s.ordered_data) for s in geom.stabilizers
-    }
+    stabs = {s.ancilla: (s.basis.value, s.ordered_data) for s in geom.stabilizers}
     return data, stabs
 
 

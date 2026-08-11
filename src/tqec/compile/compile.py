@@ -2,6 +2,7 @@
 
 from typing import Final, Literal
 
+from tqec.compile.blocks.block import Block
 from tqec.compile.blocks.layers.atomic.base import BaseLayer
 from tqec.compile.blocks.layers.atomic.plaquettes import PlaquetteLayer
 from tqec.compile.blocks.layers.atomic.raw import RawCircuitLayer
@@ -172,9 +173,8 @@ def _get_template_from_layer(
         # plaquette layer to recover a template from, so it declares its spatial
         # footprint directly. Checked before walking the layers, which would
         # otherwise find nothing and raise.
-        declared = getattr(root, "template", None)
-        if isinstance(declared, RectangularTemplate):
-            return declared
+        if isinstance(root, Block) and root.declared_template is not None:
+            return root.declared_template
         possible_templates = {
             template
             for layer in root.layer_sequence

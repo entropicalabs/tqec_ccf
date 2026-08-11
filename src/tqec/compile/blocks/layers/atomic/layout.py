@@ -7,6 +7,10 @@ from typing import Final, TypeGuard
 from typing_extensions import override
 
 from tqec.circuit.schedule.circuit import ScheduledCircuit
+from tqec.circuit.schedule.manipulation import (
+    merge_scheduled_circuits,
+    relabel_circuits_qubit_indices,
+)
 from tqec.compile.blocks.enums import SpatialBlockBorder
 from tqec.compile.blocks.layers.atomic.base import BaseLayer
 from tqec.compile.blocks.layers.atomic.plaquettes import PlaquetteLayer
@@ -408,9 +412,7 @@ class LayoutLayer(BaseLayer):
         shifted_circuit = scheduled_circuit.map_to_qubits(lambda q: q + shift)
         return shifted_circuit
 
-    def _raw_to_circuit(
-        self, k: int, raw_positions: list[LayoutPosition2D]
-    ) -> ScheduledCircuit:
+    def _raw_to_circuit(self, k: int, raw_positions: list[LayoutPosition2D]) -> ScheduledCircuit:
         """Emit a layer that carries a :class:`RawCircuitLayer` at a cube position.
 
         The raw layer supplies a self-contained ``ScheduledCircuit`` in the local
@@ -440,22 +442,18 @@ class LayoutLayer(BaseLayer):
     def _mixed_to_circuit(
         self, k: int, raw_positions: list[LayoutPosition2D], reschedule_measurements: bool
     ) -> ScheduledCircuit:
-        """Emit a layer that carries a mix of :class:`RawCircuitLayer` (a Y-cap
-        round) and :class:`PlaquetteLayer` (a coexisting memory round) at
-        distinct cube positions.
+        """Emit a layer mixing raw Y-cap rounds and plaquette memory rounds.
 
-        The plaquette positions are rendered via the standard template path; each
-        raw position supplies its own ``ScheduledCircuit``. All circuits are
+        The two kinds of layer sit at distinct cube positions: a
+        :class:`RawCircuitLayer` for the Y-cap round, a :class:`PlaquetteLayer`
+        for the memory round coexisting with it. The plaquette positions are
+        rendered via the standard template path; each raw position supplies its
+        own ``ScheduledCircuit``. All circuits are
         placed into a common qubit frame (shifted by their cube position) and
         merged moment-by-moment (schedule-aligned), so a shorter raw round simply
         contributes no operations to the trailing moments of a longer plaquette
         round (and vice versa).
         """
-        from tqec.circuit.schedule.manipulation import (
-            merge_scheduled_circuits,
-            relabel_circuits_qubit_indices,
-        )
-
         eshape = self.element_shape.to_shape_2d(k)
         mincube, _ = self.bounds
 
@@ -471,9 +469,7 @@ class LayoutLayer(BaseLayer):
 
         for pos in raw_positions:
             if not isinstance(pos, LayoutCubePosition2D):
-                raise NotImplementedError(
-                    "A RawCircuitLayer is only supported at a cube position."
-                )
+                raise NotImplementedError("A RawCircuitLayer is only supported at a cube position.")
             raw_layer = self.layers[pos]
             assert isinstance(raw_layer, RawCircuitLayer)
             block_pos = pos.to_block_position()
