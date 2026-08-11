@@ -59,6 +59,21 @@ def test_y_cap_transposed_is_derived_from_the_cube_below() -> None:
         assert specs[Position3D(0, 0, 0)].y_cap_transposed is False, kind
 
 
+def test_y_basis_initialisation_is_rejected_with_a_clear_error() -> None:
+    """A Y cube with no cube below it is refused where it is diagnosable.
+
+    Only the measurement half of the construction is lowered. Without this
+    check, a Y-basis initialisation is built as a measurement cap and fails much
+    later with a seam-detector mismatch.
+    """
+    graph = BlockGraph("y_init")
+    graph.add_cube(Position3D(0, 0, 0), LeafCubeKind.Y_HALF_CUBE)
+    graph.add_cube(Position3D(0, 0, 1), ZXCube.from_str("ZXZ"))
+    graph.add_pipe(Position3D(0, 0, 0), Position3D(0, 0, 1))
+    with pytest.raises(NotImplementedError, match="not a Y-basis measurement cap"):
+        compile_block_graph(graph, observables=[]).generate_stim_circuit(k=1)
+
+
 @pytest.mark.parametrize("k", [1, 2])
 def test_y_capped_column_compiles(k: int) -> None:
     circuit = compile_block_graph(_y_capped_column(), observables="auto").generate_stim_circuit(k=k)

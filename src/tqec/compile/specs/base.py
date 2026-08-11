@@ -18,24 +18,39 @@ if TYPE_CHECKING:
     from tqec.computation.correlation import CorrelationSurface
 
 
+def _y_capped_cube_kind(cube: Cube, graph: BlockGraph) -> ZXCube:
+    """Return the kind of the cube a ``Y_HALF_CUBE`` caps.
+
+    Raises:
+        NotImplementedError: if the Y cube is not a measurement cap sitting on
+            top of a regular cube --- a Y-basis *initialisation* (pipe above
+            rather than below), or a Y cube attached to a ``Port``. Only the
+            measurement half of the construction is lowered for the moment.
+
+    """
+    below = Position3D(cube.position.x, cube.position.y, cube.position.z - 1)
+    below_kind = graph[below].kind if graph.has_pipe_between(below, cube.position) else None
+    if not isinstance(below_kind, ZXCube):
+        raise NotImplementedError(
+            f"The Y cube at {cube.position} is not a Y-basis measurement cap: "
+            "it has no regular cube below it. Only Y-basis measurement (a Y "
+            "cube on top of a regular cube) is implemented; Y-basis "
+            "initialisation and a Y cube connected to a Port are not."
+        )
+    return below_kind
+
+
 def _y_cap_is_transposed(cube: Cube, graph: BlockGraph) -> bool:
     """Whether a ``Y_HALF_CUBE``'s patch must be reflected across its main diagonal.
 
     A Y cap continues the patch of the cube below it, so it inherits that cube's
     spatial orientation. Gidney's construction is written for a ``ZX*`` cube
     (spatial boundaries normal to ``x`` in ``Z``); an ``XZ*`` cube needs the
-    reflection. Returns ``False`` for any other cube kind, and for a Y cube with
-    no cube below (a Y-basis *initialisation*, which is lowered elsewhere).
+    reflection. Returns ``False`` for any cube that is not a Y cube.
     """
     if not cube.is_y_cube:
         return False
-    below = Position3D(cube.position.x, cube.position.y, cube.position.z - 1)
-    if not graph.has_pipe_between(below, cube.position):
-        return False
-    below_kind = graph[below].kind
-    if not isinstance(below_kind, ZXCube):
-        return False
-    return below_kind.x == Basis.X
+    return _y_capped_cube_kind(cube, graph).x == Basis.X
 
 
 @dataclass(frozen=True)
@@ -62,7 +77,7 @@ class CubeSpec:
             the cube below it, and Gidney's construction is written for a ``ZX*``
             cube (left/right boundaries in ``Z``). An ``XZ*`` cube below has those
             boundaries in ``X`` and needs the reflected patch. ``False`` for every
-            other cube kind, and for a Y cube with no cube below it.
+            other cube kind.
 
     """
 
