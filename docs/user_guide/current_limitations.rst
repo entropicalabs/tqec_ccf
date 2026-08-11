@@ -24,6 +24,22 @@ These kind of computation require special handling that is not currently impleme
 ``Y``-basis measurements
 ------------------------
 
+An in-place ``Y``-basis *measurement* --- a :class:`.YHalfCube` capping a
+column, i.e. the readout half of an ``S`` gate --- is implemented for the
+fixed-bulk convention, following `Gidney's construction
+<https://quantum-journal.org/papers/q-2024-04-08-1310/>`_. The cap may coexist
+in a ``z``-slice with cubes that keep running, and its logical readout closes a
+correlation surface like any other, so the ``S``-gate observable is compiled
+without user intervention.
+
+The following are **not** implemented yet:
+
+* ``Y``-basis **initialization** (a ``Y`` cube with a pipe above it rather than
+  below). Only the measurement half of the construction is lowered.
+* the same cube under the **fixed-boundary** convention, which still raises
+  ``NotImplementedError``.
+* a ``Y`` cube directly connected to a ``Port``.
+
 Walking codes
 -------------
 
