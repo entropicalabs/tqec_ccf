@@ -19,10 +19,13 @@ from tests._vendor.midout.circuits.steps._patches import (
     make_ztop_yboundary_patch,
 )
 from tqec.compile.specs.library.generators._ycube_circuit import (
+    _build_transition_round,
     _Builder,
     _bulk_detectors,
     _final_round,
     _first_round_detectors,
+    _middle_line_correction_plaquettes,
+    _tqec_logical_y_observable_spec,
     memory_experiment_circuit,
     standard_round,
     transition_round,
@@ -174,6 +177,103 @@ def test_transition_measures_logical_y(distance: int) -> None:
     obs_recs = [b.rec("T", c) for c in flows.observable]
     flow = stim.Flow(input=inp, output=stim.PauliString(nq), measurements=obs_recs)
     assert b.circuit.has_flow(flow)
+
+
+@pytest.mark.parametrize("transposed", [False, True])
+@pytest.mark.parametrize("distance", [3, 5, 7])
+def test_observable_spec_reads_out_the_middle_cross(distance: int, transposed: bool) -> None:
+    """The emitted readout measures the logical Y on the patch's middle lines.
+
+    That is the representative the observable builder lowers an arriving
+    correlation surface onto, and the one the geometric plaquette-strip
+    correction in ``_tqec_logical_y_observable_spec`` targets --- not Gidney's
+    corner-anchored operator, which
+    :func:`test_transition_measures_logical_y` covers.
+
+    The flow holds up to sign: ``+Y`` at the crossing of the two strings is a
+    convention, and the readout implements its negation. A constant frame offset
+    leaves the observable deterministic, which is all the compiler needs.
+    """
+    circuit, _ = _build_transition_round(distance, transposed)
+    coords = {(int(c[0]), int(c[1])): q for q, c in circuit.get_final_qubit_coordinates().items()}
+    middle = (distance - 1) // 2
+
+    target = stim.PauliString(circuit.num_qubits)
+    for i in range(distance):
+        target[coords[gidney_to_tqec(complex(middle, i), transposed)]] = "X"
+    for i in range(distance):
+        qubit = coords[gidney_to_tqec(complex(i, middle), transposed)]
+        target[qubit] = "Y" if target[qubit] == 1 else "Z"
+
+    spec = set(_tqec_logical_y_observable_spec(distance, transposed))
+    measured = _measured_coordinates(circuit)
+    records = [i for i, coord in enumerate(measured) if coord in spec]
+    assert len(records) == len(spec)
+
+    flow = stim.Flow(
+        input=target, output=stim.PauliString(circuit.num_qubits), measurements=records
+    )
+    assert circuit.has_flow(flow, unsigned=True)
+
+
+def _measured_coordinates(circuit: stim.Circuit) -> list[tuple[int, int]]:
+    """Return the coordinate measured by each measurement of ``circuit``, in order."""
+    qubit_coords = circuit.get_final_qubit_coordinates()
+    out: list[tuple[int, int]] = []
+    for inst in _instructions(circuit):
+        if inst.name not in ("M", "MX", "MY", "MZ"):
+            continue
+        for target in inst.targets_copy():
+            qubit = target.qubit_value
+            assert qubit is not None
+            coord = qubit_coords[qubit]
+            out.append((int(coord[0]), int(coord[1])))
+    return out
+
+
+@pytest.mark.parametrize("transposed", [False, True])
+@pytest.mark.parametrize("distance", [3, 5, 7])
+def test_middle_line_correction_is_the_plaquette_strip(distance: int, transposed: bool) -> None:
+    """The two logical-Y representatives differ by exactly two plaquette strips.
+
+    Moving the ``X`` string from the boundary column to the middle one multiplies
+    it by every ``X`` plaquette in between, and likewise for the ``Z`` string and
+    the rows. Pinning the strips pins the whole construction: a wrong strip
+    silently reads out a different operator.
+    """
+    middle = (distance - 1) // 2
+    ancillas = _middle_line_correction_plaquettes(distance, transposed)
+    assert len(ancillas) == len(set(ancillas)) == 2 * middle * (middle + 1)
+
+    patch = xtop_qubit_patch(distance, transposed)
+    basis_of = {s.gidney_ancilla: s.basis for s in patch.stabilizers}
+    x_strip = [a for a in ancillas if basis_of[a] == Basis.X]
+    z_strip = [a for a in ancillas if basis_of[a] == Basis.Z]
+    assert len(x_strip) == len(z_strip)
+    assert all(0 < a.real < middle for a in x_strip)
+    assert all(0 < a.imag < middle for a in z_strip)
+    # And nothing eligible was left out.
+    assert {a for a, b in basis_of.items() if b == Basis.X and 0 < a.real < middle} == set(x_strip)
+    assert {a for a, b in basis_of.items() if b == Basis.Z and 0 < a.imag < middle} == set(z_strip)
+
+
+@pytest.mark.parametrize(
+    ("transposed", "expected"),
+    [
+        (False, ((1, 1), (2, 0), (2, 2), (4, 6), (6, 4))),
+        (True, ((0, 2), (1, 1), (2, 2), (4, 6), (6, 4))),
+    ],
+)
+def test_observable_spec_at_distance_three_is_stable(
+    transposed: bool, expected: tuple[tuple[int, int], ...]
+) -> None:
+    """Golden readout at ``d=3``, so a change of representative cannot slip in.
+
+    These coordinates were cross-checked against
+    ``stim.Circuit.solve_flow_measurements`` for ``d`` up to 11 in both
+    orientations when the geometric construction replaced it.
+    """
+    assert _tqec_logical_y_observable_spec(3, transposed) == expected
 
 
 def _oracle_y_cap_segment(distance: int, mem_rounds: int):

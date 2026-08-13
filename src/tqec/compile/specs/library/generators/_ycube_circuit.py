@@ -28,6 +28,7 @@ The module is organised in three parts:
 from __future__ import annotations
 
 import functools
+from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
@@ -51,7 +52,6 @@ from tqec.compile.specs.library.generators.ycube import (
 )
 from tqec.templates.base import RectangularTemplate
 from tqec.utils.enums import Basis
-from tqec.utils.exceptions import TQECError
 from tqec.utils.scale import LinearFunction, PhysicalQubitScalable2D
 
 Coord = tuple[int, int]
@@ -605,69 +605,79 @@ def _strip_trailing_tick(circuit: stim.Circuit) -> stim.Circuit:
     return circuit
 
 
-def _measurement_coordinates(circuit: stim.Circuit) -> list[Coord]:
-    """Return the tqec coordinate measured by each measurement of ``circuit``, in order."""
-    qubit_coords = circuit.get_final_qubit_coordinates()
-    coords: list[Coord] = []
-    for instruction in circuit.flattened():
-        # ``flattened`` unrolls every REPEAT block, so only instructions remain.
-        assert isinstance(instruction, stim.CircuitInstruction)
-        if instruction.name not in ("M", "MX", "MY", "MZ"):
-            continue
-        for target in instruction.targets_copy():
-            qubit = target.qubit_value
-            assert qubit is not None, "a measurement target is always a qubit"
-            c = qubit_coords[qubit]
-            coords.append((int(c[0]), int(c[1])))
-    return coords
+def _middle_line_correction_plaquettes(distance: int, transposed: bool = False) -> list[complex]:
+    """Return the input-patch plaquettes separating the two logical-Y representatives.
+
+    Gidney's representative is anchored at the corner: ``X`` down the boundary
+    data column ``Re = 0``, ``Z`` along the boundary row ``Im = 0``, ``Y`` where
+    they meet. tqec's is the patch's *middle cross*: the same two strings moved
+    to ``Re = mid`` and ``Im = mid``, ``mid = (d-1)//2``. Moving a string across
+    one column of plaquettes multiplies it by that column, so the two
+    representatives differ by exactly
+
+    * every ``X`` plaquette in the vertical strip ``0 < Re(m) < mid``, and
+    * every ``Z`` plaquette in the horizontal strip ``0 < Im(m) < mid``,
+
+    which is ``2 * mid * (mid + 1)`` plaquettes (4, 12, 24 at ``d`` = 3, 5, 7).
+
+    Selection happens on the Gidney lattice, so a ``transposed`` patch needs no
+    special case: the reflection is carried by :func:`gidney_to_tqec` alone, as
+    everywhere else in this module.
+
+    Returns:
+        the plaquettes' Gidney ancilla coordinates, which key
+        :attr:`TransitionFlows.start`.
+
+    """
+    middle = (distance - 1) // 2
+    plaquettes: list[complex] = []
+    for stabilizer in xtop_qubit_patch(distance, transposed).stabilizers:
+        ancilla = stabilizer.gidney_ancilla
+        # The lower bounds state the intent rather than exclude anything: the
+        # patch has no X plaquette left of the leftmost data column (that
+        # boundary is Z) and no Z plaquette above the top row (that boundary is
+        # X), so both strips start at the corner either way.
+        in_strip = (
+            0 < ancilla.real < middle if stabilizer.basis is Basis.X else 0 < ancilla.imag < middle
+        )
+        if in_strip:
+            plaquettes.append(ancilla)
+    return plaquettes
 
 
 @functools.cache
 def _tqec_logical_y_observable_spec(distance: int, transposed: bool = False) -> tuple[Coord, ...]:
-    """Solve for the transition-round records measuring the logical Y operator
+    """Return the transition-round records measuring the logical Y operator
     *in tqec's representative*.
 
     :func:`transition_round` reports a logical-Y flow of its own
-    (``TransitionFlows.observable``, Gidney's corner-Y plus X-ancilla
-    representative). That is a valid logical Y, but it is not the representative
-    the rest of the compiler uses: an incoming correlation surface is lowered by
-    the observable builder onto the patch's *middle* lines --- the X sheet onto
-    the data column ``x = d`` and the Z sheet onto the data row ``y = d`` (see
-    ``build_regular_cube_top_readout_qubits``). The two representatives differ by
-    a product of input-patch stabilizers, so combining Gidney's readout with the
-    builder's host measurements leaves the observable non-deterministic.
+    (``TransitionFlows.observable``, Gidney's corner-anchored representative).
+    That is a valid logical Y, but it is not the representative the rest of the
+    compiler uses: an incoming correlation surface is lowered by the observable
+    builder onto the patch's *middle* lines --- the X sheet onto the data column
+    ``Re = mid``, the Z sheet onto the data row ``Im = mid`` (see
+    ``build_regular_cube_top_readout_qubits``). Combining Gidney's readout with
+    the builder's host measurements therefore leaves the observable
+    non-deterministic.
 
-    Rather than hard-code that stabilizer correction, ask ``stim`` for the
-    records implementing the flow ``X(column x=d) . Z(row y=d) -> I`` through the
-    transition round. Any solution is equally valid --- solutions differ only by
-    sets that are deterministic within the round --- and it is exact and correct
-    at every distance by construction.
+    The two representatives differ by the plaquette strip returned by
+    :func:`_middle_line_correction_plaquettes`, so this readout is Gidney's
+    corrected by how *this round* measures each of those input stabilizers, which
+    is what ``TransitionFlows.start`` records. Those records are not free: each is
+    deterministic only together with the previous round's measurement of the same
+    stabilizer --- that pairing is the seam detector --- which is why picking the
+    wrong representative makes the assembled observable random rather than merely
+    flipped.
+
+    The flow holds up to sign: signed, it is ``-1`` relative to ``+Y`` written as
+    (X column) . (Z row) with ``+Y`` at the crossing. That is a constant frame
+    offset, so the observable is constant but its constant is not necessarily 0.
     """
-    d = distance
-    circuit, _ = _build_transition_round(d, transposed)
-    index_of = {(int(c[0]), int(c[1])): q for q, c in circuit.get_final_qubit_coordinates().items()}
-    target = stim.PauliString(circuit.num_qubits)
-    # Expressed on the Gidney lattice and mapped through ``gidney_to_tqec`` so
-    # that both middle lines follow the patch's orientation rather than being
-    # pinned to a fixed tqec row/column.
-    middle = (d - 1) // 2
-    for i in range(d):
-        target[index_of[gidney_to_tqec(complex(middle, i), transposed)]] = "X"
-    for i in range(d):
-        qubit = index_of[gidney_to_tqec(complex(i, middle), transposed)]
-        # The centre qubit carries both sheets, i.e. X . Z = Y.
-        target[qubit] = "Y" if target[qubit] == 1 else "Z"
-    (solution,) = stim.Circuit.solve_flow_measurements(
-        circuit,
-        [stim.Flow(input=target, output=stim.PauliString(circuit.num_qubits))],
-    )
-    if solution is None:
-        raise TQECError(
-            "stim could not express the logical-Y operator of the Y-basis "
-            f"measurement cap at distance {d} through its transition round."
-        )
-    coords = _measurement_coordinates(circuit)
-    return tuple(sorted(coords[i] for i in solution))
+    _, flows = _build_transition_round(distance, transposed)
+    records = Counter(flows.observable)
+    for ancilla in _middle_line_correction_plaquettes(distance, transposed):
+        records.update(flows.start[ancilla])
+    return tuple(sorted(coord for coord, count in records.items() if count % 2 == 1))
 
 
 def _build_transition_round(
