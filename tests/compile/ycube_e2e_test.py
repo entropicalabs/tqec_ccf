@@ -201,15 +201,39 @@ def test_two_y_caps_observable_is_deterministic(k: int, kind: str) -> None:
     assert len({bool(v) for v in observables.reshape(-1)}) == 1
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Known defect: the Y cap collapses the circuit distance of the closed "
+        "surface to k + 1 (2 at k=1, 3 at k=2) instead of 2k + 1. The shortest "
+        "undetectable logical error is a timelike string of ancilla measurement "
+        "flips running from the transition round through the cap's boundary and "
+        "final rounds. Reproduced for both ZXZ and XZX; the same block graph with "
+        "ordinary caps instead of Y caps keeps full distance, and Gidney's own "
+        "Y-basis memory experiment (tests/_vendor/midout) keeps full distance, so "
+        "the loss is specific to tqec's Y cap."
+    ),
+)
 @pytest.mark.parametrize("kind", ["ZXZ", "XZX"])
 @pytest.mark.parametrize("k", [1, 2])
 def test_two_y_caps_observable_preserves_distance(k: int, kind: str) -> None:
-    """The Y seam does not collapse the code distance of the closed surface."""
+    """The Y seam does not collapse the code distance of the closed surface.
+
+    Uses :meth:`stim.Circuit.search_for_undetectable_logical_errors` rather than
+    :meth:`~stim.Circuit.shortest_graphlike_error`. The latter, called with
+    ``ignore_ungraphlike_errors=False``, decomposes the error model before
+    searching; that decomposition splits one of the two parallel
+    ``D_a D_b`` / ``D_a D_b L0`` edges into boundary components and so hides the
+    weight-2 logical error. It is the distance of the decomposed matching graph,
+    not of the circuit.
+    """
     graph, surfaces = _closed_surface(kind)
     circuit = compile_block_graph(graph, observables=surfaces).generate_stim_circuit(k=k)
     noisy = NoiseModel.uniform_depolarizing(0.001).noisy_circuit(circuit)
-    error = noisy.shortest_graphlike_error(
-        ignore_ungraphlike_errors=False, canonicalize_circuit_errors=True
+    error = noisy.search_for_undetectable_logical_errors(
+        dont_explore_detection_event_sets_with_size_above=4,
+        dont_explore_edges_with_degree_above=4,
+        dont_explore_edges_increasing_symptom_degree=False,
     )
     assert len(error) == 2 * k + 1
 

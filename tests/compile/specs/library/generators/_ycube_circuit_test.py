@@ -18,6 +18,7 @@ from tests._vendor.midout.circuits.steps._patches import (
     make_xtop_qubit_patch,
     make_ztop_yboundary_patch,
 )
+from tqec import BlockGraph, compile_block_graph
 from tqec.compile.specs.library.generators._ycube_circuit import (
     _build_transition_round,
     _Builder,
@@ -37,7 +38,9 @@ from tqec.compile.specs.library.generators.ycube import (
     xtop_qubit_patch,
     ztop_yboundary_patch,
 )
+from tqec.computation.cube import LeafCubeKind, ZXCube
 from tqec.utils.enums import Basis
+from tqec.utils.position import Position3D
 
 
 @pytest.mark.parametrize("distance", [3, 5])
@@ -434,3 +437,41 @@ def test_raw_slice_detectors_match_oracle_exactly(distance: int) -> None:
         oracle, _coord_map(oracle, lambda x, y, *r: gidney_to_tqec(complex(x, y)))
     )
     assert native_sig == oracle_sig
+
+
+def _compiled_y_capped_column(k: int) -> stim.Circuit:
+    """Compile a ``ZXZ`` memory column capped by a Y-half cube.
+
+    This goes through the production path. :func:`_compose_below_and_raw`
+    emulates the annotator around the monolithic :func:`y_cap_raw_circuit`;
+    this instead exercises the per-round :class:`RawCircuitLayer` slices and
+    the real ``AnnotateDetectorsOnLayerNode`` seam emission.
+    """
+    graph = BlockGraph("y_capped_column")
+    graph.add_cube(Position3D(0, 0, 0), ZXCube.from_str("ZXZ"))
+    graph.add_cube(Position3D(0, 0, 1), LeafCubeKind.Y_HALF_CUBE)
+    graph.add_pipe(Position3D(0, 0, 0), Position3D(0, 0, 1))
+    return compile_block_graph(graph, observables=None).generate_stim_circuit(k).flattened()
+
+
+@pytest.mark.parametrize("k", [1, 2])
+def test_compiled_y_capped_column_detectors_match_oracle_exactly(k: int) -> None:
+    """The *compiled* Y-capped column has the same detector set as the oracle.
+
+    :func:`test_raw_slice_detectors_match_oracle_exactly` pins the monolithic
+    slice with a hand-rolled seam; this pins what tqec actually emits: per-round
+    raw layers, the template path for the memory column below, and the seam
+    detectors built by the detector annotator from the flow specs.
+
+    The compiled column runs ``2k + 2`` memory rounds below the cap, so the
+    oracle is built with that many.
+    """
+    compiled = _compiled_y_capped_column(k)
+    oracle = _oracle_y_cap_segment(2 * k + 1, mem_rounds=2 * k + 2)
+    compiled_sig = _detector_signature(
+        compiled, _coord_map(compiled, lambda x, y, *rest: (int(x), int(y)))
+    )
+    oracle_sig = _detector_signature(
+        oracle, _coord_map(oracle, lambda x, y, *rest: gidney_to_tqec(complex(x, y)))
+    )
+    assert compiled_sig == oracle_sig
