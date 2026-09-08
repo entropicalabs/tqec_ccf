@@ -24,6 +24,7 @@ from tqec.compile.specs.library.generators._injection_layer import (
     InjectionRawLayer,
 )
 from tqec.computation.block_graph import BlockGraph
+from tqec.utils.noise_model import NoiseModel
 from tqec.utils.position import Position3D
 
 _ORIGIN = Position3D(0, 0, 0)
@@ -196,3 +197,79 @@ def test_proxy_false_reaches_the_generator_through_the_compile() -> None:
     # ``compile_block_graph``, silently producing the proxy=True circuit.
     with pytest.raises(NotImplementedError, match="stim does not support"):
         compile_block_graph(graph, FIXED_BULK_CONVENTION).generate_stim_circuit(1)
+
+
+def _proxy_stripped(circuit: stim.Circuit) -> stim.Circuit:
+    """Drop the injected proxy gate, leaving a logical ``|+>`` memory.
+
+    The distance of an injection column can only be measured this way: stim needs
+    a deterministic observable, and the injected state's readout is a coin flip.
+    What is left is the encoder acting as an ordinary Clifford preparation, which
+    is exactly what the oracle's ``clifft_sim`` measures.
+    """
+    return stim.Circuit(
+        "\n".join(
+            line for line in str(circuit).splitlines() if not line.strip().startswith("S_DAG")
+        )
+    )
+
+
+def _noise_instruction_count(circuit: stim.Circuit) -> int:
+    return sum(
+        1
+        for instruction in circuit.flattened()
+        if instruction.name.startswith(("DEPOLARIZE", "X_ERROR", "Z_ERROR"))
+    )
+
+
+@pytest.mark.parametrize("k", _KS)
+def test_noiseless_injection_removes_noise(k: int) -> None:
+    compiled = compile_block_graph(_injection_column(), FIXED_BULK_CONVENTION)
+    noise = NoiseModel.uniform_depolarizing(1e-3)
+    noisy = compiled.generate_stim_circuit(k, noise_model=noise)
+    exempt = compiled.generate_stim_circuit(k, noise_model=noise, noiseless_injection=True)
+    assert _noise_instruction_count(exempt) < _noise_instruction_count(noisy)
+
+
+@pytest.mark.parametrize("k", _KS)
+def test_a_noisy_encoder_makes_the_column_distance_one(k: int) -> None:
+    # State injection is not fault tolerant: one fault in the encoder corrupts
+    # the state outright. That is the point of injection, not a defect.
+    compiled = compile_block_graph(_injection_column(), FIXED_BULK_CONVENTION)
+    circuit = _proxy_stripped(
+        compiled.generate_stim_circuit(k, noise_model=NoiseModel.uniform_depolarizing(1e-3))
+    )
+    assert len(circuit.shortest_graphlike_error(ignore_ungraphlike_errors=False)) == 1
+
+
+@pytest.mark.parametrize("k", _KS)
+def test_a_noiseless_encoder_restores_the_code_distance(k: int) -> None:
+    # With the encoder idealised, everything downstream is a plain memory and
+    # protects the logical qubit to the full code distance. This reproduces the
+    # oracle's own assertion, which noises the circuit with `skip_idx` set.
+    compiled = compile_block_graph(_injection_column(), FIXED_BULK_CONVENTION)
+    circuit = _proxy_stripped(
+        compiled.generate_stim_circuit(
+            k, noise_model=NoiseModel.uniform_depolarizing(1e-3), noiseless_injection=True
+        )
+    )
+    assert len(circuit.shortest_graphlike_error(ignore_ungraphlike_errors=False)) == 2 * k + 1
+
+
+def test_noiseless_injection_needs_a_noise_model_to_do_anything() -> None:
+    compiled = compile_block_graph(_injection_column(), FIXED_BULK_CONVENTION)
+    assert compiled.generate_stim_circuit(1, noiseless_injection=True) == (
+        compiled.generate_stim_circuit(1)
+    )
+
+
+def test_noiseless_injection_is_harmless_without_an_injection_cube() -> None:
+    graph = BlockGraph("plain memory")
+    graph.add_cube(_ORIGIN, "ZXZ")
+    graph.add_cube(_ABOVE, "ZXZ")
+    graph.add_pipe(_ORIGIN, _ABOVE)
+    compiled = compile_block_graph(graph, FIXED_BULK_CONVENTION)
+    noise = NoiseModel.uniform_depolarizing(1e-3)
+    assert compiled.generate_stim_circuit(
+        1, noise_model=noise, noiseless_injection=True
+    ) == compiled.generate_stim_circuit(1, noise_model=noise)

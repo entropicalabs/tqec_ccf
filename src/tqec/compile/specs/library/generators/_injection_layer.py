@@ -39,6 +39,7 @@ from tqec.circuit.schedule.circuit import ScheduledCircuit
 from tqec.compile.blocks.block import Block
 from tqec.compile.blocks.enums import SpatialBlockBorder, TemporalBlockBorder
 from tqec.compile.blocks.layers.atomic.base import BaseLayer
+from tqec.compile.blocks.layers.atomic.layout import LayoutLayer
 from tqec.compile.blocks.layers.atomic.raw import RawCircuitLayer
 from tqec.compile.blocks.layers.composed.base import BaseComposedLayer
 from tqec.compile.specs.library.generators.injection import (
@@ -46,7 +47,9 @@ from tqec.compile.specs.library.generators.injection import (
     injection_encoder_circuit,
 )
 from tqec.compile.specs.library.generators.ycube import xtop_qubit_patch
+from tqec.compile.tree.node import LayerNode, NodeWalker
 from tqec.templates.base import RectangularTemplate
+from tqec.utils.exceptions import TQECError
 from tqec.utils.scale import LinearFunction, PhysicalQubitScalable2D
 
 Coord = tuple[int, int]
@@ -241,3 +244,59 @@ def make_injection_block(
 
     """
     return InjectionCubeBlock([InjectionRawLayer(transposed, proxy)], template=template)
+
+
+class InjectionMomentFinder(NodeWalker):
+    """Locate the moments of a compiled circuit that belong to injection encoders.
+
+    Walks an *annotated* layer tree --- the circuits have to be on the nodes
+    already --- and records, for each leaf holding an :class:`InjectionRawLayer`,
+    the indices its moments occupy in the circuit
+    :meth:`~tqec.compile.tree.node.LayerNode.generate_circuit` produces.
+
+    Only a leading run of encoder leaves can be reported. The generated circuit
+    collapses a repeated layer into a ``REPEAT`` block, so a moment index is only
+    unambiguous before the first such block, and an injection cube is the bottom
+    leaf of its column anyway. Anything else raises rather than quietly returning
+    indices that address the wrong moments.
+    """
+
+    def __init__(self, k: int) -> None:
+        """Prepare to walk an annotated tree at scaling factor ``k``."""
+        self._k = k
+        self._moments = 0
+        self._indices: set[int] = set()
+        self._seen_other_leaf = False
+
+    @property
+    def indices(self) -> frozenset[int]:
+        """Moment indices belonging to injection encoders."""
+        return frozenset(self._indices)
+
+    @override
+    def visit_node(self, node: LayerNode) -> None:
+        if not node.is_leaf:
+            return
+        assert isinstance(node._layer, LayoutLayer)
+        is_encoder = any(
+            isinstance(sublayer, InjectionRawLayer) for sublayer in node._layer.layers.values()
+        )
+        circuit = node.get_annotations(self._k).circuit
+        if circuit is None:
+            raise TQECError(
+                "Cannot locate the injection encoder's moments before the nodes "
+                "have been annotated with their circuits."
+            )
+        count = circuit.get_circuit(include_qubit_coords=False).num_ticks + 1
+        if is_encoder:
+            if self._seen_other_leaf:
+                raise NotImplementedError(
+                    "Leaving the state-injection encoder noiseless is only "
+                    "supported when it is the first round of the circuit. Here "
+                    "another round precedes it, so its moments cannot be "
+                    "addressed unambiguously."
+                )
+            self._indices.update(range(self._moments, self._moments + count))
+        else:
+            self._seen_other_leaf = True
+        self._moments += count

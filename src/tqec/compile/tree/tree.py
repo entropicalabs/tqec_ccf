@@ -116,6 +116,19 @@ class LayerTree:
         """Return the conditional-cube blocks indexed by ``LayoutPosition3D``."""
         return self._conditional_blocks
 
+    def walk(self, walker: NodeWalker) -> None:
+        """Walk the tree depth-first, calling ``walker`` on every node.
+
+        Note the tree carries its annotations per scaling factor, so a walker that
+        reads them --- circuits, detectors --- only sees what a prior
+        :meth:`generate_circuit` call at that same ``k`` put there.
+
+        Args:
+            walker: structure that will be called on each explored node.
+
+        """
+        self._root.walk(walker)
+
     def to_dict(self) -> dict[str, Any]:
         """Return a dictionary representation of ``self``."""
         return {  # pragma: no cover

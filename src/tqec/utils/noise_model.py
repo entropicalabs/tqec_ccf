@@ -373,6 +373,7 @@ class NoiseModel:
         *,
         system_qubits: set[int] | None = None,
         immune_qubits: set[int] | None = None,
+        noiseless_moments: Set[int] | None = None,
     ) -> stim.Circuit:
         """Return a noisy version of the given circuit, by applying the receiving noise model.
 
@@ -381,6 +382,15 @@ class NoiseModel:
             system_qubits: All qubits used by the circuit. These are the qubits eligible for idling
                 noise.
             immune_qubits: Qubits to not apply noise to, even if they are operated on.
+            noiseless_moments: indices of moments to leave untouched --- no gate
+                noise and no idling noise. Indices count the top-level entries of
+                ``circuit``, where a ``REPEAT`` block counts as one entry; naming
+                such an entry leaves the whole block noiseless. Use this for a
+                part of the circuit that is idealised by assumption rather than
+                modelled, such as a non-fault-tolerant state-injection encoder.
+
+                Note this is per *moment*, not per qubit: a qubit idling through a
+                noiseless moment for reasons of its own also escapes noise.
 
         Returns:
             The noisy version of the circuit.
@@ -390,9 +400,12 @@ class NoiseModel:
             system_qubits = set(range(circuit.num_qubits))
         if immune_qubits is None:
             immune_qubits = set()
+        noiseless = noiseless_moments if noiseless_moments is not None else frozenset()
 
         result = stim.Circuit()
-        for moment_split_ops in _iter_split_op_moments(circuit, immune_qubits=immune_qubits):
+        for index, moment_split_ops in enumerate(
+            _iter_split_op_moments(circuit, immune_qubits=immune_qubits)
+        ):
             if not result:
                 pass
             elif isinstance(moment_split_ops, stim.CircuitRepeatBlock):
@@ -412,6 +425,9 @@ class NoiseModel:
                         repeat_count=moment_split_ops.repeat_count, body=noisy_body
                     )
                 )
+            elif index in noiseless:
+                for op in moment_split_ops:
+                    result.append(op)
             else:
                 self._append_noisy_moment(
                     moment_split_ops=moment_split_ops,

@@ -68,6 +68,9 @@ from tqec.compile.observables.abstract_observable import (
     ConditionalAbstractObservable,
 )
 from tqec.compile.observables.builder import ObservableBuilder
+from tqec.compile.specs.library.generators._injection_layer import (
+    InjectionMomentFinder,
+)
 from tqec.compile.tree.tree import LayerTree
 from tqec.templates.enums import TemplateBorder
 from tqec.utils.exceptions import TQECError
@@ -545,6 +548,7 @@ class TopologicalComputationGraph:
         do_not_use_database: bool = False,
         only_use_database: bool = False,
         reschedule_measurements: bool = True,
+        noiseless_injection: bool = False,
     ) -> stim.Circuit:
         """Generate the ``stim.Circuit`` from the compiled graph.
 
@@ -571,12 +575,23 @@ class TopologicalComputationGraph:
                 to be in the same moment. Since each plaquette may have its own measurement
                 schedule, setting this may be necessary for hardware that requires
                 measurements to be synchronous.
+            noiseless_injection: whether to exempt a state-injection encoder from
+                ``noise_model``. State injection is not fault tolerant, so a fault
+                in the encoder corrupts the injected state outright and dominates
+                the logical error rate; leaving the encoder noiseless isolates the
+                error rate of everything downstream. Has no effect without a
+                ``noise_model``, or on a graph with no injection cube.
 
         Returns:
             A compiled stim circuit.
 
+        Raises:
+            NotImplementedError: if ``noiseless_injection`` is set and an
+                injection encoder is not the first round of the circuit.
+
         """
-        circuit = self.to_layer_tree(k).generate_circuit(
+        tree = self.to_layer_tree(k)
+        circuit = tree.generate_circuit(
             k,
             manhattan_radius=manhattan_radius,
             detector_database=detector_database,
@@ -587,7 +602,12 @@ class TopologicalComputationGraph:
         )
         # If provided, apply the noise model.
         if noise_model is not None:
-            circuit = noise_model.noisy_circuit(circuit)
+            noiseless_moments: frozenset[int] = frozenset()
+            if noiseless_injection:
+                finder = InjectionMomentFinder(k)
+                tree.walk(finder)
+                noiseless_moments = finder.indices
+            circuit = noise_model.noisy_circuit(circuit, noiseless_moments=noiseless_moments)
         return circuit
 
     def generate_conditional_stim_text(
