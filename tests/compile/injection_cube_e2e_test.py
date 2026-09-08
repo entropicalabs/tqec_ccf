@@ -24,6 +24,7 @@ from tqec.compile.specs.library.generators._injection_layer import (
     InjectionRawLayer,
 )
 from tqec.computation.block_graph import BlockGraph
+from tqec.utils.exceptions import TQECError
 from tqec.utils.injection_state import INJECTION_STATES
 from tqec.utils.noise_model import NoiseModel
 from tqec.utils.position import Position3D
@@ -197,7 +198,10 @@ def test_the_state_reaches_the_generator_through_the_compile(state: str) -> None
     graph.add_cube(_ABOVE, "ZXX")
     graph.add_pipe(_ORIGIN, _ABOVE)
     graph.validate()
-    circuit = compile_block_graph(graph, FIXED_BULK_CONVENTION).generate_stim_circuit(1)
+    # The unguarded builder, so this can inspect a non-Clifford state's tagged
+    # stand-in -- which the public generate_stim_circuit rightly refuses to hand
+    # out.
+    circuit = compile_block_graph(graph, FIXED_BULK_CONVENTION)._build_stim_circuit(1)
     reset, gate, stands_in_for = INJECTION_STATES[state]
     names = [i.name for i in circuit.flattened() if i.name != "QUBIT_COORDS"]
     # The encoder opens by preparing the centre qubit alone, before any TICK.
@@ -212,14 +216,21 @@ def test_the_state_reaches_the_generator_through_the_compile(state: str) -> None
 def test_every_state_yields_the_same_detectors(state: str) -> None:
     # The encoder is an isometry onto the codespace whatever it injects, so the
     # patch's stabilizers -- and every detector downstream -- are unchanged. This
-    # is what licenses computing detectors from a Clifford stand-in.
+    # is what licenses computing detectors from a Clifford stand-in and shipping
+    # them with the real gate substituted back in.
     graph = BlockGraph(f"injecting {state}")
     graph.add_cube(_ORIGIN, "I", state=state)
     graph.add_cube(_ABOVE, "ZXX")
     graph.add_pipe(_ORIGIN, _ABOVE)
-    circuit = compile_block_graph(graph, FIXED_BULK_CONVENTION).generate_stim_circuit(1)
-    _without_observables(circuit).detector_error_model()
-    assert circuit.num_detectors == 3**2 - 1 + 3 * (3**2 - 1) + 4
+    compiled = compile_block_graph(graph, FIXED_BULK_CONVENTION)
+    # Counted from the text, since a non-Clifford state has no stim.Circuit.
+    text = compiled.generate_stim_text(1)
+    detectors = sum(1 for line in text.splitlines() if line.startswith("DETECTOR"))
+    assert detectors == 3**2 - 1 + 3 * (3**2 - 1) + 4
+    if INJECTION_STATES[state][2]:
+        return
+    # Determinism can only be checked where stim can hold the circuit.
+    _without_observables(compiled.generate_stim_circuit(1)).detector_error_model()
 
 
 def _without_injected_gate(circuit: stim.Circuit, state: str = "i") -> stim.Circuit:
@@ -298,3 +309,62 @@ def test_noiseless_injection_is_harmless_without_an_injection_cube() -> None:
     assert compiled.generate_stim_circuit(
         1, noise_model=noise, noiseless_injection=True
     ) == compiled.generate_stim_circuit(1, noise_model=noise)
+
+
+def _t_column() -> BlockGraph:
+    graph = BlockGraph("injecting T")
+    graph.add_cube(_ORIGIN, "I", state="T")
+    graph.add_cube(_ABOVE, "ZXX")
+    graph.add_pipe(_ORIGIN, _ABOVE)
+    graph.validate()
+    return graph
+
+
+@pytest.mark.parametrize("k", _KS)
+def test_stim_text_matches_the_circuit_for_a_clifford_graph(k: int) -> None:
+    # Keeps the two entry points from drifting: with nothing stim cannot hold,
+    # the text is exactly the circuit's own rendering.
+    compiled = compile_block_graph(_injection_column(), FIXED_BULK_CONVENTION)
+    assert compiled.generate_stim_text(k) == str(compiled.generate_stim_circuit(k))
+
+
+def test_a_non_clifford_state_is_refused_by_the_circuit_entry_points() -> None:
+    compiled = compile_block_graph(_t_column(), FIXED_BULK_CONVENTION)
+    for call in (
+        lambda: compiled.generate_stim_circuit(1),
+        lambda: compiled.generate_crumble_url(k=1),
+    ):
+        with pytest.raises(TQECError, match="stim has no T gate"):
+            call()
+
+
+def test_stim_text_emits_a_real_non_clifford_gate() -> None:
+    text = compile_block_graph(_t_column(), FIXED_BULK_CONVENTION).generate_stim_text(1)
+    # One real T, on the centre data qubit of the patch.
+    assert [line.split() for line in text.splitlines() if line.split()[:1] == ["T"]] == [
+        ["T", "12"]
+    ]
+    # And the text is deliberately not a stim circuit -- that is the whole point.
+    with pytest.raises(ValueError, match="Gate not found: 'T'"):
+        stim.Circuit(text)
+
+
+def test_stim_text_keeps_the_non_clifford_gate_under_noise() -> None:
+    # The noisy path is the actual use case: the tag has to survive the noise
+    # model as well as the compile.
+    text = compile_block_graph(_t_column(), FIXED_BULK_CONVENTION).generate_stim_text(
+        1, noise_model=NoiseModel.uniform_depolarizing(1e-3)
+    )
+    assert any(line.split()[:1] == ["T"] for line in text.splitlines())
+    assert any(line.startswith("DEPOLARIZE") for line in text.splitlines())
+
+
+def test_noiseless_injection_works_for_a_non_clifford_state() -> None:
+    compiled = compile_block_graph(_t_column(), FIXED_BULK_CONVENTION)
+    noise = NoiseModel.uniform_depolarizing(1e-3)
+    noisy = compiled.generate_stim_text(1, noise_model=noise)
+    exempt = compiled.generate_stim_text(1, noise_model=noise, noiseless_injection=True)
+    assert sum(1 for line in exempt.splitlines() if line.startswith("DEPOLARIZE")) < sum(
+        1 for line in noisy.splitlines() if line.startswith("DEPOLARIZE")
+    )
+    assert any(line.split()[:1] == ["T"] for line in exempt.splitlines())

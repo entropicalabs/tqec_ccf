@@ -17,6 +17,10 @@ import pytest
 import stim
 
 from tqec.circuit.moment import Moment
+from tqec.circuit.non_clifford import (
+    render_with_non_clifford_gates,
+    rewrite_non_clifford_tags,
+)
 from tqec.circuit.qubit import GridQubit
 from tqec.circuit.qubit_map import QubitMap
 from tqec.circuit.schedule.circuit import ScheduledCircuit
@@ -159,3 +163,36 @@ def test_remap_entry_qubit_indices_preserves_a_tag_inside_an_if_block() -> None:
     remapped = remap_entry_qubit_indices(block, {0: 4})
     assert isinstance(remapped, IfBlock)
     assert str(remapped.then_body[0]) == "S[T] 4"
+
+
+def test_render_with_non_clifford_gates_is_transparent_when_untagged() -> None:
+    circuit = stim.Circuit("H 0\nTICK\nM 0")
+    body = stim.Circuit("M 0\nTICK")
+    circuit += body * 3
+    assert render_with_non_clifford_gates(circuit) == str(circuit)
+
+
+def test_render_with_non_clifford_gates_substitutes_the_real_gate() -> None:
+    circuit = stim.Circuit()
+    circuit.append("RX", [0])
+    circuit.append("TICK")
+    circuit.append(_tagged("S_DAG", [12], "T_DAG"))
+    rendered = render_with_non_clifford_gates(circuit)
+    assert "T_DAG 12" in rendered
+    assert "S_DAG" not in rendered
+
+
+def test_render_with_non_clifford_gates_leaves_an_unrelated_tag_alone() -> None:
+    circuit = stim.Circuit()
+    circuit.append(_tagged("H", [0], "something-else"))
+    assert render_with_non_clifford_gates(circuit) == str(circuit)
+
+
+def test_rewrite_non_clifford_tags_handles_indented_text() -> None:
+    # `ConditionalCircuit.to_stim_text` indents an IF/ELSE body.
+    text = "IF(rec[-1]) {\n  S[T] 4\n}\nSHIFT_COORDS(0, 0, 1)"
+    assert rewrite_non_clifford_tags(text) == ("IF(rec[-1]) {\n  T 4\n}\nSHIFT_COORDS(0, 0, 1)")
+
+
+def test_rewrite_non_clifford_tags_leaves_an_unrelated_tag_alone() -> None:
+    assert rewrite_non_clifford_tags("H[whatever] 0") == "H[whatever] 0"
