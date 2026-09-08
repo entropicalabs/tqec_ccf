@@ -171,6 +171,10 @@ class FixedBoundaryCubeBuilder(CubeBuilder):
             raise TQECError("Cannot build a block for a Port.")
         elif kind is LeafCubeKind.Y_HALF_CUBE:
             raise NotImplementedError("Y cube is not implemented.")
+        elif kind is LeafCubeKind.INJECTION:
+            raise NotImplementedError(
+                "The injection cube is only implemented for the fixed-bulk convention."
+            )
         elif isinstance(kind, ConditionalLeafCubeKind):
             kind_zero, kind_one = kind.value
             condition = spec.condition

@@ -384,6 +384,7 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
                 annotations.detectors.append(
                     DetectorAnnotation.from_detector(detector, measurement_records)
                 )
+            self._emit_prepared_stabilizer_detectors(annotations, measurement_records)
             return
 
         # Per-branch detector computation. The lookback gives parallel
@@ -435,6 +436,44 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
                 )
             )
 
+    def _emit_prepared_stabilizer_detectors(
+        self,
+        annotations: LayerNodeAnnotations,
+        records: MeasurementRecordsMap,
+    ) -> None:
+        """Close the stabilizers a preceding raw round reported as prepared.
+
+        A raw round that prepares stabilizers rather than measuring them -- the
+        state-injection encoder -- hands them forward through
+        ``self._pending_end_spec``, keyed by ancilla coordinate. This round is a
+        template round, so the fixed-radius computation has no way to see that
+        preparation; the detectors are formed here instead, exactly as
+        :meth:`_emit_raw_seam` does for a raw round.
+
+        The encoder's spec carries an empty list of preparing measurements for
+        every stabilizer, which makes each detector this round's own single
+        ancilla measurement.
+        """
+        pending = self._pending_end_spec
+        if not pending:
+            return
+        self._pending_end_spec = None
+        for ancilla, prepared_by in pending.items():
+            gq = GridQubit(*ancilla)
+            if gq not in records:
+                raise TQECError(
+                    f"A preceding raw round reported the stabilizer at {ancilla} as "
+                    "prepared, but this round did not measure it; the raw round "
+                    "does not match the patch above it."
+                )
+            offsets = [records[gq][-1]] + [records[GridQubit(*q)][-1] for q in prepared_by]
+            annotations.detectors.append(
+                DetectorAnnotation(
+                    StimCoordinates(float(ancilla[0]), float(ancilla[1]), 0.0),
+                    sorted(offsets),
+                )
+            )
+
     def _annotate_raw_slice(
         self,
         annotations: LayerNodeAnnotations,
@@ -470,6 +509,14 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
         # A lone Y cap occupies block position (0, 0) of its layer, so no shift.
         self._emit_raw_seam(annotations, raw_layer, raw_records, raw_total, (0, 0))
 
+        if raw_total == 0:
+            # A raw round that measures nothing -- the state-injection encoder --
+            # contributes no measurement records, so leaving it off the lookback
+            # stack shifts no offsets and keeps the window unbroken. Pushing it
+            # would instead blind ``lookback`` to the round that follows, which
+            # is the round carrying the encoder's detectors (see
+            # ``_emit_prepared_stabilizer_detectors``).
+            return
         # Push this slice's own records so later rounds can look back through it.
         # A raw round has neither template nor plaquettes, hence the ``None``s:
         # the fixed-radius detector computation cannot see through such a round
