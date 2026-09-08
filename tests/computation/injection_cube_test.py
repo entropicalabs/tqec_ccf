@@ -12,7 +12,7 @@ from tqec.computation.cube import Cube, LeafCubeKind, cube_kind_from_string
 from tqec.interop.collada._geometry import BlockGeometries
 from tqec.interop.color import TQECColor
 from tqec.utils.exceptions import TQECError
-from tqec.utils.position import Position3D
+from tqec.utils.position import Direction3D, Position3D
 
 _ORIGIN = Position3D(0, 0, 0)
 _ABOVE = Position3D(0, 0, 1)
@@ -138,3 +138,55 @@ def test_zx_graph_conversion_treats_injection_as_a_boundary() -> None:
     positioned = _injection_column().to_zx_graph()
     types = {positioned.positions[v]: positioned.g.type(v) for v in positioned.g.vertices()}
     assert types[_ORIGIN] == VertexType.BOUNDARY
+
+
+def _proxy_column() -> BlockGraph:
+    graph = BlockGraph("proxy false")
+    graph.add_cube(_ORIGIN, "I", proxy=False)
+    graph.add_cube(_ABOVE, "ZXX")
+    graph.add_pipe(_ORIGIN, _ABOVE)
+    graph.validate()
+    return graph
+
+
+def test_proxy_survives_a_shift() -> None:
+    # Regression: ``compile_block_graph`` shifts the graph to z >= 0, and
+    # ``shift_by`` used to rebuild each cube field by field, resetting ``proxy``.
+    shifted = _proxy_column().shift_by(dz=5)
+    assert not shifted[Position3D(0, 0, 5)].proxy
+
+
+def test_proxy_survives_a_rotation() -> None:
+    rotated = _proxy_column().rotate(rotation_axis=Direction3D.Z, num_90_degree_rotation=1)
+    assert not next(cube for cube in rotated.cubes if cube.is_injection_cube).proxy
+
+
+def test_proxy_survives_a_dict_round_trip() -> None:
+    graph = _proxy_column()
+    assert not BlockGraph.from_dict(graph.to_dict())[_ORIGIN].proxy
+    # A graph serialised before ``proxy`` existed still reads back.
+    data = graph.to_dict()
+    for cube in data["cubes"]:
+        cube.pop("proxy", None)
+    assert BlockGraph.from_dict(data)[_ORIGIN].proxy
+
+
+def test_insert_cube_preserves_every_attribute() -> None:
+    graph = BlockGraph("insert")
+    cube = Cube(_ORIGIN, LeafCubeKind.INJECTION, proxy=False)
+    assert graph.insert_cube(cube) == _ORIGIN
+    assert graph[_ORIGIN] == cube
+
+
+def test_insert_cube_rejects_a_duplicate_position() -> None:
+    graph = BlockGraph("insert")
+    graph.insert_cube(Cube(_ORIGIN, LeafCubeKind.INJECTION))
+    with pytest.raises(TQECError, match="Cube already exists"):
+        graph.insert_cube(Cube(_ORIGIN, LeafCubeKind.INJECTION))
+
+
+def test_insert_cube_rejects_a_duplicate_port_label() -> None:
+    graph = BlockGraph("insert")
+    graph.insert_cube(Cube(_ORIGIN, LeafCubeKind.PORT, "p"))
+    with pytest.raises(TQECError, match="already a port with the same label"):
+        graph.insert_cube(Cube(_ABOVE, LeafCubeKind.PORT, "p"))

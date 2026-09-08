@@ -1,5 +1,6 @@
 """Defines :func:`~.compile.compile_block_graph`."""
 
+from dataclasses import replace
 from typing import Final, Literal
 
 from tqec.compile.blocks.block import Block
@@ -23,7 +24,7 @@ from tqec.computation.correlation import (
     ConditionalCorrelationSurface,
     CorrelationSurface,
 )
-from tqec.computation.cube import Cube
+from tqec.computation.cube import ConditionalLeafCubeKind, Cube
 from tqec.templates.base import RectangularTemplate
 from tqec.utils.exceptions import TQECError
 from tqec.utils.position import BlockPosition3D, Direction3D, Position3D
@@ -58,13 +59,18 @@ def _resolve_conditional_cubes(
     is_legacy_int = isinstance(branch_assignment, int)
     for cube in bg.cubes:
         kind = cube.kind
-        if cube.is_conditional:
+        # ``isinstance`` rather than ``cube.is_conditional``: it narrows ``kind``
+        # to the pair of ZXCube kinds indexed just below.
+        if isinstance(kind, ConditionalLeafCubeKind):
             if is_legacy_int:
                 idx = branch_assignment  # type: ignore[assignment]
             else:
                 idx = branch_assignment[cube.position]  # type: ignore[index]
-            kind = kind.value[idx]
-        new_bg.add_cube(cube.position, kind, label=cube.label)
+            # The chosen branch is an unconditional ZXCube, so the condition that
+            # selected it is spent and must not travel with the cube.
+            new_bg.insert_cube(replace(cube, kind=kind.value[idx], condition=None))
+            continue
+        new_bg.insert_cube(cube)
     for pipe in bg.pipes:
         new_bg.add_pipe(pipe.u.position, pipe.v.position, pipe.kind)
     return new_bg
@@ -86,6 +92,7 @@ def _classify_conditions(
         TQECError: if a condition matches more than one conditional cube
             (ambiguous binding), or if a surface-anchored condition spans an
             empty position range.
+
     """
     bindings: list[_ConditionBinding] = []
     for i, cond in enumerate(surface.conditions):

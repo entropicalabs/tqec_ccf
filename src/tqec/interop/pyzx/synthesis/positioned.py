@@ -92,8 +92,8 @@ def _handle_special_pipes(
             continue
         cube_u = _port_or_y_cube(pg, u)
         cube_v = _port_or_y_cube(pg, v)
-        bg.add_cube(cube_u.position, cube_u.kind, cube_u.label)
-        bg.add_cube(cube_v.position, cube_v.kind, cube_v.label)
+        bg.insert_cube(cube_u)
+        bg.insert_cube(cube_v)
         pipe_kind = _choose_arbitrary_pipe_kind(pg, edge)
         bg.add_pipe(cube_u.position, cube_v.position, pipe_kind)
         nodes_to_handle.remove(u)
@@ -152,7 +152,7 @@ def _try_to_handle_edges(
         else:
             other_cube = _port_or_y_cube(pg, other_node)
         if other_node in nodes_to_handle:
-            bg.add_cube(other_cube.position, other_cube.kind, other_cube.label)
+            bg.insert_cube(other_cube)
             nodes_to_handle.remove(other_node)
         bg.add_pipe(ipos, opos, pipe_kind)
         edges_to_handle.remove(edge)

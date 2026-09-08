@@ -7,6 +7,7 @@ import math
 import pathlib
 from collections.abc import Iterable, Mapping
 from copy import deepcopy
+from dataclasses import replace
 from io import BytesIO
 from typing import TYPE_CHECKING, Any, cast
 
@@ -218,19 +219,41 @@ class BlockGraph:
                 there is already a port with the same label in the graph.
 
         """
-        if position in self:
-            raise TQECError(f"Cube already exists at position {position}.")
         if isinstance(kind, str):
             kind = cube_kind_from_string(kind)
-        if kind is LeafCubeKind.PORT and label in self._ports:
-            raise TQECError(f"There is already a port with the same label {label} in the graph.")
+        return self.insert_cube(Cube(position, kind, label, condition, proxy))
 
-        self._graph.add_node(
-            position, **{self._NODE_DATA_KEY: Cube(position, kind, label, condition, proxy)}
-        )
-        if kind is LeafCubeKind.PORT:
-            self._ports[label] = position
-        return position
+    def insert_cube(self, cube: Cube) -> Position3D:
+        """Add an already-built cube to the graph, keeping every one of its attributes.
+
+        Prefer this over :py:meth:`add_cube` whenever a cube is being *copied*
+        from another graph --- shifting, rotating, composing, deserialising. Those
+        callers used to re-list the fields they wanted to carry over, which
+        silently dropped any attribute they had not been updated for.
+
+        Args:
+            cube: the cube to add. Use :py:func:`dataclasses.replace` to derive it
+                from an existing cube when only its position or kind changes.
+
+        Returns:
+            The position of the cube added to the graph.
+
+        Raises:
+            TQECError: If there is already a cube at the same position, or if the
+                cube is a port and there is already a port with the same label in
+                the graph.
+
+        """
+        if cube.position in self:
+            raise TQECError(f"Cube already exists at position {cube.position}.")
+        if cube.is_port and cube.label in self._ports:
+            raise TQECError(
+                f"There is already a port with the same label {cube.label} in the graph."
+            )
+        self._graph.add_node(cube.position, **{self._NODE_DATA_KEY: cube})
+        if cube.is_port:
+            self._ports[cube.label] = cube.position
+        return cube.position
 
     def add_pipe(
         self, pos1: Position3D, pos2: Position3D, kind: PipeKind | str | None = None
@@ -570,11 +593,12 @@ class BlockGraph:
                 if cube.condition is not None
                 else None
             )
-            new_graph.add_cube(
-                cube.position.shift_by(dx=dx, dy=dy, dz=dz),
-                cube.kind,
-                cube.label,
-                condition=shifted_condition,
+            new_graph.insert_cube(
+                replace(
+                    cube,
+                    position=cube.position.shift_by(dx=dx, dy=dy, dz=dz),
+                    condition=shifted_condition,
+                )
             )
         for pipe in self.pipes:
             u, v = pipe.u, pipe.v
@@ -766,7 +790,7 @@ class BlockGraph:
             # Connecting ports have been filled
             if cube.position in composed_g:
                 continue
-            composed_g.add_cube(cube.position, cube.kind, cube.label)
+            composed_g.insert_cube(cube)
         for pipe in shifted_g.pipes:
             u, v = pipe.u.position, pipe.v.position
             composed_g.add_pipe(u, v, pipe.kind)
@@ -831,11 +855,13 @@ class BlockGraph:
                         for e in cube.condition.span
                     )
                 )
-            rotated.add_cube(
-                rotated_pos,
-                cast(CubeKind, rotated_kind),
-                cube.label,
-                condition=rotated_condition,
+            rotated.insert_cube(
+                replace(
+                    cube,
+                    position=rotated_pos,
+                    kind=cast(CubeKind, rotated_kind),
+                    condition=rotated_condition,
+                )
             )
             pos_map[cube.position] = rotated_pos
 
@@ -924,7 +950,7 @@ class BlockGraph:
         new_graph = BlockGraph(self.name)
         for cube in self.cubes:
             new_cube = fixed_cubes.get(cube, cube)
-            new_graph.add_cube(cube.position, new_cube.kind, new_cube.label, cube.condition)
+            new_graph.insert_cube(replace(cube, kind=new_cube.kind))
         for pipe in self.pipes:
             new_graph.add_pipe(pipe.u.position, pipe.v.position, pipe.kind)
         return new_graph
@@ -955,14 +981,7 @@ class BlockGraph:
         """Construct a block graph from a dictionary representation."""
         graph = BlockGraph(data["name"])
         for cube in data["cubes"]:
-            graph.add_cube(
-                position=Position3D(*cube["position"]),
-                kind=cube["kind"],
-                label=cube["label"],
-                condition=None
-                if (condition := cube.get("condition", None)) is None
-                else CorrelationSurface(**condition),
-            )
+            graph.insert_cube(Cube.from_dict(cube))
         for pipe in data["pipes"]:
             graph.add_pipe(
                 pos1=Position3D(*pipe["u"]),

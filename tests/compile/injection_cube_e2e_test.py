@@ -164,3 +164,15 @@ def test_fixed_boundary_convention_is_not_supported() -> None:
     graph = _injection_column()
     with pytest.raises(NotImplementedError, match="only implemented for the fixed-bulk"):
         compile_block_graph(graph, FIXED_BOUNDARY_CONVENTION)
+
+
+def test_proxy_false_reaches_the_generator_through_the_compile() -> None:
+    graph = BlockGraph("proxy false")
+    graph.add_cube(_ORIGIN, "I", proxy=False)
+    graph.add_cube(_ABOVE, "ZXX")
+    graph.add_pipe(_ORIGIN, _ABOVE)
+    graph.validate()
+    # Regression: the flag used to be reset by the graph shift inside
+    # ``compile_block_graph``, silently producing the proxy=True circuit.
+    with pytest.raises(NotImplementedError, match="stim does not support"):
+        compile_block_graph(graph, FIXED_BULK_CONVENTION).generate_stim_circuit(1)
