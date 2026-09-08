@@ -24,6 +24,7 @@ from tqec.compile.specs.library.generators._injection_layer import (
     InjectionRawLayer,
 )
 from tqec.computation.block_graph import BlockGraph
+from tqec.utils.injection_state import INJECTION_STATES
 from tqec.utils.noise_model import NoiseModel
 from tqec.utils.position import Position3D
 
@@ -187,30 +188,54 @@ def test_crumble_url_without_polygons(k: int) -> None:
     )
 
 
-def test_proxy_false_reaches_the_generator_through_the_compile() -> None:
-    graph = BlockGraph("proxy false")
-    graph.add_cube(_ORIGIN, "I", proxy=False)
+@pytest.mark.parametrize("state", tuple(INJECTION_STATES))
+def test_the_state_reaches_the_generator_through_the_compile(state: str) -> None:
+    # Regression: the attribute used to be reset by the graph shift inside
+    # ``compile_block_graph``, silently producing the default state's circuit.
+    graph = BlockGraph(f"injecting {state}")
+    graph.add_cube(_ORIGIN, "I", state=state)
     graph.add_cube(_ABOVE, "ZXX")
     graph.add_pipe(_ORIGIN, _ABOVE)
     graph.validate()
-    # Regression: the flag used to be reset by the graph shift inside
-    # ``compile_block_graph``, silently producing the proxy=True circuit.
-    with pytest.raises(NotImplementedError, match="stim does not support"):
-        compile_block_graph(graph, FIXED_BULK_CONVENTION).generate_stim_circuit(1)
+    circuit = compile_block_graph(graph, FIXED_BULK_CONVENTION).generate_stim_circuit(1)
+    reset, gate, stands_in_for = INJECTION_STATES[state]
+    names = [i.name for i in circuit.flattened() if i.name != "QUBIT_COORDS"]
+    # The encoder opens by preparing the centre qubit alone, before any TICK.
+    assert names[: names.index("TICK")] == [reset]
+    # A non-Clifford state compiles as a tagged Clifford stand-in.
+    tags = [i.tag for i in circuit.flattened() if i.tag]
+    assert tags == ([stands_in_for] if stands_in_for else [])
+    assert gate in names
 
 
-def _proxy_stripped(circuit: stim.Circuit) -> stim.Circuit:
-    """Drop the injected proxy gate, leaving a logical ``|+>`` memory.
+@pytest.mark.parametrize("state", tuple(INJECTION_STATES))
+def test_every_state_yields_the_same_detectors(state: str) -> None:
+    # The encoder is an isometry onto the codespace whatever it injects, so the
+    # patch's stabilizers -- and every detector downstream -- are unchanged. This
+    # is what licenses computing detectors from a Clifford stand-in.
+    graph = BlockGraph(f"injecting {state}")
+    graph.add_cube(_ORIGIN, "I", state=state)
+    graph.add_cube(_ABOVE, "ZXX")
+    graph.add_pipe(_ORIGIN, _ABOVE)
+    circuit = compile_block_graph(graph, FIXED_BULK_CONVENTION).generate_stim_circuit(1)
+    _without_observables(circuit).detector_error_model()
+    assert circuit.num_detectors == 3**2 - 1 + 3 * (3**2 - 1) + 4
+
+
+def _without_injected_gate(circuit: stim.Circuit, state: str = "i") -> stim.Circuit:
+    """Drop the injected gate, leaving a logical ``|+>`` memory.
 
     The distance of an injection column can only be measured this way: stim needs
     a deterministic observable, and the injected state's readout is a coin flip.
     What is left is the encoder acting as an ordinary Clifford preparation, which
     is exactly what the oracle's ``clifft_sim`` measures.
+
+    Matched on the exact first token rather than a prefix --- the default state
+    emits ``S``, and ``startswith("S")`` would also swallow ``SHIFT_COORDS``.
     """
+    gate = INJECTION_STATES[state][1]
     return stim.Circuit(
-        "\n".join(
-            line for line in str(circuit).splitlines() if not line.strip().startswith("S_DAG")
-        )
+        "\n".join(line for line in str(circuit).splitlines() if line.split()[:1] != [gate])
     )
 
 
@@ -236,7 +261,7 @@ def test_a_noisy_encoder_makes_the_column_distance_one(k: int) -> None:
     # State injection is not fault tolerant: one fault in the encoder corrupts
     # the state outright. That is the point of injection, not a defect.
     compiled = compile_block_graph(_injection_column(), FIXED_BULK_CONVENTION)
-    circuit = _proxy_stripped(
+    circuit = _without_injected_gate(
         compiled.generate_stim_circuit(k, noise_model=NoiseModel.uniform_depolarizing(1e-3))
     )
     assert len(circuit.shortest_graphlike_error(ignore_ungraphlike_errors=False)) == 1
@@ -248,7 +273,7 @@ def test_a_noiseless_encoder_restores_the_code_distance(k: int) -> None:
     # protects the logical qubit to the full code distance. This reproduces the
     # oracle's own assertion, which noises the circuit with `skip_idx` set.
     compiled = compile_block_graph(_injection_column(), FIXED_BULK_CONVENTION)
-    circuit = _proxy_stripped(
+    circuit = _without_injected_gate(
         compiled.generate_stim_circuit(
             k, noise_model=NoiseModel.uniform_depolarizing(1e-3), noiseless_injection=True
         )

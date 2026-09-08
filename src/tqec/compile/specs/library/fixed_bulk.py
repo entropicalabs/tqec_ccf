@@ -113,7 +113,7 @@ class FixedBulkCubeBuilder(CubeBuilder):
             return make_injection_block(
                 template=self._generator.get_memory_qubit_raw_template(),
                 transposed=spec.injection_transposed,
-                proxy=spec.proxy,
+                state=spec.state,
             )
         elif isinstance(kind, ConditionalLeafCubeKind):
             kind_zero, kind_one = kind.value

@@ -26,6 +26,7 @@ from tqec.computation.cube import (
 from tqec.computation.pipe import Pipe, PipeKind
 from tqec.utils.enums import Basis
 from tqec.utils.exceptions import TQECError
+from tqec.utils.injection_state import DEFAULT_INJECTION_STATE
 from tqec.utils.position import Direction3D, Position3D, SignedDirection3D
 
 if TYPE_CHECKING:
@@ -195,7 +196,7 @@ class BlockGraph:
         kind: CubeKind | str,
         label: str = "",
         condition: CorrelationSurface | None = None,
-        proxy: bool = True,
+        state: str = DEFAULT_INJECTION_STATE,
     ) -> Position3D:
         """Add a cube to the graph.
 
@@ -207,8 +208,8 @@ class BlockGraph:
             condition: The condition for when the cube kind is conditional, specified as a partial
                 correlation surface. The full correlation surface will be constructed at run-time
                 from this and other conditional cubes decided before this cube. Default is None.
-            proxy: For an ``INJECTION`` cube only, whether to inject through the Clifford
-                proxy gate. See :py:attr:`~tqec.computation.cube.Cube.proxy`. Default is True.
+            state: For an ``INJECTION`` cube only, which single-qubit state to inject.
+                See :py:attr:`~tqec.computation.cube.Cube.state`.
 
         Returns:
             The position of the cube added to the graph.
@@ -221,7 +222,8 @@ class BlockGraph:
         """
         if isinstance(kind, str):
             kind = cube_kind_from_string(kind)
-        return self.insert_cube(Cube(position, kind, label, condition, proxy))
+        # Keyword, so a future field reorder cannot land silently in this slot.
+        return self.insert_cube(Cube(position, kind, label, condition, state=state))
 
     def insert_cube(self, cube: Cube) -> Position3D:
         """Add an already-built cube to the graph, keeping every one of its attributes.
@@ -598,9 +600,7 @@ class BlockGraph:
         new_graph = BlockGraph()
         for cube in self.cubes:
             shifted_condition = (
-                cube.condition.shift_by(dx=dx, dy=dy, dz=dz)
-                if cube.condition is not None
-                else None
+                cube.condition.shift_by(dx=dx, dy=dy, dz=dz) if cube.condition is not None else None
             )
             new_graph.insert_cube(
                 replace(
@@ -858,8 +858,12 @@ class BlockGraph:
                 rotated_condition = CorrelationSurface(
                     span=frozenset(
                         ZXEdge(
-                            ZXNode(rotate_position_by_matrix(e.u.position, rotation_matrix), e.u.basis),
-                            ZXNode(rotate_position_by_matrix(e.v.position, rotation_matrix), e.v.basis),
+                            ZXNode(
+                                rotate_position_by_matrix(e.u.position, rotation_matrix), e.u.basis
+                            ),
+                            ZXNode(
+                                rotate_position_by_matrix(e.v.position, rotation_matrix), e.v.basis
+                            ),
                         )
                         for e in cube.condition.span
                     )
@@ -1102,8 +1106,12 @@ class BlockGraph:
                 )
 
             for cube in matching_cubes:
-                updated_cube = Cube(position=cube.position, kind=cube.kind, label=new_label)
-                self._graph.add_node(cube.position, **{self._NODE_DATA_KEY: updated_cube})
+                # ``replace`` rather than a field-by-field rebuild: the latter
+                # already dropped ``condition`` and would now drop ``state`` too.
+                self._graph.add_node(
+                    cube.position,
+                    **{self._NODE_DATA_KEY: replace(cube, label=new_label)},
+                )
 
 
 def block_kind_from_str(string: str) -> BlockKind:

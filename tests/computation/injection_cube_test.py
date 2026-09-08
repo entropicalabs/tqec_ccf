@@ -8,11 +8,12 @@ import pytest
 from pyzx.utils import VertexType
 
 from tqec.computation.block_graph import BlockGraph
-from tqec.computation.cube import Cube, LeafCubeKind, cube_kind_from_string
+from tqec.computation.cube import Cube, LeafCubeKind, ZXCube, cube_kind_from_string
 from tqec.interop.collada._correlation import CorrelationSurfaceTransformationHelper
 from tqec.interop.collada._geometry import BlockGeometries
 from tqec.interop.color import TQECColor
 from tqec.utils.exceptions import TQECError
+from tqec.utils.injection_state import INJECTION_STATES
 from tqec.utils.position import Direction3D, Position3D
 
 _ORIGIN = Position3D(0, 0, 0)
@@ -47,19 +48,27 @@ def test_cube_is_injection_cube() -> None:
     assert not Cube(_ORIGIN, LeafCubeKind.Y_HALF_CUBE).is_injection_cube
 
 
-def test_proxy_defaults_to_true() -> None:
-    assert Cube(_ORIGIN, LeafCubeKind.INJECTION).proxy
-    assert not Cube(_ORIGIN, LeafCubeKind.INJECTION, proxy=False).proxy
+def test_state_defaults_to_i() -> None:
+    assert Cube(_ORIGIN, LeafCubeKind.INJECTION).state == "i"
+    assert Cube(_ORIGIN, LeafCubeKind.INJECTION, state="T").state == "T"
 
 
-def test_proxy_is_rejected_on_other_kinds() -> None:
-    with pytest.raises(TQECError, match="Only an injection cube can have a proxy flag"):
-        Cube(_ORIGIN, LeafCubeKind.Y_HALF_CUBE, proxy=False)
+@pytest.mark.parametrize("kind", [LeafCubeKind.Y_HALF_CUBE, ZXCube.ZXZ])
+def test_state_is_rejected_on_other_kinds(kind: object) -> None:
+    with pytest.raises(TQECError, match="Only an injection cube can carry an injected state"):
+        Cube(_ORIGIN, kind, state="T")  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("proxy", [True, False])
-def test_cube_dict_round_trip_keeps_proxy(proxy: bool) -> None:
-    cube = Cube(_ORIGIN, LeafCubeKind.INJECTION, proxy=proxy)
+@pytest.mark.parametrize("state", ["Q", "", "I", "t"])
+def test_unknown_state_is_rejected(state: str) -> None:
+    # Exact, case-sensitive matching: "I" is the INJECTION cube *kind*.
+    with pytest.raises(TQECError, match="Unknown injected state"):
+        Cube(_ORIGIN, LeafCubeKind.INJECTION, state=state)
+
+
+@pytest.mark.parametrize("state", tuple(INJECTION_STATES))
+def test_cube_dict_round_trip_keeps_the_state(state: str) -> None:
+    cube = Cube(_ORIGIN, LeafCubeKind.INJECTION, state=state)
     assert Cube.from_dict(cube.to_dict()) == cube
 
 
@@ -74,10 +83,10 @@ def test_injection_column_validates_under_either_orientation(above: str) -> None
     _injection_column(above).validate()
 
 
-def test_graph_add_cube_passes_proxy_through() -> None:
-    graph = BlockGraph("proxy")
-    graph.add_cube(_ORIGIN, "I", proxy=False)
-    assert not graph[_ORIGIN].proxy
+def test_graph_add_cube_passes_the_state_through() -> None:
+    graph = BlockGraph("state")
+    graph.add_cube(_ORIGIN, "I", state="T")
+    assert graph[_ORIGIN].state == "T"
 
 
 def test_injection_cube_needs_a_pipe() -> None:
@@ -161,40 +170,62 @@ def test_view_as_html_with_a_correlation_surface() -> None:
     assert str(html)
 
 
-def _proxy_column() -> BlockGraph:
-    graph = BlockGraph("proxy false")
-    graph.add_cube(_ORIGIN, "I", proxy=False)
+def _state_column(state: str = "T") -> BlockGraph:
+    graph = BlockGraph(f"injecting {state}")
+    graph.add_cube(_ORIGIN, "I", state=state)
     graph.add_cube(_ABOVE, "ZXX")
     graph.add_pipe(_ORIGIN, _ABOVE)
     graph.validate()
     return graph
 
 
-def test_proxy_survives_a_shift() -> None:
+def test_state_survives_a_shift() -> None:
     # Regression: ``compile_block_graph`` shifts the graph to z >= 0, and
-    # ``shift_by`` used to rebuild each cube field by field, resetting ``proxy``.
-    shifted = _proxy_column().shift_by(dz=5)
-    assert not shifted[Position3D(0, 0, 5)].proxy
+    # ``shift_by`` used to rebuild each cube field by field, resetting the state.
+    shifted = _state_column().shift_by(dz=5)
+    assert shifted[Position3D(0, 0, 5)].state == "T"
 
 
-def test_proxy_survives_a_rotation() -> None:
-    rotated = _proxy_column().rotate(rotation_axis=Direction3D.Z, num_90_degree_rotation=1)
-    assert not next(cube for cube in rotated.cubes if cube.is_injection_cube).proxy
+def test_state_survives_a_rotation() -> None:
+    rotated = _state_column().rotate(rotation_axis=Direction3D.Z, num_90_degree_rotation=1)
+    assert next(cube for cube in rotated.cubes if cube.is_injection_cube).state == "T"
 
 
-def test_proxy_survives_a_dict_round_trip() -> None:
-    graph = _proxy_column()
-    assert not BlockGraph.from_dict(graph.to_dict())[_ORIGIN].proxy
-    # A graph serialised before ``proxy`` existed still reads back.
-    data = graph.to_dict()
+def test_state_survives_a_dict_round_trip() -> None:
+    graph = _state_column()
+    assert BlockGraph.from_dict(graph.to_dict())[_ORIGIN].state == "T"
+
+
+def test_state_defaults_when_the_key_is_absent() -> None:
+    data = _state_column().to_dict()
     for cube in data["cubes"]:
-        cube.pop("proxy", None)
-    assert BlockGraph.from_dict(data)[_ORIGIN].proxy
+        cube.pop("state", None)
+    assert BlockGraph.from_dict(data)[_ORIGIN].state == "i"
+
+
+def test_the_removed_proxy_key_is_rejected() -> None:
+    data = _state_column().to_dict()
+    for cube in data["cubes"]:
+        if cube["kind"] == "I":
+            cube.pop("state")
+            cube["proxy"] = True
+    with pytest.raises(TQECError, match="has been replaced by 'state'"):
+        BlockGraph.from_dict(data)
+
+
+def test_a_dae_round_trip_loses_the_state(tmp_path: pathlib.Path) -> None:
+    # A cube's kind is recovered from its face colours, and there is nowhere in
+    # the COLLADA model to record which state an injection cube prepares.
+    graph = _state_column()
+    path = tmp_path / "injection.dae"
+    graph.to_dae_file(path)
+    read_back = BlockGraph.from_dae_file(path, graph_name=graph.name)
+    assert next(cube for cube in read_back.cubes if cube.is_injection_cube).state == "i"
 
 
 def test_insert_cube_preserves_every_attribute() -> None:
     graph = BlockGraph("insert")
-    cube = Cube(_ORIGIN, LeafCubeKind.INJECTION, proxy=False)
+    cube = Cube(_ORIGIN, LeafCubeKind.INJECTION, state="T")
     assert graph.insert_cube(cube) == _ORIGIN
     assert graph[_ORIGIN] == cube
 

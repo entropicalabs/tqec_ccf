@@ -17,8 +17,23 @@ from tqec.compile.specs.library.generators.injection import (
 )
 from tqec.compile.specs.library.generators.ycube import xtop_qubit_patch
 from tqec.utils.exceptions import TQECError
+from tqec.utils.injection_state import INJECTION_STATES
 
 _DISTANCES = (3, 5, 7, 9)
+_STATES = tuple(INJECTION_STATES)
+
+# The logical expectation each state prepares, as (basis, value). "T"/"T_DAG"
+# match "i"/"-i" because they compile as the same Clifford stand-in.
+_LOGICAL_EXPECTATION: dict[str, tuple[str, float]] = {
+    "0": ("Z", 1.0),
+    "1": ("Z", -1.0),
+    "+": ("X", 1.0),
+    "-": ("X", -1.0),
+    "i": ("Y", 1.0),
+    "-i": ("Y", -1.0),
+    "T": ("Y", 1.0),
+    "T_DAG": ("Y", -1.0),
+}
 
 _Coord = tuple[int, int]
 _Moment = dict[str, frozenset[tuple[_Coord, ...]]]
@@ -85,18 +100,37 @@ def _expectation(circuit: stim.Circuit, operator: list[tuple[_Coord, str]]) -> f
     return simulator.peek_observable_expectation(pauli)
 
 
-def _without_proxy(circuit: stim.Circuit) -> stim.Circuit:
-    """Return ``circuit`` without the proxy gate, so it prepares a plain ``|+>``."""
-    stripped = stim.Circuit()
-    for instruction in circuit.flattened():
-        if instruction.name != "S_DAG":
-            stripped.append(instruction)
-    return stripped
+def _logical_pauli(distance: int, basis: str, transposed: bool) -> stim.PauliString:
+    """Return a logical ``X``, ``Z`` or ``Y`` representative as a Pauli string."""
+    circuit = injection_encoder_circuit(distance, transposed=transposed)
+    coords = {
+        (round(c[0]), round(c[1])): qubit
+        for qubit, c in circuit.get_final_qubit_coordinates().items()
+    }
+
+    def pauli(operator: list[tuple[_Coord, str]]) -> stim.PauliString:
+        out = stim.PauliString(circuit.num_qubits)
+        for coord, single in operator:
+            out[coords[coord]] = single
+        return out
+
+    if basis in ("X", "Z"):
+        return pauli(_logical_operator(distance, basis, transposed))
+    # X_L and Z_L overlap only on the centre qubit, so their product is a logical
+    # Y there; the factor of i makes the anticommuting product Hermitian.
+    return (
+        pauli(_logical_operator(distance, "X", transposed))
+        * pauli(_logical_operator(distance, "Z", transposed))
+        * 1j
+    )
 
 
 @pytest.mark.parametrize("distance", _DISTANCES)
 def test_encoder_matches_oracle(distance: int) -> None:
-    assert _moments(injection_encoder_circuit(distance)) == _moments(oracle_injection(distance))
+    # The oracle applies S_DAG to the centre qubit, which is the "-i" state.
+    assert _moments(injection_encoder_circuit(distance, state="-i")) == _moments(
+        oracle_injection(distance)
+    )
 
 
 @pytest.mark.parametrize("distance", _DISTANCES)
@@ -140,8 +174,11 @@ def test_encoder_performs_no_measurement(distance: int) -> None:
 
 
 @pytest.mark.parametrize("distance", _DISTANCES)
-def test_encoder_moment_count(distance: int) -> None:
-    circuit = injection_encoder_circuit(distance)
+@pytest.mark.parametrize("state", _STATES)
+def test_encoder_moment_count_is_state_independent(distance: int, state: str) -> None:
+    # The gate moment is emitted even for the states needing no gate, as ``I``,
+    # so ``scalable_num_moments`` can stay a constant.
+    circuit = injection_encoder_circuit(distance, state=state)
     k = (distance - 1) // 2
     assert circuit.num_ticks + 1 == INJECTION_ENCODER_MOMENTS.integer_eval(k)
 
@@ -160,33 +197,62 @@ def test_transposed_encoder_is_the_reflected_encoder(distance: int) -> None:
 
 @pytest.mark.parametrize("distance", _DISTANCES)
 @pytest.mark.parametrize("transposed", [False, True])
-def test_encoder_injects_the_proxy_state(distance: int, transposed: bool) -> None:
-    # S_DAG |+> = |-i>, which has no X or Z component and is a Y eigenstate.
-    circuit = injection_encoder_circuit(distance, transposed=transposed)
-    logical_x = _logical_operator(distance, "X", transposed)
-    logical_z = _logical_operator(distance, "Z", transposed)
-    assert _expectation(circuit, logical_x) == 0.0
-    assert _expectation(circuit, logical_z) == 0.0
-    # Without the proxy gate the same encoder prepares the logical |+>.
-    assert _expectation(_without_proxy(circuit), logical_x) == 1.0
+@pytest.mark.parametrize("state", _STATES)
+def test_encoder_injects_the_requested_state(distance: int, transposed: bool, state: str) -> None:
+    circuit = injection_encoder_circuit(distance, transposed=transposed, state=state)
+    simulator = stim.TableauSimulator()
+    simulator.do(circuit)
+    basis, value = _LOGICAL_EXPECTATION[state]
+    assert simulator.peek_observable_expectation(
+        _logical_pauli(distance, basis, transposed)
+    ) == pytest.approx(value)
+    # The two complementary logical operators are maximally uncertain.
+    for other in ("X", "Y", "Z"):
+        if other != basis:
+            assert simulator.peek_observable_expectation(
+                _logical_pauli(distance, other, transposed)
+            ) == pytest.approx(0.0)
 
 
 @pytest.mark.parametrize("distance", _DISTANCES)
-def test_proxy_gate_acts_on_the_centre_data_qubit(distance: int) -> None:
-    circuit = injection_encoder_circuit(distance)
+@pytest.mark.parametrize("state", _STATES)
+def test_reset_and_gate_act_on_the_centre_data_qubit(distance: int, state: str) -> None:
+    reset, gate, _ = INJECTION_STATES[state]
+    circuit = injection_encoder_circuit(distance, state=state)
     coords = circuit.get_final_qubit_coordinates()
-    proxied = [
-        coords[target.qubit_value]
-        for instruction in circuit.flattened()
-        if instruction.name == "S_DAG"
-        for target in instruction.targets_copy()
-    ]
-    assert proxied == [[float(distance), float(distance)]]
+    centre = [float(distance), float(distance)]
+    instructions = [i for i in circuit.flattened() if i.name not in ("QUBIT_COORDS", "TICK")]
+    # The encoder opens by preparing the centre qubit alone, then rotating it,
+    # before any other qubit is touched.
+    assert instructions[0].name == reset
+    assert [coords[t.qubit_value] for t in instructions[0].targets_copy()] == [centre]
+    assert instructions[1].name == gate
+    assert [coords[t.qubit_value] for t in instructions[1].targets_copy()] == [centre]
 
 
-def test_proxy_false_is_not_implemented() -> None:
-    with pytest.raises(NotImplementedError, match="stim does not support"):
-        injection_encoder_circuit(3, proxy=False)
+@pytest.mark.parametrize("distance", _DISTANCES)
+@pytest.mark.parametrize("state", _STATES)
+def test_only_a_non_clifford_state_is_tagged(distance: int, state: str) -> None:
+    stands_in_for = INJECTION_STATES[state][2]
+    circuit = injection_encoder_circuit(distance, state=state)
+    tags = [i.tag for i in circuit.flattened() if i.tag]
+    assert tags == ([stands_in_for] if stands_in_for else [])
+
+
+@pytest.mark.parametrize("state", ["T", "T_DAG"])
+def test_a_tagged_encoder_round_trips_through_stim_text(state: str) -> None:
+    # The tag is what the text emitter keys on, so it has to survive stim's own
+    # serialisation.
+    circuit = injection_encoder_circuit(5, state=state)
+    assert stim.Circuit(str(circuit)) == circuit
+
+
+@pytest.mark.parametrize("state", ["Q", "", "I", "t", "t_dag", "0i", "+i"])
+def test_unknown_state_is_rejected(state: str) -> None:
+    # Matching is exact and case-sensitive on purpose: "I" is the INJECTION cube
+    # *kind*, so it must not also name a state.
+    with pytest.raises(TQECError, match="Unknown injected state"):
+        injection_encoder_circuit(3, state=state)
 
 
 @pytest.mark.parametrize("distance", [-1, 0, 2, 4, 6])

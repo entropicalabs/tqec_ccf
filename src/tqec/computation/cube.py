@@ -10,6 +10,11 @@ from typing import Any
 from tqec.computation.correlation import CorrelationSurface
 from tqec.utils.enums import Basis
 from tqec.utils.exceptions import TQECError
+from tqec.utils.injection_state import (
+    DEFAULT_INJECTION_STATE,
+    INJECTION_STATES,
+    validate_injection_state,
+)
 from tqec.utils.position import Direction3D, Position3D
 
 
@@ -318,12 +323,23 @@ class Cube:
             conditional cube. Must be ``None`` for non-conditional cubes and non-``None``
             for conditional ones (enforced in ``__post_init__``); every position of the
             surface must lie in the past of the cube. Default is ``None``.
-        proxy: For an ``INJECTION`` cube only: whether to inject through a Clifford
-            proxy gate. ``True`` (the default) applies ``S_DAG`` to the centre data
-            qubit, which keeps the circuit inside stim's gate set and stands in for
-            a ``T`` gate. ``False`` is not implemented yet: it would require
-            emitting a real ``T``, which stim does not support. Must be left at its
-            default for every other cube kind.
+        state: For an ``INJECTION`` cube only: which single-qubit state to prepare
+            on the logical qubit, named exactly as in
+            :data:`~tqec.utils.injection_state.INJECTION_STATES`. Must be left at
+            its default for every other cube kind.
+
+            Two caveats. ``"T"`` and ``"T_DAG"`` cannot be represented as a
+            ``stim.Circuit`` at all, so they compile as a tagged Clifford stand-in
+            and only
+            :py:meth:`~tqec.compile.graph.TopologicalComputationGraph.generate_stim_text`
+            emits them; and a ``.dae`` round trip loses this attribute, since a
+            cube's kind is recovered there from its face colours and there is
+            nowhere to record the state.
+
+            Note also that a stabilizer state such as ``"0"`` currently still
+            leaves the emitted observable non-deterministic: the injection leaf is
+            treated as an open boundary for every state, and teaching correlation
+            surfaces to terminate in a definite basis there is separate work.
 
     """
 
@@ -331,11 +347,17 @@ class Cube:
     kind: CubeKind
     label: str = ""
     condition: CorrelationSurface | None = None
-    proxy: bool = True
+    state: str = DEFAULT_INJECTION_STATE
 
     def __post_init__(self) -> None:
-        if not self.proxy and not self.is_injection_cube:
-            raise TQECError("Only an injection cube can have a proxy flag.")
+        # Validate the state before the kind, so a typo on an injection cube gets
+        # the message listing the legal values rather than the wrong-kind one.
+        validate_injection_state(self.state)
+        if self.state != DEFAULT_INJECTION_STATE and not self.is_injection_cube:
+            raise TQECError(
+                f"Only an injection cube can carry an injected state, got "
+                f"{self.state!r} on a {self.kind} cube."
+            )
         if self.is_port and not self.label:
             raise TQECError("A port cube must have a non-empty port label.")
         if self.condition is None and self.is_conditional:
@@ -343,13 +365,8 @@ class Cube:
         if self.condition is not None:
             if not self.is_conditional:
                 raise TQECError("Only a conditional cube can have a condition.")
-            if any(
-                cond_pos.z >= self.position.z
-                for cond_pos in self.condition.positions
-            ):
-                raise TQECError(
-                    "Condition must be in the past of the cube being conditioned."
-                )
+            if any(cond_pos.z >= self.position.z for cond_pos in self.condition.positions):
+                raise TQECError("Condition must be in the past of the cube being conditioned.")
 
     def __str__(self) -> str:
         return f"{self.kind}{self.position}"
@@ -397,10 +414,10 @@ class Cube:
             "label": self.label,
             "condition": asdict(self.condition) if self.condition is not None else None,
         }
-        # ``proxy`` only means anything for an injection cube, so it is left out
+        # ``state`` only means anything for an injection cube, so it is left out
         # elsewhere rather than churning the serialised form of every graph.
         if self.is_injection_cube:
-            data["proxy"] = self.proxy
+            data["state"] = self.state
         return data
 
     @staticmethod
@@ -414,7 +431,15 @@ class Cube:
             The :py:class:`~tqec.computation.cube.Cube` instance created from the
             dictionary representation.
 
+        Raises:
+            TQECError: if the dictionary carries the removed ``proxy`` key.
+
         """
+        if "proxy" in data:
+            raise TQECError(
+                "An injection cube's 'proxy' flag has been replaced by 'state'. "
+                f"Re-serialise the graph with one of {sorted(INJECTION_STATES)}."
+            )
         return Cube(
             position=Position3D(*data["position"]),
             kind=cube_kind_from_string(data["kind"]),
@@ -422,5 +447,5 @@ class Cube:
             condition=None
             if (condition := data.get("condition", None)) is None
             else CorrelationSurface(**condition),
-            proxy=data.get("proxy", True),
+            state=data.get("state", DEFAULT_INJECTION_STATE),
         )

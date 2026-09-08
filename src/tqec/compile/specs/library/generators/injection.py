@@ -7,6 +7,12 @@ patch's data qubits, applies one single-qubit gate to the centre data qubit, and
 entangles the patch with a fixed schedule of ``CX`` layers, leaving every
 stabilizer of the patch in its ``+1`` eigenstate.
 
+Which state is prepared is named by a string; the reset basis and the gate come
+from :data:`~tqec.utils.injection_state.INJECTION_STATES`. Two of the eight
+states are not stabilizer states and are compiled as a tagged Clifford stand-in,
+because stim has no gate for either --- see that module for why substituting the
+real gate afterwards cannot change any detector.
+
 The construction is the one used by the sibling Entropica project ``noncliff``
 (``noncliff/injection.py``), vendored as a test oracle in
 ``tests/_vendor/noncliff``. A ``d = 3`` patch is encoded directly, and a larger
@@ -39,6 +45,10 @@ import stim
 
 from tqec.compile.specs.library.generators.ycube import xtop_qubit_patch
 from tqec.utils.exceptions import TQECError
+from tqec.utils.injection_state import (
+    DEFAULT_INJECTION_STATE,
+    injection_state_operations,
+)
 from tqec.utils.scale import LinearFunction
 
 _Coord = tuple[int, int]
@@ -49,14 +59,6 @@ INJECTION_ENCODER_MOMENTS = LinearFunction(3, 4)
 
 Seven moments encode the ``d = 3`` patch, and every shell that grows the patch by
 two adds three more (resets, then the shell's two ``CX`` layers).
-"""
-
-_PROXY_GATE = "S_DAG"
-"""Clifford stand-in applied to the centre data qubit when ``proxy`` is set.
-
-``S_DAG`` keeps the circuit inside stim's gate set, so the whole computation
-stays simulable; ``noncliff``'s ``clifft_sim`` rewrites it to ``T_DAG`` before
-handing the circuit to a simulator that supports non-Clifford gates.
 """
 
 
@@ -157,13 +159,18 @@ class _Encoder:
             self._circuit.append(stim.CircuitInstruction("TICK", []))
         self._started = True
 
-    def moment_1q(self, gates: dict[str, list[_Coord]]) -> None:
-        """Append one moment of single-qubit gates, keyed by instruction name."""
+    def moment_1q(self, gates: dict[str, list[_Coord]], tag: str = "") -> None:
+        """Append one moment of single-qubit gates, keyed by instruction name.
+
+        ``tag`` is attached to every instruction emitted in this moment. It marks
+        a gate that stands in for one stim cannot represent; see
+        :mod:`tqec.utils.injection_state`.
+        """
         self._open_moment()
         for name, coords in gates.items():
             if coords:
                 self._circuit.append(
-                    stim.CircuitInstruction(name, [self._index(c) for c in coords])
+                    stim.CircuitInstruction(name, [self._index(c) for c in coords], tag=tag)
                 )
 
     def moment_cx(self, pairs: list[_Pair]) -> None:
@@ -177,7 +184,7 @@ class _Encoder:
 
 
 def injection_encoder_circuit(
-    distance: int, *, transposed: bool = False, proxy: bool = True
+    distance: int, *, transposed: bool = False, state: str = DEFAULT_INJECTION_STATE
 ) -> stim.Circuit:
     """Build the state-injection encoder for a ``distance x distance`` patch.
 
@@ -187,11 +194,10 @@ def injection_encoder_circuit(
             written for a patch whose left and right walls are ``Z`` (a ``ZX*``
             cube above the injection); an ``XZ*`` cube above needs the
             reflection.
-        proxy: whether to inject through the Clifford proxy gate. ``True``
-            applies ``S_DAG`` to the centre data qubit, which keeps the circuit
-            simulable by stim and is what ``noncliff`` does. ``False`` would
-            apply a real ``T``, which is not a stim instruction, and is not
-            implemented yet.
+        state: which single-qubit state to prepare on the logical qubit. One of
+            :data:`~tqec.utils.injection_state.INJECTION_STATES`, matched
+            exactly. ``"T"`` and ``"T_DAG"`` are compiled as a tagged Clifford
+            stand-in, since stim has no gate for either.
 
     Returns:
         the encoder circuit, in tqec integer coordinates, declaring
@@ -200,18 +206,13 @@ def injection_encoder_circuit(
         acting only on the data qubits. It contains no measurement.
 
     Raises:
-        TQECError: if ``distance`` is even or smaller than 3.
-        NotImplementedError: if ``proxy`` is ``False``.
+        TQECError: if ``distance`` is even or smaller than 3, or if ``state`` is
+            not one of :data:`~tqec.utils.injection_state.INJECTION_STATES`.
 
     """
     if distance < 3 or distance % 2 == 0:
         raise TQECError(f"The code distance must be odd and at least 3, got {distance}.")
-    if not proxy:
-        raise NotImplementedError(
-            "Injecting without the Clifford proxy gate requires emitting a real "
-            "T instruction, which stim does not support. Only proxy=True is "
-            "implemented for the moment."
-        )
+    reset, gate, stands_in_for = injection_state_operations(state)
 
     patch = xtop_qubit_patch(distance)
     encoder = _Encoder(
@@ -226,9 +227,11 @@ def injection_encoder_circuit(
     def shifted(coord: _Coord) -> _Coord:
         return (coord[0] + shift, coord[1] + shift)
 
+    # The gate moment is always emitted, as ``I`` where the state needs none, so
+    # the encoder's moment count stays ``3k + 4`` whatever is injected.
     centre = (distance, distance)
-    encoder.moment_1q({"RX": [centre]})
-    encoder.moment_1q({_PROXY_GATE: [centre]})
+    encoder.moment_1q({reset: [centre]})
+    encoder.moment_1q({gate: [centre]}, tag=stands_in_for)
     encoder.moment_1q(
         {basis: [shifted(c) for c in coords] for basis, coords in _BASE_RESETS.items()}
     )

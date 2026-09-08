@@ -11,6 +11,7 @@ from tqec.computation.pipe import PipeKind
 from tqec.templates.base import RectangularTemplate
 from tqec.utils.enums import Basis
 from tqec.utils.exceptions import TQECError
+from tqec.utils.injection_state import DEFAULT_INJECTION_STATE
 from tqec.utils.position import Direction3D, Position3D
 from tqec.utils.scale import LinearFunction
 
@@ -117,18 +118,18 @@ class CubeSpec:
             patch is reflected across its main diagonal, for the same reason as
             ``y_cap_transposed``, read off the cube *above* instead of below.
             ``False`` for every other cube kind.
-        proxy: For an ``INJECTION`` cube only: whether to inject through the
-            Clifford proxy gate. See :py:attr:`~tqec.computation.cube.Cube.proxy`.
+        state: For an ``INJECTION`` cube only: which single-qubit state to inject.
+            See :py:attr:`~tqec.computation.cube.Cube.state`.
 
     """
 
     kind: CubeKind
     spatial_arms: SpatialArms = SpatialArms.NONE
     has_spatial_up_or_down_pipe_in_timeslice: bool = False
-    condition: "CorrelationSurface | None" = None
+    condition: CorrelationSurface | None = None
     y_cap_transposed: bool = False
     injection_transposed: bool = False
-    proxy: bool = True
+    state: str = DEFAULT_INJECTION_STATE
 
     def __post_init__(self) -> None:
         if self.spatial_arms != SpatialArms.NONE:
@@ -160,7 +161,7 @@ class CubeSpec:
                 condition=cube.condition,
                 y_cap_transposed=_y_cap_is_transposed(cube, graph),
                 injection_transposed=_injection_is_transposed(cube, graph),
-                proxy=cube.proxy,
+                state=cube.state,
             )
         spatial_arms = SpatialArms.from_cube_in_graph(cube, graph)
         return CubeSpec(

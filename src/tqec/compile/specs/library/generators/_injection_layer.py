@@ -50,6 +50,11 @@ from tqec.compile.specs.library.generators.ycube import xtop_qubit_patch
 from tqec.compile.tree.node import LayerNode, NodeWalker
 from tqec.templates.base import RectangularTemplate
 from tqec.utils.exceptions import TQECError
+from tqec.utils.injection_state import (
+    DEFAULT_INJECTION_STATE,
+    is_clifford_injection_state,
+    validate_injection_state,
+)
 from tqec.utils.scale import LinearFunction, PhysicalQubitScalable2D
 
 Coord = tuple[int, int]
@@ -70,25 +75,40 @@ class InjectionRawLayer(RawCircuitLayer):
 
     """
 
-    def __init__(self, transposed: bool = False, proxy: bool = True) -> None:
+    def __init__(self, transposed: bool = False, state: str = DEFAULT_INJECTION_STATE) -> None:
         """Wrap the encoder as the single layer of an injection cube.
 
         Args:
             transposed: reflect the patch across its main diagonal, for an
                 ``XZ*`` cube above. See
                 :func:`~tqec.compile.specs.library.generators.injection.injection_encoder_circuit`.
-            proxy: whether to inject through the Clifford proxy gate.
+            state: which single-qubit state to inject. See
+                :data:`~tqec.utils.injection_state.INJECTION_STATES`.
+
+        Raises:
+            TQECError: if ``state`` is not an injectable state.
 
         """
+        validate_injection_state(state)
         self._transposed = transposed
-        self._proxy = proxy
+        self._state = state
         super().__init__(
             self._make_scheduled_circuit, _INJECTION_ELEMENT_SHAPE, INJECTION_ENCODER_MOMENTS
         )
 
+    @property
+    def state(self) -> str:
+        """The single-qubit state this encoder injects."""
+        return self._state
+
+    @property
+    def is_clifford(self) -> bool:
+        """Whether the injected state is one stim can represent directly."""
+        return is_clifford_injection_state(self._state)
+
     def _make_scheduled_circuit(self, k: int) -> ScheduledCircuit:
         return ScheduledCircuit.from_circuit(
-            injection_encoder_circuit(2 * k + 1, transposed=self._transposed, proxy=self._proxy)
+            injection_encoder_circuit(2 * k + 1, transposed=self._transposed, state=self._state)
         )
 
     def start_spec(self, k: int) -> dict[Coord, list[Coord]]:
@@ -229,7 +249,7 @@ class InjectionCubeBlock(Block):
 def make_injection_block(
     template: RectangularTemplate | None = None,
     transposed: bool = False,
-    proxy: bool = True,
+    state: str = DEFAULT_INJECTION_STATE,
 ) -> InjectionCubeBlock:
     """Build the block an ``INJECTION`` cube lowers to.
 
@@ -237,13 +257,16 @@ def make_injection_block(
         template: the block's spatial footprint. See
             :class:`InjectionCubeBlock`.
         transposed: reflect the patch, for an ``XZ*`` cube above.
-        proxy: whether to inject through the Clifford proxy gate.
+        state: which single-qubit state to inject. See
+            :data:`~tqec.utils.injection_state.INJECTION_STATES`.
 
     Returns:
         a one-layer block holding the encoder.
 
     """
-    return InjectionCubeBlock([InjectionRawLayer(transposed, proxy)], template=template)
+    return InjectionCubeBlock(
+        [InjectionRawLayer(transposed=transposed, state=state)], template=template
+    )
 
 
 class InjectionMomentFinder(NodeWalker):
