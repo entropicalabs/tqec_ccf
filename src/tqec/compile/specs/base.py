@@ -58,10 +58,10 @@ def _injection_capped_cube_kind(cube: Cube, graph: BlockGraph) -> ZXCube:
 
     Raises:
         NotImplementedError: if the injection cube does not sit directly below a
-            regular cube --- for instance one connected to a ``Port``. The block
-            graph already rejects an injection cube with no upward temporal pipe
-            (see ``BlockGraph._validate_locally_at_cube``), so this is the
-            remaining case: a pipe that leads somewhere other than a ``ZXCube``.
+            regular cube. ``BlockGraph._validate_locally_at_cube`` already rejects
+            every such graph --- no upward temporal pipe, or one leading somewhere
+            other than a ``ZXCube`` --- so reaching this means a spec was built
+            from a graph that was never validated.
 
     """
     above = Position3D(cube.position.x, cube.position.y, cube.position.z + 1)

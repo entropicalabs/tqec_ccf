@@ -211,3 +211,28 @@ def test_insert_cube_rejects_a_duplicate_port_label() -> None:
     graph.insert_cube(Cube(_ORIGIN, LeafCubeKind.PORT, "p"))
     with pytest.raises(TQECError, match="already a port with the same label"):
         graph.insert_cube(Cube(_ABOVE, LeafCubeKind.PORT, "p"))
+
+
+@pytest.mark.parametrize(("above", "label"), [("Y", ""), ("PORT", "out")])
+def test_injection_cube_must_hand_its_state_to_a_regular_cube(above: str, label: str) -> None:
+    # Which cube receives the state is a graph-level fact, so `validate` rejects
+    # it. This used to pass validation and fail only at compile time, as a
+    # NotImplementedError out of the lowering.
+    graph = BlockGraph("wrong neighbour")
+    graph.add_cube(_ORIGIN, "I")
+    graph.add_cube(_ABOVE, above, label=label)
+    graph.add_pipe(_ORIGIN, _ABOVE, "ZXO")
+    with pytest.raises(TQECError, match="must sit directly below a regular cube"):
+        graph.validate()
+
+
+def test_building_an_invalid_graph_is_allowed_until_validate() -> None:
+    # tqec deliberately lets an invalid graph be built so it can be inspected and
+    # visualised; `validate` is the checkpoint, and `compile_block_graph` calls it.
+    graph = BlockGraph("pipe below")
+    graph.add_cube(_ORIGIN, "ZXX")
+    graph.add_cube(_ABOVE, "I")
+    graph.add_pipe(_ORIGIN, _ABOVE)
+    assert graph[_ABOVE].is_injection_cube
+    with pytest.raises(TQECError, match="pipe must go up"):
+        graph.validate()

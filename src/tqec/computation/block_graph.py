@@ -435,6 +435,15 @@ class BlockGraph:
                     f"{cube.kind} at {cube.position} has its pipe below it. An injection "
                     "cube prepares a state and hands it upward, so its pipe must go up."
                 )
+            # Which cube receives the state is a fact about the graph, so it is
+            # checked here rather than left to the lowering, where it used to
+            # surface as a NotImplementedError only at compile time.
+            if not isinstance(pipes[0].v.kind, ZXCube):
+                raise TQECError(
+                    f"{cube.kind} at {cube.position} hands its state to a "
+                    f"{pipes[0].v.kind} cube at {pipes[0].v.position}. An injection cube "
+                    "must sit directly below a regular cube."
+                )
             return
 
         # time-like Y and conditional
