@@ -2,6 +2,7 @@ from typing_extensions import override
 
 from tqec.circuit.qubit import GridQubit
 from tqec.compile.blocks.layers.atomic.layout import LayoutLayer
+from tqec.compile.blocks.layers.atomic.raw import RawCircuitLayer
 from tqec.compile.tree.annotations import Polygon
 from tqec.compile.tree.node import LayerNode, NodeWalker
 from tqec.plaquette.rpng.rpng import PauliBasis
@@ -34,7 +35,29 @@ class AnnotatePolygonOnLayerNode(NodeWalker):
 
 
 def generate_polygons_for_layout_layer(layer: LayoutLayer, k: int) -> list[Polygon]:
-    """Generate the polygons that might be used to visualise stabilizers in Crumble."""
+    """Generate the polygons that might be used to visualise stabilizers in Crumble.
+
+    Raises:
+        NotImplementedError: if the layer mixes a raw round with plaquette rounds
+            at different positions. Such a layer has no single template to read
+            polygons from, and the polygons of the plaquette part would need to
+            be placed in the enclosing layer's frame rather than their own.
+
+    """
+    raw_positions = {
+        pos for pos, sublayer in layer.layers.items() if isinstance(sublayer, RawCircuitLayer)
+    }
+    if raw_positions:
+        # A raw round carries a circuit but no plaquettes, so there are no
+        # stabilizers to outline -- the state-injection encoder, or a round of the
+        # Y-basis measurement cap. Drawing nothing is right; raising is not, since
+        # the polygons are only a visual hint in Crumble.
+        if len(raw_positions) == len(layer.layers):
+            return []
+        raise NotImplementedError(
+            "Cannot generate Crumble polygons for a layer that mixes raw rounds "
+            f"with plaquette rounds; found raw rounds at {sorted(map(str, raw_positions))}."
+        )
     template, plaquettes = layer.to_template_and_plaquettes()
 
     _indices = list(range(1, template.expected_plaquettes_number + 1))

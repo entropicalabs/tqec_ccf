@@ -9,6 +9,7 @@ from pyzx.utils import VertexType
 
 from tqec.computation.block_graph import BlockGraph
 from tqec.computation.cube import Cube, LeafCubeKind, cube_kind_from_string
+from tqec.interop.collada._correlation import CorrelationSurfaceTransformationHelper
 from tqec.interop.collada._geometry import BlockGeometries
 from tqec.interop.color import TQECColor
 from tqec.utils.exceptions import TQECError
@@ -138,6 +139,26 @@ def test_zx_graph_conversion_treats_injection_as_a_boundary() -> None:
     positioned = _injection_column().to_zx_graph()
     types = {positioned.positions[v]: positioned.g.type(v) for v in positioned.g.vertices()}
     assert types[_ORIGIN] == VertexType.BOUNDARY
+
+
+def test_correlation_surface_renders_through_the_injection_cube() -> None:
+    graph = _injection_column()
+    surface = graph.find_correlation_surfaces()[0]
+    assert _ORIGIN in surface.positions
+    helper = CorrelationSurfaceTransformationHelper(graph, pipe_length=2.0)
+    # The injection cube's faces carry no basis, so the generic ZXCube geometry
+    # does not apply; the piece is drawn from the incident pipe's plane instead.
+    # Regression: this used to trip an ``assert isinstance(kind, ZXCube)``.
+    pieces = helper.get_transformations_for_correlation_surface(surface)
+    assert len(pieces) == 3
+    assert {basis for basis, _ in pieces} == {surface.bases_at(_ORIGIN).pop()}
+
+
+def test_view_as_html_with_a_correlation_surface() -> None:
+    graph = _injection_column()
+    surface = graph.find_correlation_surfaces()[0]
+    html = graph.view_as_html(show_correlation_surface=surface, write_html_filepath=None)
+    assert str(html)
 
 
 def _proxy_column() -> BlockGraph:

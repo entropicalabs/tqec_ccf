@@ -166,6 +166,26 @@ def test_fixed_boundary_convention_is_not_supported() -> None:
         compile_block_graph(graph, FIXED_BOUNDARY_CONVENTION)
 
 
+@pytest.mark.parametrize("k", _KS)
+def test_crumble_url_with_polygons(k: int) -> None:
+    # The encoder is a raw round with no plaquettes, so it contributes no
+    # stabilizer outlines. Regression: this used to raise ``NotImplementedError``
+    # out of ``LayoutLayer.to_template_and_plaquettes``.
+    compiled = compile_block_graph(_injection_column(), FIXED_BULK_CONVENTION)
+    url = compiled.generate_crumble_url(k=k, add_polygons=True)
+    assert url.startswith("https://algassert.com/crumble#circuit=")
+    # Every syndrome round is outlined; the encoder round is not.
+    assert sum(1 for layer in url.split(";") if "POLYGON" in layer) > 0
+
+
+@pytest.mark.parametrize("k", _KS)
+def test_crumble_url_without_polygons(k: int) -> None:
+    compiled = compile_block_graph(_injection_column(), FIXED_BULK_CONVENTION)
+    assert compiled.generate_crumble_url(k=k, add_polygons=False).startswith(
+        "https://algassert.com/crumble#circuit="
+    )
+
+
 def test_proxy_false_reaches_the_generator_through_the_compile() -> None:
     graph = BlockGraph("proxy false")
     graph.add_cube(_ORIGIN, "I", proxy=False)
