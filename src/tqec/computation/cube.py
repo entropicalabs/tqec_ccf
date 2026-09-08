@@ -167,11 +167,17 @@ class LeafCubeKind(Enum):
             block graph. They will have no effect on the functionality of the logical computation
             itself and should be invisible when visualizing the computation model.
         Y_HALF_CUBE: Cube kind representing the Y-basis initialization/measurements.
+        INJECTION: Cube kind representing non-fault-tolerant state injection. It
+            prepares an arbitrary single-qubit state on the logical qubit of the
+            patch and hands it upward, so it can only cap a temporal pipe from
+            below: exactly one pipe, timelike, with the injection cube at its
+            lower end.
 
     """
 
     PORT = "PORT"
     Y_HALF_CUBE = "Y"
+    INJECTION = "I"
     # CULTIVATION = "T"
 
     def __str__(self) -> str:
@@ -194,6 +200,8 @@ class LeafCubeKind(Enum):
                 return LeafCubeKind.PORT
             case "Y":
                 return LeafCubeKind.Y_HALF_CUBE
+            case "INJECTION" | "I":
+                return LeafCubeKind.INJECTION
             # case "T":
             #     return LeafCubeKind.CULTIVATION
             case _:
@@ -274,7 +282,7 @@ def cube_kind_from_string(s: str) -> CubeKind:
     s = s.strip().upper()
     if s in ZXCube.__members__:
         return ZXCube.from_str(s)
-    if s in LeafCubeKind.__members__ or s in ["PORT", "P", "Y"]:
+    if s in LeafCubeKind.__members__ or s in ["PORT", "P", "Y", "I"]:
         return LeafCubeKind.from_str(s)
     if s in ConditionalLeafCubeKind.__members__:
         return ConditionalLeafCubeKind.from_str(s)
@@ -310,6 +318,12 @@ class Cube:
             conditional cube. Must be ``None`` for non-conditional cubes and non-``None``
             for conditional ones (enforced in ``__post_init__``); every position of the
             surface must lie in the past of the cube. Default is ``None``.
+        proxy: For an ``INJECTION`` cube only: whether to inject through a Clifford
+            proxy gate. ``True`` (the default) applies ``S_DAG`` to the centre data
+            qubit, which keeps the circuit inside stim's gate set and stands in for
+            a ``T`` gate. ``False`` is not implemented yet: it would require
+            emitting a real ``T``, which stim does not support. Must be left at its
+            default for every other cube kind.
 
     """
 
@@ -317,8 +331,11 @@ class Cube:
     kind: CubeKind
     label: str = ""
     condition: CorrelationSurface | None = None
+    proxy: bool = True
 
     def __post_init__(self) -> None:
+        if not self.proxy and not self.is_injection_cube:
+            raise TQECError("Only an injection cube can have a proxy flag.")
         if self.is_port and not self.label:
             raise TQECError("A port cube must have a non-empty port label.")
         if self.condition is None and self.is_conditional:
@@ -358,6 +375,11 @@ class Cube:
         return self.kind is LeafCubeKind.Y_HALF_CUBE
 
     @property
+    def is_injection_cube(self) -> bool:
+        """Verify whether the cube is of kind ``INJECTION``."""
+        return self.kind is LeafCubeKind.INJECTION
+
+    @property
     def is_spatial(self) -> bool:
         """Return whether the cube is a spatial cube.
 
@@ -369,12 +391,17 @@ class Cube:
 
     def to_dict(self) -> dict[str, Any]:
         """Return the dictionary representation of the cube."""
-        return {
+        data: dict[str, Any] = {
             "position": self.position.as_tuple(),
             "kind": str(self.kind),
             "label": self.label,
             "condition": asdict(self.condition) if self.condition is not None else None,
         }
+        # ``proxy`` only means anything for an injection cube, so it is left out
+        # elsewhere rather than churning the serialised form of every graph.
+        if self.is_injection_cube:
+            data["proxy"] = self.proxy
+        return data
 
     @staticmethod
     def from_dict(data: dict[str, Any]) -> Cube:
@@ -395,4 +422,5 @@ class Cube:
             condition=None
             if (condition := data.get("condition", None)) is None
             else CorrelationSurface(**condition),
+            proxy=data.get("proxy", True),
         )

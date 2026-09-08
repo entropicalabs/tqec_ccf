@@ -194,6 +194,7 @@ class BlockGraph:
         kind: CubeKind | str,
         label: str = "",
         condition: CorrelationSurface | None = None,
+        proxy: bool = True,
     ) -> Position3D:
         """Add a cube to the graph.
 
@@ -205,6 +206,8 @@ class BlockGraph:
             condition: The condition for when the cube kind is conditional, specified as a partial
                 correlation surface. The full correlation surface will be constructed at run-time
                 from this and other conditional cubes decided before this cube. Default is None.
+            proxy: For an ``INJECTION`` cube only, whether to inject through the Clifford
+                proxy gate. See :py:attr:`~tqec.computation.cube.Cube.proxy`. Default is True.
 
         Returns:
             The position of the cube added to the graph.
@@ -223,7 +226,7 @@ class BlockGraph:
             raise TQECError(f"There is already a port with the same label {label} in the graph.")
 
         self._graph.add_node(
-            position, **{self._NODE_DATA_KEY: Cube(position, kind, label, condition)}
+            position, **{self._NODE_DATA_KEY: Cube(position, kind, label, condition, proxy)}
         )
         if kind is LeafCubeKind.PORT:
             self._ports[label] = position
@@ -386,6 +389,28 @@ class BlockGraph:
             if len(pipes) != 1:
                 raise TQECError(
                     f"Port at {cube.position} does not have exactly one pipe connected."
+                )
+            return
+
+        # State injection hands its state upward, so it caps a temporal pipe from
+        # below and does nothing else. Unlike a Y cube --- which is general (Y-basis
+        # initialisation as well as measurement, and may attach to a Port) --- an
+        # injection cube has no time-reversed counterpart, so the direction is a
+        # property of the kind and belongs here rather than in the lowering.
+        if cube.is_injection_cube:
+            if len(pipes) != 1:
+                raise TQECError(
+                    f"{cube.kind} at {cube.position} does not have exactly one pipe connected."
+                )
+            if pipes[0].direction != Direction3D.Z:
+                raise TQECError(
+                    f"{cube.kind} at {cube.position} has a non-timelike pipe connected. "
+                    "An injection cube can only be connected by a temporal pipe."
+                )
+            if pipes[0].u.position != cube.position:
+                raise TQECError(
+                    f"{cube.kind} at {cube.position} has its pipe below it. An injection "
+                    "cube prepares a state and hands it upward, so its pipe must go up."
                 )
             return
 
