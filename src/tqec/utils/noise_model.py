@@ -176,7 +176,7 @@ class NoiseRule:
             assert len(args) == 0
             args = [self.flip_result]
 
-        out_during_moment.append(split_op.name, targets, args)
+        out_during_moment.append(split_op.name, targets, args, tag=split_op.tag)
         raw_targets = [t.value for t in targets if not t.is_combiner]
         for op_name, arg in self.after.items():
             after_moments[(op_name, arg)].append(op_name, raw_targets, arg)
@@ -483,7 +483,7 @@ def _split_targets_if_needed_clifford_1q(
     if immune_qubits:
         args = op.gate_args_copy()
         for t in op.targets_copy():
-            yield stim.CircuitInstruction(op.name, [t], args)
+            yield stim.CircuitInstruction(op.name, [t], args, tag=op.tag)
     else:
         yield op
 
@@ -497,7 +497,7 @@ def _split_targets_if_needed_clifford_2q(
     if immune_qubits or any(t.is_measurement_record_target for t in targets):
         args = op.gate_args_copy()
         for k in range(0, len(targets), 2):
-            yield stim.CircuitInstruction(op.name, targets[k : k + 2], args)
+            yield stim.CircuitInstruction(op.name, targets[k : k + 2], args, tag=op.tag)
     else:
         yield op
 
@@ -512,7 +512,7 @@ def _split_targets_if_needed_m_basis(
     start = k
     while k < len(targets):
         if k + 1 == len(targets) or not targets[k + 1].is_combiner:
-            yield stim.CircuitInstruction(op.name, targets[start : k + 1], args)
+            yield stim.CircuitInstruction(op.name, targets[start : k + 1], args, tag=op.tag)
             k += 1
             start = k
         else:

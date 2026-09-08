@@ -173,7 +173,9 @@ def remap_entry_qubit_indices(
             new_targets.append(stim.GateTarget(qubit_index_remap[t.qubit_value]))
         else:
             new_targets.append(t)
-    return stim.CircuitInstruction(entry.name, new_targets, list(entry.gate_args_copy()))
+    return stim.CircuitInstruction(
+        entry.name, new_targets, list(entry.gate_args_copy()), tag=entry.tag
+    )
 
 
 def _render(entries: list[CircuitEntry], lines: list[str], indent: int) -> None:
@@ -191,4 +193,3 @@ def _render(entries: list[CircuitEntry], lines: list[str], indent: int) -> None:
             text = str(entry).strip()
             for line in text.splitlines():
                 lines.append(f"{pad}{line}")
-

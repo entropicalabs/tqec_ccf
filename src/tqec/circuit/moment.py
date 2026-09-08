@@ -334,7 +334,9 @@ class Moment:
                 targets.extend(target_group)
                 used_qubits.update(qubit_targets)
             if targets:
-                new_circuit.append(instruction.name, targets, instruction.gate_args_copy())
+                new_circuit.append(
+                    instruction.name, targets, instruction.gate_args_copy(), tag=instruction.tag
+                )
         return Moment(new_circuit, used_qubits=used_qubits, _avoid_checks=True)
 
     @property
@@ -385,7 +387,7 @@ class Moment:
                         if not target.is_inverted_result_target
                         else cast(stim.GateTarget, -mapped_qubit)
                     )
-            circuit.append(instr.name, targets, instr.gate_args_copy())
+            circuit.append(instr.name, targets, instr.gate_args_copy(), tag=instr.tag)
         return Moment(
             circuit,
             used_qubits={qubit_index_map[q] for q in self._used_qubits},
