@@ -368,3 +368,126 @@ def test_noiseless_injection_works_for_a_non_clifford_state() -> None:
         1 for line in noisy.splitlines() if line.startswith("DEPOLARIZE")
     )
     assert any(line.split()[:1] == ["T"] for line in exempt.splitlines())
+
+
+_NEIGHBOUR = Position3D(1, 0, 0)
+_NEIGHBOUR_ABOVE = Position3D(1, 0, 1)
+
+
+def _injection_beside_a_column() -> BlockGraph:
+    """Join an injection column at ``z = 1`` to an ordinary three-cube column.
+
+    This is the smallest graph in which an injection cube shares a z-slice with a
+    block of a different temporal height: at ``z = 0`` the injection block has
+    two rounds while the memory cube has ``2k+1``.
+    """
+    graph = BlockGraph("injection beside a column")
+    graph.add_cube(Position3D(0, 0, 0), "XZX")
+    graph.add_cube(Position3D(0, 0, 1), "XZX")
+    graph.add_cube(Position3D(0, 0, 2), "XZX")
+    graph.add_cube(_NEIGHBOUR, "I")
+    graph.add_cube(_NEIGHBOUR_ABOVE, "XZX")
+    graph.add_pipe(Position3D(0, 0, 0), Position3D(0, 0, 1))
+    graph.add_pipe(Position3D(0, 0, 1), Position3D(0, 0, 2))
+    graph.add_pipe(Position3D(0, 0, 1), _NEIGHBOUR_ABOVE)
+    graph.add_pipe(_NEIGHBOUR, _NEIGHBOUR_ABOVE)
+    graph.validate()
+    return graph
+
+
+def test_the_block_acquires_its_qubits() -> None:
+    # The encoder resets every data qubit of the patch, so nothing of the block
+    # exists before its own first round -- which is what licenses end-aligning it
+    # in a merged slice rather than padding it with memory rounds.
+    block = InjectionCubeBlock([InjectionRawLayer()])
+    assert block.acquires_its_qubits
+    assert not block.releases_its_qubits
+
+
+@pytest.mark.parametrize("k", _KS)
+def test_injection_compiles_beside_a_taller_column(k: int) -> None:
+    # Regression: raised ``NotImplementedError`` out of ``_block_pad_body``,
+    # which required a ``RepeatedLayer`` to pad a short block with. An injection
+    # block has none, being deliberately non-scalable in time.
+    compiled = compile_block_graph(_injection_beside_a_column(), FIXED_BULK_CONVENTION)
+    circuit = compiled.generate_stim_circuit(k)
+    # Raises if any detector is non-deterministic in the noiseless circuit.
+    _without_observables(circuit).detector_error_model()
+
+
+@pytest.mark.parametrize("k", _KS)
+def test_the_encoder_runs_at_the_end_of_the_slice(k: int) -> None:
+    # End-aligned, so the encoder is the second-to-last round of the z-slice
+    # rather than its first: the injected state is not fault-tolerantly encoded,
+    # and every round it is held for is exposure.
+    compiled = compile_block_graph(_injection_beside_a_column(), FIXED_BULK_CONVENTION)
+    circuit = compiled.generate_stim_circuit(k)
+    moments = str(circuit).split("TICK")
+    injected = [
+        index
+        for index, moment in enumerate(moments)
+        if any(line.strip().split()[:1] == ["S"] for line in moment.splitlines())
+    ]
+    assert len(injected) == 1
+    # The neighbour's rounds of the same slice come first, so the encoder cannot
+    # be at the very beginning.
+    assert injected[0] > 0
+
+
+@pytest.mark.parametrize("k", _KS)
+def test_the_injection_patch_is_absent_from_the_leading_rounds(k: int) -> None:
+    # The measure of end-alignment: the injection patch is measured in exactly one
+    # round of its own z-slice, not in all ``2k+1`` of them. Compare against the
+    # same graph with the injection cube replaced by an ordinary memory cube,
+    # which does occupy every round.
+    beside = compile_block_graph(_injection_beside_a_column(), FIXED_BULK_CONVENTION)
+    ordinary = _injection_beside_a_column().to_dict()
+    for cube in ordinary["cubes"]:
+        if cube["kind"] == "I":
+            cube["kind"] = "XZX"
+            cube.pop("state", None)
+    full_height = compile_block_graph(BlockGraph.from_dict(ordinary), FIXED_BULK_CONVENTION)
+    saved = (
+        full_height.generate_stim_circuit(k).num_measurements
+        - beside.generate_stim_circuit(k).num_measurements
+    )
+    distance = 2 * k + 1
+    # Exactly ``2k`` rounds skipped, each of which would have measured every
+    # ancilla of the patch. Nothing else moves: the ordinary cube's own final
+    # round is absorbed by the temporal pipe above it, just as the injection
+    # block's is.
+    assert saved == 2 * k * (distance**2 - 1)
+
+
+@pytest.mark.parametrize("k", _KS)
+def test_noiseless_injection_still_finds_a_late_encoder(k: int) -> None:
+    # The encoder is no longer the first round, which used to raise: the moment
+    # indices are computed by walking the tree, so preceding rounds are fine as
+    # long as none of them is a ``REPEAT`` block.
+    compiled = compile_block_graph(_injection_beside_a_column(), FIXED_BULK_CONVENTION)
+    noise = NoiseModel.uniform_depolarizing(1e-3)
+    noisy = compiled.generate_stim_circuit(k, noise_model=noise)
+    exempt = compiled.generate_stim_circuit(k, noise_model=noise, noiseless_injection=True)
+    assert _noise_instruction_count(exempt) < _noise_instruction_count(noisy)
+    # And the exempted moments really are the encoder's: the moment holding the
+    # injected gate carries no noise at all.
+    for moment in str(exempt).split("TICK"):
+        lines = moment.splitlines()
+        if any(line.strip().split()[:1] == ["S"] for line in lines):
+            assert not any(
+                line.strip().startswith(("DEPOLARIZE", "X_ERROR", "Z_ERROR")) for line in lines
+            )
+            break
+    else:  # pragma: no cover
+        pytest.fail("no moment holding the injected gate")
+
+
+@pytest.mark.parametrize("add_polygons", [False, True])
+def test_crumble_url_beside_a_taller_column(add_polygons: bool) -> None:
+    # Two regressions at once: ``generate_crumble_url`` used to call
+    # ``to_layer_tree()`` without ``k``, which a mismatched-schedule slice cannot
+    # be merged without; and the polygon annotator used to refuse a slice mixing
+    # the encoder's raw round with a neighbour's plaquette round.
+    compiled = compile_block_graph(_injection_beside_a_column(), FIXED_BULK_CONVENTION)
+    url = compiled.generate_crumble_url(k=1, add_polygons=add_polygons)
+    assert url.startswith("https://algassert.com/crumble#circuit=")

@@ -203,6 +203,21 @@ class InjectionCubeBlock(Block):
         # ``False``: exactly two of the three dimensions scale.
         return False
 
+    @property
+    @override
+    def acquires_its_qubits(self) -> bool:
+        # The encoder's first moment resets every data qubit of the patch, and
+        # the patch's footprint is the same in both of the block's rounds, so the
+        # strong condition ``Block.acquires_its_qubits`` states is met: nothing of
+        # this block exists before its own first round.
+        #
+        # So when a longer neighbour sets the length of the z-slice, this block is
+        # end-aligned rather than padded with memory rounds. That is also the
+        # better physics: the injected state is not fault-tolerantly encoded, so
+        # every round it is held for is exposure, and injecting as late as
+        # possible hands it to the pipe above one round later.
+        return True
+
     @override
     def with_temporal_borders_replaced(
         self,
@@ -277,10 +292,14 @@ class InjectionMomentFinder(NodeWalker):
     the indices its moments occupy in the circuit
     :meth:`~tqec.compile.tree.node.LayerNode.generate_circuit` produces.
 
-    Only a leading run of encoder leaves can be reported. The generated circuit
-    collapses a repeated layer into a ``REPEAT`` block, so a moment index is only
-    unambiguous before the first such block, and an injection cube is the bottom
-    leaf of its column anyway. Anything else raises rather than quietly returning
+    An encoder may be preceded by other rounds but not by a ``REPEAT`` block. The
+    generated circuit collapses a repeated layer into one, and
+    :meth:`~tqec.utils.noise_model.NoiseModel.noisy_circuit` counts top-level
+    entries, so a block standing for ``r`` rounds advances the moment index by
+    one: past it, no index can be computed. Ordinary preceding rounds are fine,
+    each contributing its own moments, which is what an end-aligned injection
+    cube needs --- a mismatched-schedule z-slice is flattened, so no ``REPEAT``
+    block is emitted for it. Anything else raises rather than quietly returning
     indices that address the wrong moments.
     """
 
@@ -289,7 +308,7 @@ class InjectionMomentFinder(NodeWalker):
         self._k = k
         self._moments = 0
         self._indices: set[int] = set()
-        self._seen_other_leaf = False
+        self._seen_repeat_block = False
 
     @property
     def indices(self) -> frozenset[int]:
@@ -299,6 +318,10 @@ class InjectionMomentFinder(NodeWalker):
     @override
     def visit_node(self, node: LayerNode) -> None:
         if not node.is_leaf:
+            # Pre-order DFS, so a repeated node is visited before the leaf it
+            # repeats: the flag is set by the time that leaf is counted.
+            if node.is_repeated:
+                self._seen_repeat_block = True
             return
         assert isinstance(node._layer, LayoutLayer)
         is_encoder = any(
@@ -312,14 +335,12 @@ class InjectionMomentFinder(NodeWalker):
             )
         count = circuit.get_circuit(include_qubit_coords=False).num_ticks + 1
         if is_encoder:
-            if self._seen_other_leaf:
+            if self._seen_repeat_block:
                 raise NotImplementedError(
                     "Leaving the state-injection encoder noiseless is only "
-                    "supported when it is the first round of the circuit. Here "
-                    "another round precedes it, so its moments cannot be "
-                    "addressed unambiguously."
+                    "supported when no repeated round precedes it. Here one does, "
+                    "and it collapses into a single top-level REPEAT entry, so "
+                    "the encoder's moments cannot be addressed unambiguously."
                 )
             self._indices.update(range(self._moments, self._moments + count))
-        else:
-            self._seen_other_leaf = True
         self._moments += count
