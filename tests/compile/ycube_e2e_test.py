@@ -274,3 +274,17 @@ def test_finished_y_cap_is_absent_from_the_trailing_merged_layers() -> None:
     assert len(positions[0]) == 2
     assert len(positions[-1]) == 1
     assert positions[-1] < positions[0]
+
+
+@pytest.mark.parametrize("add_polygons", [False, True])
+def test_crumble_url_for_a_mismatched_schedule_slice(add_polygons: bool) -> None:
+    """Regression: ``generate_crumble_url`` used to drop ``k``.
+
+    A z-slice whose blocks have mismatched temporal schedules --- a Y cap beside
+    a continuing memory cube --- can only be merged by flattening it at a
+    concrete scaling factor, so ``to_layer_tree()`` with no argument raised. The
+    circuit itself compiled fine, which is what kept this hidden.
+    """
+    compiled = compile_block_graph(_two_y_caps_with_main_column())
+    url = compiled.generate_crumble_url(k=1, add_polygons=add_polygons)
+    assert url.startswith("https://algassert.com/crumble#circuit=")

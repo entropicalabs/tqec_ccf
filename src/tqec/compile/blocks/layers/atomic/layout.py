@@ -174,11 +174,22 @@ class LayoutLayer(BaseLayer):
         for plaquette in plaquettes:
             plaquette.reschedule_measurements(max_schedule)
 
-    def to_template_and_plaquettes(self) -> tuple[LayoutTemplate, Plaquettes]:
+    def to_template_and_plaquettes(
+        self, positions: Iterable[LayoutPosition2D] | None = None
+    ) -> tuple[LayoutTemplate, Plaquettes]:
         """Return an equivalent representation of ``self`` with a template and some plaquettes.
 
+        Args:
+            positions: the positions of ``self`` to represent, or ``None`` to
+                represent all of them. Restricting them is for a caller that can
+                make sense of part of a layer while the rest has no template to
+                offer --- Crumble polygons, which a raw round simply does not
+                have. Note the returned template shifts its own bounding box to
+                the origin, so dropping the position holding the minimum
+                coordinate moves the frame the result is expressed in.
+
         Raises:
-            NotImplementedError: if not all layers composing ``self`` are instances
+            NotImplementedError: if any of the selected layers is not an instance
                 of :class:`~tqec.compile.blocks.layers.atomic.plaquette.PlaquetteLayer`.
 
         Returns:
@@ -187,7 +198,9 @@ class LayoutLayer(BaseLayer):
             circuit representing ``self``.
 
         """
-        return self._compute_template_and_plaquettes(self.layers)
+        if positions is None:
+            return self._compute_template_and_plaquettes(self.layers)
+        return self._compute_template_and_plaquettes({pos: self.layers[pos] for pos in positions})
 
     def _branch_one_layers(self) -> dict[LayoutPosition2D, BaseLayer]:
         """Build branch-``one`` layer map. Falls back to ``self.layers`` at positions

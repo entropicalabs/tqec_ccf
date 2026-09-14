@@ -949,6 +949,10 @@ class TopologicalComputationGraph:
 
         """
         self._require_representable_states("generate_stim_text")
-        return self.to_layer_tree().generate_crumble_url(  # pragma: no cover
+        # ``k`` is needed here, not only by the tree: a z-slice whose blocks have
+        # mismatched temporal schedules (a Y cap or an injection cube beside an
+        # ordinary column) can only be merged by flattening it at a concrete
+        # scaling factor, and ``to_layer_tree`` refuses to guess one.
+        return self.to_layer_tree(k).generate_crumble_url(
             k, manhattan_radius, detector_database, add_polygons=add_polygons
         )
