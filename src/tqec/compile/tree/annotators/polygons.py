@@ -3,11 +3,12 @@ from typing_extensions import override
 from tqec.circuit.qubit import GridQubit
 from tqec.compile.blocks.layers.atomic.layout import LayoutLayer
 from tqec.compile.blocks.layers.atomic.raw import RawCircuitLayer
+from tqec.compile.blocks.positioning import LayoutCubePosition2D
 from tqec.compile.tree.annotations import Polygon
 from tqec.compile.tree.node import LayerNode, NodeWalker
 from tqec.plaquette.rpng.rpng import PauliBasis
 from tqec.utils.array import to2dlist
-from tqec.utils.position import Shift2D
+from tqec.utils.position import BlockPosition2D, Shift2D
 
 
 class AnnotatePolygonOnLayerNode(NodeWalker):
@@ -37,28 +38,17 @@ class AnnotatePolygonOnLayerNode(NodeWalker):
 def generate_polygons_for_layout_layer(layer: LayoutLayer, k: int) -> list[Polygon]:
     """Generate the polygons that might be used to visualise stabilizers in Crumble.
 
-    Raises:
-        NotImplementedError: if the layer mixes a raw round with plaquette rounds
-            at different positions. Such a layer has no single template to read
-            polygons from, and the polygons of the plaquette part would need to
-            be placed in the enclosing layer's frame rather than their own.
-
+    A raw round carries a circuit but no plaquettes, so it contributes no
+    polygons, e.g. a round of the Y-basis measurement cap. Positions holding one are skipped, and the remaining plaquette positions
+    are outlined as usual. A layer that is entirely raw yields no polygons at all,
+    which is right --- a round with no plaquettes has no stabilizers to outline.
     """
-    raw_positions = {
-        pos for pos, sublayer in layer.layers.items() if isinstance(sublayer, RawCircuitLayer)
-    }
-    if raw_positions:
-        # A raw round carries a circuit but no plaquettes, so there are no
-        # stabilizers to outline -- the state-injection encoder, or a round of the
-        # Y-basis measurement cap. Drawing nothing is right; raising is not, since
-        # the polygons are only a visual hint in Crumble.
-        if len(raw_positions) == len(layer.layers):
-            return []
-        raise NotImplementedError(
-            "Cannot generate Crumble polygons for a layer that mixes raw rounds "
-            f"with plaquette rounds; found raw rounds at {sorted(map(str, raw_positions))}."
-        )
-    template, plaquettes = layer.to_template_and_plaquettes()
+    plaquette_positions = [
+        pos for pos, sublayer in layer.layers.items() if not isinstance(sublayer, RawCircuitLayer)
+    ]
+    if not plaquette_positions:
+        return []
+    template, plaquettes = layer.to_template_and_plaquettes(plaquette_positions)
 
     _indices = list(range(1, template.expected_plaquettes_number + 1))
     template_plaquettes = template.instantiate(k, _indices)
@@ -93,8 +83,20 @@ def generate_polygons_for_layout_layer(layer: LayoutLayer, k: int) -> list[Polyg
                     )
                     polygons.append(Polygon(basis, frozenset(q + qubit_offset for q in qubits)))
 
-    # Shift the qubits of the returned scheduled circuit
-    mincube, _ = layer.bounds
+    # Shift the qubits of the returned scheduled circuit.
+    # ``LayoutTemplate`` shifts its own bounding box to the origin, so the frame
+    # to compensate for is the one of the positions actually handed to it. That is
+    # ``layer.bounds`` only while nothing was skipped above, which is why the
+    # minimum is recomputed here rather than read off the layer.
+    template_positions = [
+        pos.to_block_position()
+        for pos in plaquette_positions
+        if isinstance(pos, LayoutCubePosition2D)
+    ]
+    mincube = BlockPosition2D(
+        min(pos.x for pos in template_positions),
+        min(pos.y for pos in template_positions),
+    )
     eshape = layer.element_shape.to_shape_2d(k)
     # See: https://github.com/tqec/tqec/issues/525
     # This is a temporary fix to the above issue, we may need a utility function
