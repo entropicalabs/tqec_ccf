@@ -341,7 +341,7 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
         }
         if raw_by_pos:
             if len(raw_by_pos) == len(node._layer.layers):
-                self._annotate_raw_slice(annotations, list(raw_by_pos.values()))
+                self._annotate_raw_slice(node._layer, annotations, raw_by_pos)
             else:
                 self._annotate_mixed_slice(node._layer, annotations, raw_by_pos)
             return
@@ -461,8 +461,9 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
 
     def _annotate_raw_slice(
         self,
+        layout: LayoutLayer,
         annotations: LayerNodeAnnotations,
-        raw_layers: list[RawCircuitLayer],
+        raw_by_pos: dict[LayoutPosition2D, RawCircuitLayer],
     ) -> None:
         """Handle a leaf whose layer carries a :class:`RawCircuitLayer`.
 
@@ -484,15 +485,16 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
         Any detectors internal to a single round (the final round's stabilizer
         reconstruction) stay inside the round's own circuit.
         """
-        if len(raw_layers) != 1:
+        if len(raw_by_pos) != 1:
             raise TQECError("Only a single RawCircuitLayer per layer is supported.")
         assert annotations.circuit is not None
-        raw_layer = raw_layers[0]
+        pos, raw_layer = next(iter(raw_by_pos.items()))
         raw_records = MeasurementRecordsMap.from_scheduled_circuit(annotations.circuit)
         raw_total = annotations.circuit.get_circuit().num_measurements
 
-        # A lone Y cap occupies block position (0, 0) of its layer, so no shift.
-        self._emit_raw_seam(annotations, raw_layer, raw_records, raw_total, (0, 0))
+        self._emit_raw_seam(
+            annotations, raw_layer, raw_records, raw_total, self._raw_shift(layout, pos)
+        )
 
         # Push this slice's own records so later rounds can look back through it.
         # A raw round has neither template nor plaquettes, hence the ``None``s:
@@ -503,15 +505,27 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
     def _raw_shift(self, layout: LayoutLayer, pos: LayoutPosition2D) -> Coord2D:
         """Return the qubit-coordinate offset of the raw layer at ``pos``.
 
-        The offset places the layer within its enclosing :class:`LayoutLayer`,
-        and mirrors ``LayoutLayer._mixed_to_circuit``.
+        A raw round's flow specs are written in *patch-local* coordinates --- the
+        standalone patch of :func:`xtop_qubit_patch`, starting at the origin ---
+        while the measurement records they are resolved against are keyed by the
+        circuit's qubit coordinates. This is the offset between the two, and it is
+        **absolute**: a block at position ``bp`` occupies qubit coordinates
+        starting at ``bp * (eshape - 1)``, whatever else the layer contains.
+
+        Deliberately *not* relative to ``layout.bounds``. An earlier revision
+        subtracted the layer's minimum block position, which agrees with the
+        absolute offset only when the slice happens to contain a block at the
+        computation's minimum ``x``/``y``. A Y cap alone in its z-slice --- a
+        logical qubit that moves sideways and is then capped --- has a slice
+        minimum equal to its own position, so the offset collapsed to zero and
+        every seam detector looked its ancillas up one block pitch away from
+        where they were measured.
         """
         if not isinstance(pos, LayoutCubePosition2D):
             raise TQECError("A RawCircuitLayer is only supported at a cube position.")
         eshape = layout.element_shape.to_shape_2d(self._k)
-        mincube, _ = layout.bounds
         bp = pos.to_block_position()
-        return (bp.x - mincube.x) * (eshape.x - 1), (bp.y - mincube.y) * (eshape.y - 1)
+        return bp.x * (eshape.x - 1), bp.y * (eshape.y - 1)
 
     def _emit_raw_seam(
         self,

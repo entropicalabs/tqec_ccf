@@ -8,6 +8,8 @@ property).
 
 from __future__ import annotations
 
+from itertools import pairwise
+
 import pytest
 import stim
 
@@ -520,3 +522,68 @@ def test_crumble_url_for_a_mismatched_schedule_slice(add_polygons: bool) -> None
     compiled = compile_block_graph(_two_y_caps_with_main_column())
     url = compiled.generate_crumble_url(k=1, add_polygons=add_polygons)
     assert url.startswith("https://algassert.com/crumble#circuit=")
+
+
+def _capped_column_at(x: int, kind: str = "ZXZ") -> BlockGraph:
+    """Build a Y-capped column whose blocks sit at block position ``x``."""
+    g = BlockGraph(f"capped column at x={x}")
+    g.add_cube(Position3D(x, 0, 0), ZXCube.from_str(kind))
+    g.add_cube(Position3D(x, 0, 1), LeafCubeKind.Y_HALF_CUBE)
+    g.add_pipe(Position3D(x, 0, 0), Position3D(x, 0, 1))
+    return g
+
+
+def _moved_then_capped(x: int = 0, kind: str = "ZXZ") -> BlockGraph:
+    """Move the logical qubit one block sideways, then cap it.
+
+    The cap ends up **alone** in its z-slice, at a block position that is not the
+    origin -- the case the seam-detector coordinate frame used to get wrong.
+    """
+    g = BlockGraph(f"y-move at x={x}")
+    cubes = [
+        (Position3D(x, 0, 0), ZXCube.from_str(kind)),
+        (Position3D(x, 0, 1), ZXCube.from_str(kind)),
+        (Position3D(x + 1, 0, 1), ZXCube.from_str(kind)),
+        (Position3D(x + 1, 0, 2), LeafCubeKind.Y_HALF_CUBE),
+    ]
+    for pos, k in cubes:
+        g.add_cube(pos, k)
+    for (p1, _), (p2, _) in pairwise(cubes):
+        g.add_pipe(p1, p2)
+    return g
+
+
+@pytest.mark.parametrize("x", [0, 1, 3])
+def test_y_cap_column_away_from_the_origin(x: int) -> None:
+    """A Y-capped column compiles wherever it sits in the block grid.
+
+    Regression: the cap's seam detectors were resolved against a coordinate frame
+    computed relative to the z-slice's own bounding box, while the measurement
+    records are keyed by absolute qubit coordinates. The two agree only when the
+    slice contains a block at the computation's minimum x/y, so a column at
+    ``x >= 1`` raised ``KeyError`` on an ancilla one block pitch away.
+    """
+    circuit = compile_block_graph(_capped_column_at(x)).generate_stim_circuit(k=1)
+    circuit.detector_error_model(decompose_errors=False)
+
+
+@pytest.mark.parametrize("kind", ["ZXZ", "XZX"])
+@pytest.mark.parametrize("k", [1, 2])
+def test_moving_a_logical_qubit_before_capping_it(k: int, kind: str) -> None:
+    """A qubit that moves sideways and is then Y-capped compiles cleanly.
+
+    The cap is the only block in its z-slice and is not at the origin, so its
+    slice minimum equals its own position and the old slice-relative offset
+    collapsed to zero. ``build_yy``-style graphs never caught this: there the cap
+    always shares its slice with the main column at x=0, which makes the
+    slice-relative and absolute frames coincide.
+    """
+    circuit = compile_block_graph(_moved_then_capped(kind=kind)).generate_stim_circuit(k=k)
+    circuit.detector_error_model(decompose_errors=False)
+
+
+@pytest.mark.parametrize("x", [0, 1, 2])
+def test_moved_and_capped_column_away_from_the_origin(x: int) -> None:
+    """The moved-then-capped column is position-independent too."""
+    circuit = compile_block_graph(_moved_then_capped(x=x)).generate_stim_circuit(k=1)
+    circuit.detector_error_model(decompose_errors=False)
