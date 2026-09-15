@@ -80,10 +80,15 @@ def _annotate_y_cube_readouts(
             if not isinstance(pos, LayoutCubePosition2D):
                 raise TQECError("A RawCircuitLayer is only supported at a cube position.")
             eshape = layout.element_shape.to_shape_2d(k)
-            mincube, _ = layout.bounds
             bp = pos.to_block_position()
-            dx = (bp.x - mincube.x) * (eshape.x - 1)
-            dy = (bp.y - mincube.y) * (eshape.y - 1)
+            # The spec is in patch-local coordinates while ``records`` below is
+            # keyed by the circuit's qubit coordinates, which are absolute: a
+            # block at ``bp`` starts at ``bp * (eshape - 1)``. Offsetting by the
+            # position *relative* to ``layout.bounds`` instead agrees only when
+            # this layer's minimum block position is zero, and silently selects
+            # the wrong measurements otherwise.
+            dx = bp.x * (eshape.x - 1)
+            dy = bp.y * (eshape.y - 1)
             qubits = {GridQubit(c[0] + dx, c[1] + dy) for c in spec}
             circuit = leaf.get_annotations(k).circuit
             assert circuit is not None

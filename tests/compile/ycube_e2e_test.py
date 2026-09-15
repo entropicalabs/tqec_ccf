@@ -385,3 +385,45 @@ def test_mixed_slice_away_from_the_origin(x: int) -> None:
     """
     circuit = compile_block_graph(_cap_beside_a_column_at(x)).generate_stim_circuit(k=1)
     circuit.detector_error_model(decompose_errors=False)
+
+
+def _two_y_caps_at(x0: int, kind: str = "ZXZ") -> BlockGraph:
+    """Build the two-cap closed-surface graph translated to block column ``x0``."""
+    g = BlockGraph(f"two_y_caps at x={x0}")
+    a, b = x0, x0 + 1
+    spine = [Position3D(a, 0, i) for i in range(5)]
+    c1, c3 = Position3D(b, 0, 1), Position3D(b, 0, 3)
+    y2, y4 = Position3D(b, 0, 2), Position3D(b, 0, 4)
+    for p in spine:
+        g.add_cube(p, ZXCube.from_str(kind))
+    g.add_cube(c1, ZXCube.from_str(kind))
+    g.add_cube(c3, ZXCube.from_str(kind))
+    g.add_cube(y2, LeafCubeKind.Y_HALF_CUBE)
+    g.add_cube(y4, LeafCubeKind.Y_HALF_CUBE)
+    for i in range(4):
+        g.add_pipe(spine[i], spine[i + 1])
+    g.add_pipe(spine[1], c1)
+    g.add_pipe(spine[3], c3)
+    g.add_pipe(c1, y2)
+    g.add_pipe(c3, y4)
+    return g
+
+
+@pytest.mark.parametrize("x0", [0, 1, 2])
+def test_y_cap_observable_away_from_the_origin(x0: int) -> None:
+    """The closed surface lowers to the same deterministic observable at any x.
+
+    Regression: the observable annotator offset the cap's ``observable_spec`` by
+    the cap's position *relative* to its layer's bounds, then looked the result up
+    in a measurement-record map keyed by absolute qubit coordinates. At ``x0 = 0``
+    the two agree; translate the graph and the observable silently picked up the
+    wrong measurements, turning a deterministic readout into a coin flip.
+    """
+    graph = _two_y_caps_at(x0)
+    surfaces = graph.find_correlation_surfaces()
+    assert len(surfaces) == 1
+    circuit = compile_block_graph(graph, observables=surfaces).generate_stim_circuit(k=1)
+    assert circuit.num_observables == 1
+    circuit.detector_error_model(decompose_errors=False)
+    _, observables = circuit.compile_detector_sampler().sample(500, separate_observables=True)
+    assert len({bool(v) for v in observables.reshape(-1)}) == 1
