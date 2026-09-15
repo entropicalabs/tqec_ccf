@@ -6,9 +6,12 @@ emits qubits in identical order across branches (basis ``MX`` vs ``M`` may
 differ).  This is the prerequisite that lets ``rec[-k]`` references in
 downstream detectors / observables stay branch-independent.
 
-Marked ``xfail`` while the CEO pass is unimplemented.  When the CEO sorter
-lands these should flip to pass; ``xfail(strict=False)`` keeps that flip from
-failing tests on the diagnostic side.
+Every :class:`ConditionalLeafCubeKind` pair is expected to satisfy both
+properties.  ``ZXZ_ZXX`` was once marked ``xfail`` because the enum member's
+value was a typo --- a *spatial* swap ``(ZXZ, XXZ)``, which changes the
+stabilizer set and so the measurement counts.  It was corrected to the
+``(ZXZ, ZXX)`` temporal-basis flip its name and docstring describe, and now
+behaves exactly like its three siblings.
 """
 
 from __future__ import annotations
@@ -89,20 +92,7 @@ def _format_diff(
     return "\n".join(lines) if lines else "(no per-timestep diff)"
 
 
-_CEO_PAIRS = [
-    pytest.param(
-        k.name,
-        marks=pytest.mark.xfail(
-            reason="ZXZ_ZXX baseline produces unequal-length measurement schedules "
-            "(33 vs 31), so CEO qubit-order alignment also fails until "
-            "equal-meas-count is addressed.",
-            strict=True,
-        )
-        if k.name == "ZXZ_ZXX"
-        else (),
-    )
-    for k in ConditionalLeafCubeKind
-]
+_CEO_PAIRS = [k.name for k in ConditionalLeafCubeKind]
 
 
 @pytest.mark.parametrize("pair_name", _CEO_PAIRS)
