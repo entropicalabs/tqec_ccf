@@ -466,9 +466,17 @@ class LayoutLayer(BaseLayer):
         merged moment-by-moment (schedule-aligned), so a shorter raw round simply
         contributes no operations to the trailing moments of a longer plaquette
         round (and vice versa).
+
+        That common frame is **absolute**: a block at position ``bp`` occupies
+        qubit coordinates starting at ``bp * (eshape - 1)``. The plaquette path
+        already lands there, since :meth:`to_circuit` shifts its template-relative
+        output by its own bounds minimum. An earlier revision shifted the raw
+        circuits by the position *relative* to ``self.bounds`` instead, which
+        agrees only when this layer's minimum block position is zero: with a
+        minimum of one, a plaquette cube at ``bp = 1`` and a raw cube at
+        ``bp = 2`` both landed on the same qubits.
         """
         eshape = self.element_shape.to_shape_2d(k)
-        mincube, _ = self.bounds
 
         circuits: list[ScheduledCircuit] = []
         plaquette_layers = {
@@ -487,8 +495,8 @@ class LayoutLayer(BaseLayer):
             assert isinstance(raw_layer, RawCircuitLayer)
             block_pos = pos.to_block_position()
             shift = Shift2D(
-                (block_pos.x - mincube.x) * (eshape.x - 1),
-                (block_pos.y - mincube.y) * (eshape.y - 1),
+                block_pos.x * (eshape.x - 1),
+                block_pos.y * (eshape.y - 1),
             )
             circuits.append(raw_layer.circuit_factory(k).map_to_qubits(lambda q: q + shift))
 
