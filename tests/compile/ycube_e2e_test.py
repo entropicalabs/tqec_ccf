@@ -587,3 +587,33 @@ def test_moved_and_capped_column_away_from_the_origin(x: int) -> None:
     """The moved-then-capped column is position-independent too."""
     circuit = compile_block_graph(_moved_then_capped(x=x)).generate_stim_circuit(k=1)
     circuit.detector_error_model(decompose_errors=False)
+
+
+def _cap_beside_a_column_at(x: int, kind: str = "ZXZ") -> BlockGraph:
+    """Build a Y cap sharing its z-slice with a continuing column, at block ``x``."""
+    g = BlockGraph(f"cap beside column at x={x}")
+    a, b = x, x + 1
+    for z in range(3):
+        g.add_cube(Position3D(a, 0, z), ZXCube.from_str(kind))
+    g.add_cube(Position3D(b, 0, 1), ZXCube.from_str(kind))
+    g.add_cube(Position3D(b, 0, 2), LeafCubeKind.Y_HALF_CUBE)
+    g.add_pipe(Position3D(a, 0, 0), Position3D(a, 0, 1))
+    g.add_pipe(Position3D(a, 0, 1), Position3D(a, 0, 2))
+    g.add_pipe(Position3D(a, 0, 1), Position3D(b, 0, 1))
+    g.add_pipe(Position3D(b, 0, 1), Position3D(b, 0, 2))
+    return g
+
+
+@pytest.mark.parametrize("x", [0, 1, 2])
+def test_mixed_slice_away_from_the_origin(x: int) -> None:
+    """A Y cap coexisting with a memory cube compiles wherever the pair sits.
+
+    Regression: ``LayoutLayer._mixed_to_circuit`` placed its plaquette sublayers
+    in the absolute qubit frame but its raw sublayers relative to the layer's own
+    bounds. With a layer minimum of one, the plaquette cube at ``bp = 1`` and the
+    raw cube at ``bp = 2`` were emitted onto the same qubits
+    (``MultipleOperationsOnSameQubitError``); with a minimum of two the cap landed
+    a block away from where its seam detectors looked for it.
+    """
+    circuit = compile_block_graph(_cap_beside_a_column_at(x)).generate_stim_circuit(k=1)
+    circuit.detector_error_model(decompose_errors=False)
