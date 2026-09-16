@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import cached_property, reduce
 from itertools import chain
@@ -193,6 +193,10 @@ class CorrelationSurface:
         self,
     ) -> tuple[dict[Position3D, dict[Position3D, list[ZXEdge]]], dict[Position3D, set[Basis]]]:
         """Internal index mapping positions to active bases and incident edges."""
+        if self.is_single_node:
+            edge = next(iter(self.span))
+            pos = edge.u.position
+            return {pos: {pos: [edge]}}, {pos: {edge.u.basis}}
         edges, bases = {}, {}
         for edge in self.span:
             u, v = edge.u.position, edge.v.position
@@ -250,7 +254,7 @@ class CorrelationSurface:
         """Return the set of edges incident to the position in the correlation surface."""
         return set(chain.from_iterable(self._graph_view[0][position].values()))
 
-    def external_stabilizer(self, io_ports: Iterable[Position3D]) -> str:
+    def external_stabilizer(self, io_ports: list[Position3D]) -> str:
         """Get the Pauli operator supported on the given input/output ports.
 
         Args:
@@ -338,6 +342,13 @@ class CorrelationSurface:
         from tqec.interop.pyzx.utils import is_hadamard  # noqa: PLC0415
 
         p2v = graph.p2v
+        if self.is_single_node:
+            edge = next(iter(self.span))
+            u_id = p2v[edge.u.position]
+            surface = _CorrelationSurface()
+            surface.add_pauli_to_edge((u_id, u_id), edge.u.basis.to_pauli(), False)
+            return surface
+
         zx_graph = graph.g
         surface = _CorrelationSurface()
         for pos_u, edges in self._graph_view[0].items():
@@ -421,7 +432,8 @@ def find_correlation_surfaces(
         node = ZXNode(graph[v], zx_to_basis(zx_graph, v).flipped())
         return [CorrelationSurface(frozenset({ZXEdge(node, node)}))]
 
-    if not any(len(zx_graph.neighbors(v)) == 1 for v in zx_graph.vertices()):
+    leaves = {v for v in zx_graph.vertices() if zx_graph.vertex_degree(v) == 1}
+    if not leaves:
         raise TQECError(
             "The graph must contain at least one leaf node to find correlation surfaces."
         )

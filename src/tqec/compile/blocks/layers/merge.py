@@ -341,7 +341,7 @@ def merge_sequenced_layers(
                 cond_composed_at_t[pos] = alt
             merged_layers.append(
                 merge_composed_layers(
-                    cast(dict[LayoutPosition2D, BaseComposedLayer], layers_at_timestep),
+                    layers_at_timestep,
                     scalable_qubit_shape,
                     conditional_layers=cond_composed_at_t or None,
                 )
