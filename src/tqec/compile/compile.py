@@ -22,6 +22,7 @@ from tqec.computation.block_graph import BlockGraph
 from tqec.computation.correlation import (
     ConditionalCorrelationSurface,
     CorrelationSurface,
+    find_correlation_surfaces,
 )
 from tqec.computation.cube import Cube
 from tqec.templates.base import RectangularTemplate
@@ -276,7 +277,13 @@ def compile_block_graph(
     cond_obs_included: list[ConditionalAbstractObservable] = []
     if observables is not None:
         if observables == "auto":
-            observables = block_graph.find_correlation_surfaces()
+            # Deliberately not ``block_graph.find_correlation_surfaces()``: that
+            # raises when the graph has no deterministic observable, which is the
+            # right answer for a user asking for one explicitly but not here.
+            # ``"auto"`` means "include whatever deterministic observables exist",
+            # and a computation may legitimately have none -- a Y-basis
+            # measurement cap reads out at random by construction.
+            observables = find_correlation_surfaces(block_graph.to_zx_graph())
         else:
             observables = [cs.shift_by(dz=-minz) for cs in observables]
         include_temporal_hadamard_pipes = convention.name == "fixed_bulk"

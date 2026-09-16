@@ -37,7 +37,7 @@ def test_generate_conditional_circuit_returns_conditional_circuit_with_ifblocks(
         k=1,
         condition_recs={pos.z: [-1] for pos in cg._conditional_blocks},
         min_z=0,
-        do_not_use_database=True,
+        database_path=None,
     )
     assert isinstance(cc, ConditionalCircuit)
     if_blocks = [e for e in cc.entries if isinstance(e, IfBlock)]
@@ -64,7 +64,7 @@ def test_generate_conditional_circuit_emits_detector_ifblock() -> None:
         k=1,
         condition_recs={pos.z: [-1] for pos in cg._conditional_blocks},
         min_z=0,
-        do_not_use_database=True,
+        database_path=None,
     )
     detector_ifblocks = [
         e
@@ -89,7 +89,7 @@ def test_generate_conditional_circuit_text_renders_ifblock_syntax() -> None:
         k=1,
         condition_recs={pos.z: [-1] for pos in cg._conditional_blocks},
         min_z=0,
-        do_not_use_database=True,
+        database_path=None,
     )
     text = cc.to_stim_text()
     assert "IF(rec[-1])" in text
