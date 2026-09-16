@@ -15,7 +15,15 @@ from tqec.compile.blocks.positioning import (
     LayoutPipePosition2D,
     LayoutPosition2D,
 )
-from tqec.compile.generation import generate_circuit
+from tqec.compile.conditional.circuit import (
+    CircuitEntry,
+    ConditionalCircuit,
+    IfBlock,
+)
+from tqec.compile.generation import (
+    generate_circuit,
+    generate_per_branch_circuit_from_instantiation,
+)
 from tqec.plaquette.plaquette import Plaquette, Plaquettes
 from tqec.templates.enums import TemplateBorder
 from tqec.templates.layout import LayoutTemplate
@@ -40,6 +48,7 @@ class LayoutLayer(BaseLayer):
         self,
         layers: dict[LayoutPosition2D, BaseLayer],
         element_shape: PhysicalQubitScalable2D,
+        conditional_layers: dict[LayoutPosition2D, BaseLayer] | None = None,
     ) -> None:
         """Glue several other layers together on a 2-dimensional grid.
 
@@ -50,6 +59,12 @@ class LayoutLayer(BaseLayer):
                 The mapping is expected to represent a connected computation.
             element_shape: scalable shape (in qubit coordinates) of each entry
                 in the provided ``layers``.
+            conditional_layers: optional branch-``one`` alternate layers for
+                positions that originated from a
+                :class:`~tqec.compile.blocks.block.ConditionalBlock` cube.
+                ``layers[pos]`` always carries the zero-branch slice; this
+                dict carries the parallel one-branch slice at the same
+                position. Empty / ``None`` for non-conditional layers.
 
         Raises:
             TQECError: if ``layers`` is empty.
@@ -59,6 +74,9 @@ class LayoutLayer(BaseLayer):
         super().__init__(frozenset())
         self._layers = layers
         self._element_shape = element_shape
+        self._conditional_layers: dict[LayoutPosition2D, BaseLayer] = (
+            dict(conditional_layers) if conditional_layers else {}
+        )
         self._post_init_check()
 
     def _post_init_check(self) -> None:
@@ -76,6 +94,16 @@ class LayoutLayer(BaseLayer):
     def element_shape(self) -> PhysicalQubitScalable2D:
         """Return the scalable shape of each stored elements."""
         return self._element_shape
+
+    @property
+    def conditional_layers(self) -> dict[LayoutPosition2D, BaseLayer]:
+        """Branch-``one`` alternate layers for positions that originated from
+        a :class:`~tqec.compile.blocks.block.ConditionalBlock` cube.
+
+        Co-indexed with ``self.layers`` (which holds the zero branch).
+        Empty when no conditional cubes feed this layer.
+        """
+        return self._conditional_layers
 
     @cached_property
     def bounds(self) -> tuple[BlockPosition2D, BlockPosition2D]:
@@ -119,6 +147,7 @@ class LayoutLayer(BaseLayer):
             isinstance(value, LayoutLayer)
             and self.element_shape == value.element_shape
             and self.layers == value.layers
+            and self._conditional_layers == value._conditional_layers
         )
 
     def __hash__(self) -> int:
@@ -186,14 +215,28 @@ class LayoutLayer(BaseLayer):
             circuit representing ``self``.
 
         """
-        if not contains_only_plaquette_layers(self.layers):
+        return self._compute_template_and_plaquettes(self.layers)
+
+    def _branch_one_layers(self) -> dict[LayoutPosition2D, BaseLayer]:
+        """Build branch-``one`` layer map. Falls back to ``self.layers`` at positions
+        with no conditional alternate.
+        """
+        return {
+            pos: self._conditional_layers.get(pos, layer)
+            for pos, layer in self.layers.items()
+        }
+
+    def _compute_template_and_plaquettes(
+        self, layers: dict[LayoutPosition2D, BaseLayer]
+    ) -> tuple[LayoutTemplate, Plaquettes]:
+        if not contains_only_plaquette_layers(layers):
             raise NotImplementedError(
                 f"Found a layer that is not an instance of {PlaquetteLayer.__name__}. "
                 "Detector computation is not implemented (yet) for this case."
             )
         cubes: dict[BlockPosition2D, PlaquetteLayer] = {
             pos.to_block_position(): layer
-            for pos, layer in self.layers.items()
+            for pos, layer in layers.items()
             if isinstance(pos, LayoutCubePosition2D) and isinstance(layer, PlaquetteLayer)
         }
         template_dict: Final = {pos: layer.template for pos, layer in cubes.items()}
@@ -202,7 +245,7 @@ class LayoutLayer(BaseLayer):
         # Add plaquettes from each pipe to the plaquette_dict.
         pipes: dict[tuple[BlockPosition2D, BlockPosition2D], PlaquetteLayer] = {
             pos.to_pipe(): layer
-            for pos, layer in self.layers.items()
+            for pos, layer in layers.items()
             if isinstance(pos, LayoutPipePosition2D) and isinstance(layer, PlaquetteLayer)
         }
         for (u, v), pipe_layer in pipes.items():
@@ -241,6 +284,117 @@ class LayoutLayer(BaseLayer):
         template = LayoutTemplate(template_dict)
         return template, template.get_global_plaquettes(plaquettes_dict)
 
+    def to_conditional_circuit(
+        self,
+        k: int,
+        condition_recs: list[int],
+        reschedule_measurements: bool = True,
+    ) -> ConditionalCircuit:
+        """Return the conditional quantum circuit representing the layer.
+
+        Requires :attr:`conditional_layers` to be non-empty. The branch-zero
+        slice is drawn from :attr:`layers`; the branch-one slice replaces only
+        positions present in :attr:`conditional_layers`. Both branches share the
+        same template (Equal Measurement Count + CEO assumption); only
+        per-plaquette circuits at conditional positions differ.
+
+        The returned :class:`ConditionalCircuit` carries plain
+        :class:`stim.CircuitInstruction` entries at slots where both branches
+        agree and :class:`IfBlock` entries (with
+        ``then_body=branch_one``, ``else_body=branch_zero``) at divergent CEO
+        slots. ``TICK`` instructions separate adjacent moments.
+
+        Args:
+            k: scaling factor.
+            condition_recs: ``stim`` record offsets whose XOR selects the branch.
+            reschedule_measurements: as in :meth:`to_circuit`.
+
+        Returns:
+            a :class:`ConditionalCircuit` representing the layer.
+
+        Raises:
+            TQECError: if :attr:`conditional_layers` is empty.
+
+        """
+        if not self._conditional_layers:
+            raise TQECError(
+                f"{type(self).__name__}.to_conditional_circuit requires a "
+                "non-empty conditional_layers map; use to_circuit for the "
+                "non-conditional path."
+            )
+        if reschedule_measurements:
+            self._reschedule_per_branch_measurements()
+        template_zero, plaquettes_zero = self._compute_template_and_plaquettes(self.layers)
+        template_one, plaquettes_one = self._compute_template_and_plaquettes(
+            self._branch_one_layers()
+        )
+        # Templates must match exactly (only per-plaquette content may differ).
+        if template_zero != template_one:
+            raise TQECError(
+                f"{type(self).__name__}.to_conditional_circuit: branches "
+                "disagree on template structure; Equal Measurement Count "
+                "violated."
+            )
+        plaquette_to_block: dict[int, BlockPosition2D] = {
+            global_idx: pos
+            for pos, local_to_global in template_zero.get_indices_map_for_instantiation().items()
+            for global_idx in local_to_global.values()
+        }
+        _indices = list(range(1, template_zero.expected_plaquettes_number + 1))
+        instantiation = template_zero.instantiate(k, _indices)
+        increments = template_zero.get_increments()
+        moments_entries, qubit_map = generate_per_branch_circuit_from_instantiation(
+            instantiation,
+            plaquettes_zero,
+            plaquettes_one,
+            increments,
+            plaquette_to_block=plaquette_to_block,
+            condition_recs=condition_recs,
+        )
+        # Shift entries into the layer's qubit coordinate frame.
+        from tqec.circuit.qubit import GridQubit
+        from tqec.circuit.qubit_map import QubitMap
+
+        mincube, _ = self.bounds
+        eshape = self.element_shape.to_shape_2d(k)
+        shift_x = mincube.x * (eshape.x - 1)
+        shift_y = mincube.y * (eshape.y - 1)
+        shifted_qubit_map = QubitMap(
+            {
+                idx: GridQubit(q.x + shift_x, q.y + shift_y)
+                for idx, q in qubit_map.i2q.items()
+            }
+        )
+        out = ConditionalCircuit(qubit_map=shifted_qubit_map)
+        for idx in sorted(shifted_qubit_map.i2q.keys()):
+            q = shifted_qubit_map.i2q[idx]
+            out.append("QUBIT_COORDS", [idx], [float(q.x), float(q.y)])
+        for moment_idx, entries in enumerate(moments_entries):
+            if moment_idx > 0:
+                out.append("TICK")
+            for entry in entries:
+                if isinstance(entry, IfBlock):
+                    out.append_if(entry)
+                else:
+                    out.append_instruction(entry)
+        return out
+
+    def _reschedule_per_branch_measurements(self) -> None:
+        """Sync both branches' plaquette schedules to the same max-schedule,
+        the conditional analogue of :meth:`reschedule_measurements`."""
+        all_plaquettes = []
+        for layer in self.layers.values():
+            if isinstance(layer, PlaquetteLayer):
+                all_plaquettes.extend(layer.plaquettes.collection.values())
+        for layer in self._conditional_layers.values():
+            if isinstance(layer, PlaquetteLayer):
+                all_plaquettes.extend(layer.plaquettes.collection.values())
+        if not all_plaquettes:
+            return
+        max_schedule = max(p.circuit.schedule.max_schedule for p in all_plaquettes)
+        for p in all_plaquettes:
+            p.reschedule_measurements(max_schedule)
+
     def to_circuit(self, k: int, reschedule_measurements: bool = True) -> ScheduledCircuit:
         """Return the quantum circuit representing the layer.
 
@@ -258,7 +412,17 @@ class LayoutLayer(BaseLayer):
         if reschedule_measurements:
             self.reschedule_measurements()
         template, plaquettes = self.to_template_and_plaquettes()
-        scheduled_circuit = generate_circuit(template, k, plaquettes)
+        # Reverse-map global plaquette indices back to their owning cube
+        # BlockPosition2D so the Canonical Emission Order pass downstream can
+        # group targets by template-of-origin.
+        plaquette_to_block: dict[int, BlockPosition2D] = {
+            global_idx: pos
+            for pos, local_to_global in template.get_indices_map_for_instantiation().items()
+            for global_idx in local_to_global.values()
+        }
+        scheduled_circuit = generate_circuit(
+            template, k, plaquettes, plaquette_to_block=plaquette_to_block
+        )
         # Shift the qubits of the returned scheduled circuit
         mincube, _ = self.bounds
         eshape = self.element_shape.to_shape_2d(k)

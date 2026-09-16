@@ -6,7 +6,7 @@ import numpy.typing as npt
 
 from tqec.computation.block_graph import BlockGraph
 from tqec.computation.correlation import CorrelationSurface, ZXEdge
-from tqec.computation.cube import ZXCube
+from tqec.computation.cube import ConditionalLeafCubeKind, ZXCube
 from tqec.interop.collada.read_write import _Transformation
 from tqec.utils.enums import Basis
 from tqec.utils.position import Direction3D, FloatPosition3D, Position3D
@@ -45,11 +45,52 @@ class CorrelationSurfaceTransformationHelper:
             # Do not add surfaces in ports or Y Half Cubes
             if cube.is_port or cube.is_y_cube:
                 continue
+            # Conditional leaf cubes have a branch-dependent in-cube geometry, so the
+            # generic ZXCube logic does not apply. The surface piece keeps its basis
+            # color; only the cube's flipping (top) wall is drawn gray, and that is
+            # handled when rendering the cube itself.
+            if isinstance(cube.kind, ConditionalLeafCubeKind):
+                transformations.extend(
+                    self._compute_conditional_cube_transformations(
+                        pos, correlation_surface.edges_at(pos)
+                    )
+                )
+                continue
             transformations.extend(
                 self._compute_cube_transformations(
                     pos,
                     correlation_surface.edges_at(pos),
                     correlation_surface.bases_at(pos),
+                )
+            )
+        return transformations
+
+    def _compute_conditional_cube_transformations(
+        self,
+        v: Position3D,
+        correlation_edges: set[ZXEdge],
+    ) -> list[TransformationResult]:
+        """Compute the in-cube surface pieces for a conditional leaf cube.
+
+        A ``ConditionalLeafCubeKind`` only appears at the leaves of the block graph,
+        so at most one correlation edge touches it. The generic ``ZXCube`` logic
+        cannot be used because the in-cube geometry is branch-dependent, so the piece
+        is drawn as a single square following the plane of the incident pipe's
+        surface, keeping the correlation basis color.
+        """
+        scaled_pos = self._scale_position(v)
+        transformations: list[TransformationResult] = []
+        for edge in correlation_edges:
+            normal_direction = self._surface_normal_direction(edge)
+            translation = scaled_pos.shift_in_direction(normal_direction, 0.5)
+            transformations.append(
+                (
+                    edge.u.basis,
+                    _Transformation(
+                        translation=translation.as_array(),
+                        rotation=_rotation_to_plane(normal_direction),
+                        scale=np.ones(3, dtype=np.float32),
+                    ),
                 )
             )
         return transformations

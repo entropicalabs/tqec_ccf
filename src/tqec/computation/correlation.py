@@ -90,6 +90,75 @@ class ZXEdge(NamedTuple):
 
 
 @dataclass(frozen=True)
+class ConditionalCorrelationSurface:
+    """A truth-table-indexed observable, one CorrelationSurface per outcome of N conditional cubes.
+
+    Attributes:
+        conditions: the N condition correlation surfaces; each must equal the
+            ``condition`` attribute of exactly one conditional cube in the
+            BlockGraph. The order of this tuple defines the bit order of the
+            ``resolutions`` keys.
+        resolutions: full truth table — exactly ``2 ** len(conditions)`` entries,
+            keyed by every tuple in ``{False, True} ** N``. ``resolutions[key]``
+            is the observable to include when condition ``i`` resolves to
+            ``key[i]`` for all ``i``.
+
+    The compiler currently only supports the **flat-XOR decomposable** case:
+    each resolution must equal ``S ⊕ XOR_i (key[i] · Δ_i)`` for some shared
+    baseline ``S`` and per-condition flip-deltas ``Δ_i``. Inputs that violate
+    this constraint (AND-structured observables that need nested IF/ELSE) are
+    rejected at compile time.
+
+    """
+
+    conditions: tuple["CorrelationSurface", ...]
+    resolutions: dict[tuple[bool, ...], "CorrelationSurface"]
+
+    def __post_init__(self) -> None:
+        n = len(self.conditions)
+        if n == 0:
+            raise TQECError(
+                "ConditionalCorrelationSurface requires at least one condition."
+            )
+        expected_keys = {
+            tuple(bool((i >> j) & 1) for j in range(n)) for i in range(2**n)
+        }
+        actual_keys = set(self.resolutions.keys())
+        if actual_keys != expected_keys:
+            missing = expected_keys - actual_keys
+            extra = actual_keys - expected_keys
+            raise TQECError(
+                f"ConditionalCorrelationSurface.resolutions must cover all "
+                f"2^{n} = {2 ** n} outcome tuples over {n} conditions; "
+                f"missing={sorted(missing)}, extra={sorted(extra)}."
+            )
+
+    def shift_by(
+        self, dx: int = 0, dy: int = 0, dz: int = 0
+    ) -> "ConditionalCorrelationSurface":
+        """Shift a copy of ``self`` by the given offset in the x, y, z directions and return it.
+
+        Args:
+            dx: The offset in the x direction.
+            dy: The offset in the y direction.
+            dz: The offset in the z direction.
+
+        Returns:
+            A new ``ConditionalCorrelationSurface`` with all conditions and
+            resolutions shifted. The new surface will share no data with the
+            original surface.
+
+        """
+        return ConditionalCorrelationSurface(
+            conditions=tuple(c.shift_by(dx=dx, dy=dy, dz=dz) for c in self.conditions),
+            resolutions={
+                key: r.shift_by(dx=dx, dy=dy, dz=dz)
+                for key, r in self.resolutions.items()
+            },
+        )
+
+
+@dataclass(frozen=True)
 class CorrelationSurface:
     """Represent a set of measurements whose values determine the parity of the logical operators.
 

@@ -21,7 +21,7 @@ import functools
 import itertools
 import operator
 import warnings
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 
 import stim
 
@@ -30,7 +30,9 @@ from tqec.circuit.qubit import GridQubit
 from tqec.circuit.qubit_map import QubitMap
 from tqec.circuit.schedule.circuit import ScheduledCircuit
 from tqec.circuit.schedule.schedule import Schedule
+from tqec.compile.conditional.circuit import CircuitEntry, IfBlock
 from tqec.utils.exceptions import TQECError, TQECWarning
+from tqec.utils.position import BlockPosition2D
 
 
 class _ScheduledCircuits:
@@ -140,6 +142,238 @@ def _sort_target_groups(
     return sorted(targets, key=_sort_key)
 
 
+_CEOStaged = tuple[
+    BlockPosition2D, tuple[int, ...], str, tuple[float, ...], list[stim.GateTarget]
+]
+
+
+def _stage_ceo_entries(
+    merged_instructions: list[stim.CircuitInstruction],
+    qubit_to_block: Mapping[GridQubit, BlockPosition2D],
+    global_i2q: Mapping[int, GridQubit],
+) -> tuple[list[stim.CircuitInstruction], list[_CEOStaged]]:
+    """Split a moment's merged instructions into (passthrough, CEO-sorted staged groups).
+
+    Instructions with no qubit targets, or any target qubit not owned by a known block,
+    pass through unchanged (preserving their pre-CEO order). Remaining instructions
+    contribute one staged entry per target group, sorted by ``(block.y, block.x, qids)``.
+    """
+    passthrough: list[stim.CircuitInstruction] = []
+    ceo_entries: list[_CEOStaged] = []
+    for inst in merged_instructions:
+        groups = inst.target_groups()
+        if not groups:
+            passthrough.append(inst)
+            continue
+        if not all(t.qubit_value is not None for grp in groups for t in grp):
+            passthrough.append(inst)
+            continue
+        args = tuple(inst.gate_args_copy())
+        staged: list[_CEOStaged] = []
+        eligible = True
+        for grp in groups:
+            qids = tuple(t.qubit_value for t in grp)
+            first_q = global_i2q.get(qids[0])
+            block_pos = qubit_to_block.get(first_q) if first_q is not None else None
+            if block_pos is None:
+                eligible = False
+                break
+            staged.append((block_pos, qids, inst.name, args, list(grp)))
+        if eligible:
+            ceo_entries.extend(staged)
+        else:
+            passthrough.append(inst)
+    ceo_entries.sort(key=lambda e: (e[0].y, e[0].x, e[1]))
+    return passthrough, ceo_entries
+
+
+def _ceo_entry_signature(entry: _CEOStaged) -> tuple:
+    return (entry[0], entry[1], entry[2], entry[3], tuple(t.value for t in entry[4]))
+
+
+def _instruction_signature(inst: stim.CircuitInstruction) -> tuple:
+    return (inst.name, tuple(inst.gate_args_copy()), [
+        (t.value, t.is_qubit_target, t.is_measurement_record_target)
+        for t in inst.targets_copy()
+    ])
+
+
+def _emit_moment_with_ceo(
+    merged_instructions: list[stim.CircuitInstruction],
+    qubit_to_block: Mapping[GridQubit, BlockPosition2D],
+    global_i2q: Mapping[int, GridQubit],
+    *,
+    branch_merged_instructions: list[stim.CircuitInstruction] | None = None,
+    condition_recs: list[int] | None = None,
+) -> list[CircuitEntry]:
+    """Produce a moment's instruction stream in Canonical Emission Order.
+
+    Returns a list of :class:`stim.CircuitInstruction` (and, when
+    ``branch_merged_instructions`` is supplied, :class:`IfBlock`) entries in CEO
+    order. The non-conditional path returns only plain instructions and is
+    byte-equivalent to the pre-refactor emitter.
+
+    When ``branch_merged_instructions`` is provided alongside ``condition_recs``:
+    the staged CEO slots of both branches are walked in parallel; identical
+    slots collapse into plain instructions exactly as in the single-branch path,
+    and divergent slots emit an :class:`IfBlock` with the second-branch
+    fragment as ``then_body`` and the first-branch fragment as ``else_body``
+    (convention: first arg = branch-zero, second arg = branch-one).
+
+    Cross-cube CEO slot ownership note: a two-qubit gate spanning a spatial
+    pipe is assigned to the first qubit's owning block (see
+    :func:`_stage_ceo_entries`). Per the commit-145dc902 guard, no spatial
+    pipe touches a conditional cube, so a conditional CEO slot never spans two
+    cubes.
+    """
+    passthrough_z, ceo_z = _stage_ceo_entries(merged_instructions, qubit_to_block, global_i2q)
+
+    if branch_merged_instructions is None:
+        result: list[CircuitEntry] = list(passthrough_z)
+        i = 0
+        while i < len(ceo_z):
+            name = ceo_z[i][2]
+            args = ceo_z[i][3]
+            flat: list[stim.GateTarget] = []
+            while i < len(ceo_z) and ceo_z[i][2] == name and ceo_z[i][3] == args:
+                flat.extend(ceo_z[i][4])
+                i += 1
+            result.append(stim.CircuitInstruction(name, flat, list(args)))
+        return result
+
+    if condition_recs is None:
+        raise TQECError(
+            "_emit_moment_with_ceo: branch_merged_instructions requires condition_recs."
+        )
+    passthrough_o, ceo_o = _stage_ceo_entries(
+        branch_merged_instructions, qubit_to_block, global_i2q
+    )
+    if [_instruction_signature(p) for p in passthrough_z] != [
+        _instruction_signature(p) for p in passthrough_o
+    ]:
+        raise TQECError(
+            "_emit_moment_with_ceo: passthrough instructions differ between branches; "
+            "Equal Emission Order assumes non-block-owned instructions are identical."
+        )
+    if len(ceo_z) != len(ceo_o):
+        raise TQECError(
+            "_emit_moment_with_ceo: CEO slot count differs between branches "
+            f"(branch-zero={len(ceo_z)}, branch-one={len(ceo_o)}); Equal Measurement Count + CEO violated."
+        )
+
+    result = list(passthrough_z)
+    i = 0
+    while i < len(ceo_z):
+        if _ceo_entry_signature(ceo_z[i]) == _ceo_entry_signature(ceo_o[i]):
+            name = ceo_z[i][2]
+            args = ceo_z[i][3]
+            flat = []
+            while (
+                i < len(ceo_z)
+                and ceo_z[i][2] == name
+                and ceo_z[i][3] == args
+                and _ceo_entry_signature(ceo_z[i]) == _ceo_entry_signature(ceo_o[i])
+            ):
+                flat.extend(ceo_z[i][4])
+                i += 1
+            result.append(stim.CircuitInstruction(name, flat, list(args)))
+        else:
+            # Batch consecutive divergent slots sharing per-branch
+            # (name, args) signatures into a single IfBlock with merged
+            # targets. Common pattern: a basis-swap across an ancilla run
+            # (M/MX over qubits 4, 5, 6, ...) — CEO sorts these adjacently,
+            # so per-slot IF/ELSE wraps collapse to one IF/ELSE per run.
+            z_name = ceo_z[i][2]
+            z_args = ceo_z[i][3]
+            o_name = ceo_o[i][2]
+            o_args = ceo_o[i][3]
+            z_targets: list[stim.GateTarget] = []
+            o_targets: list[stim.GateTarget] = []
+            while (
+                i < len(ceo_z)
+                and _ceo_entry_signature(ceo_z[i]) != _ceo_entry_signature(ceo_o[i])
+                and ceo_z[i][2] == z_name
+                and ceo_z[i][3] == z_args
+                and ceo_o[i][2] == o_name
+                and ceo_o[i][3] == o_args
+            ):
+                z_targets.extend(ceo_z[i][4])
+                o_targets.extend(ceo_o[i][4])
+                i += 1
+            zero_inst = stim.CircuitInstruction(z_name, z_targets, list(z_args))
+            one_inst = stim.CircuitInstruction(o_name, o_targets, list(o_args))
+            result.append(
+                IfBlock(
+                    condition_recs=list(condition_recs),
+                    then_body=[one_inst],
+                    else_body=[zero_inst],
+                )
+            )
+    return _merge_same_condition_ifblocks(result)
+
+
+def _merge_same_condition_ifblocks(entries: list[CircuitEntry]) -> list[CircuitEntry]:
+    """Collapse runs of same-condition :class:`IfBlock` entries within a single
+    moment, hoisting intervening non-IfBlock entries into both branches.
+
+    Safety relies on the CEO target-ordering rule, which sorts multi-qubit
+    instruction targets by ``BlockPosition2D (y, x)`` then qubit-index
+    ascending. All instructions of a single cube emit contiguously;
+    instructions of other cubes on the same z-layer fall either entirely
+    before the first :class:`IfBlock` of the conditional cube or entirely
+    after the last one — never strictly between two same-condition
+    :class:`IfBlock`s. The hoisted "passthrough" entries are therefore
+    guaranteed to be same-cube non-flipping operations (e.g. the conditional
+    cube's matching ancilla rows). Duplicating them textually into both
+    branches is a semantic no-op: runtime fires exactly one branch and both
+    bodies contain identical operations on those passthrough slots, so the
+    physical schedule, measurement order, and downstream ``rec[-N]`` offsets
+    are unchanged.
+
+    Relies on the upstream guard at ``src/tqec/compile/graph.py:640-651``
+    that allows at most one conditional cube per z-layer. With multiple
+    conditional cubes a single moment could carry IfBlocks for different
+    conditions; the inner scan stops on a differing-condition IfBlock so the
+    transformation is still local, but that path is not exercised under the
+    current constraint.
+    """
+    out: list[CircuitEntry] = []
+    i = 0
+    while i < len(entries):
+        e = entries[i]
+        if not isinstance(e, IfBlock):
+            out.append(e)
+            i += 1
+            continue
+        cond = tuple(e.condition_recs)
+        then_body = list(e.then_body)
+        else_body = list(e.else_body)
+        j = i + 1
+        while j < len(entries):
+            nxt = entries[j]
+            if isinstance(nxt, IfBlock):
+                if tuple(nxt.condition_recs) == cond:
+                    mids = entries[i + 1 : j]
+                    then_body.extend(mids)
+                    else_body.extend(mids)
+                    then_body.extend(nxt.then_body)
+                    else_body.extend(nxt.else_body)
+                    del entries[i + 1 : j + 1]
+                    j = i + 1
+                    continue
+                break
+            j += 1
+        out.append(
+            IfBlock(
+                condition_recs=list(cond),
+                then_body=then_body,
+                else_body=else_body,
+            )
+        )
+        i += 1
+    return out
+
+
 def remove_duplicate_instructions(
     instructions: list[stim.CircuitInstruction],
     mergeable_instruction_names: frozenset[str],
@@ -242,6 +476,7 @@ def merge_scheduled_circuits(
     circuits: list[ScheduledCircuit],
     global_qubit_map: QubitMap,
     mergeable_instructions: Iterable[str] = (),
+    qubit_to_block: Mapping[GridQubit, BlockPosition2D] | None = None,
 ) -> ScheduledCircuit:
     """Merge several :class:`.ScheduledCircuit` instances into one instance.
 
@@ -263,6 +498,10 @@ def merge_scheduled_circuits(
         mergeable_instructions: a list of instruction names that are considered
             mergeable. Duplicate instructions with a name in this list will be
             merged into a single instruction.
+        qubit_to_block: optional mapping from ``GridQubit`` to owning
+            ``BlockPosition2D`` (cube position in the enclosing ``LayoutLayer``).
+            Plumbed in for the upcoming Canonical Emission Order pass; currently
+            unused. ``None`` preserves baseline behaviour.
 
     Returns:
         a circuit representing the merged scheduled circuits given as input.
@@ -289,16 +528,117 @@ def merge_scheduled_circuits(
         )
         merged_instructions = merge_instructions(deduplicated_instructions)
         circuit = stim.Circuit()
-        for inst in merged_instructions:
-            circuit.append(
-                inst.name,
-                functools.reduce(operator.iadd, _sort_target_groups(inst.target_groups()), []),
-                inst.gate_args_copy(),
+        if qubit_to_block is None:
+            for inst in merged_instructions:
+                circuit.append(
+                    inst.name,
+                    functools.reduce(operator.iadd, _sort_target_groups(inst.target_groups()), []),
+                    inst.gate_args_copy(),
+                )
+        else:
+            entries = _emit_moment_with_ceo(
+                merged_instructions, qubit_to_block, global_i2q.i2q
             )
+            for entry in entries:
+                if isinstance(entry, IfBlock):
+                    raise NotImplementedError(
+                        "merge_scheduled_circuits: IfBlock emission requires per-branch "
+                        "input wiring (Stage A commit 3)."
+                    )
+                circuit.append(entry)
         all_moments.append(Moment(circuit))
         all_schedules.append(schedule)
 
     return ScheduledCircuit(all_moments, all_schedules, global_i2q, _avoid_checks=True)
+
+
+def merge_scheduled_circuits_per_branch(
+    zero_circuits: list[ScheduledCircuit],
+    one_circuits: list[ScheduledCircuit],
+    global_qubit_map: QubitMap,
+    *,
+    condition_recs: list[int],
+    mergeable_instructions: Iterable[str] = (),
+    qubit_to_block: Mapping[GridQubit, BlockPosition2D],
+) -> tuple[list[list[CircuitEntry]], Schedule]:
+    """Merge two parallel branches of :class:`.ScheduledCircuit` instances into a per-moment
+    stream of :class:`CircuitEntry` values, weaving :class:`IfBlock` at CEO slots that
+    differ between the branches.
+
+    Both branches must share ``global_qubit_map`` and produce moments at identical
+    schedules (enforced by Equal Measurement Count + Canonical Emission Order).
+    The two branch lists may have different per-plaquette circuits only at slots
+    owned by a conditional cube; everywhere else they are byte-identical and
+    collapse to plain :class:`stim.CircuitInstruction` entries.
+
+    Args:
+        zero_circuits: branch-zero per-plaquette scheduled circuits, in the same
+            order as the per-plaquette walk of the layer.
+        one_circuits: branch-one parallel list; same length and same per-slot
+            qubit footprint as ``zero_circuits``.
+        global_qubit_map: shared qubit map for both branches.
+        condition_recs: ``stim`` record offsets whose XOR drives the woven
+            IF/ELSE. Convention: ``then_body`` runs when the XOR is one,
+            ``else_body`` runs when it is zero. A single-element list
+            renders as ``IF(rec[r])``.
+        mergeable_instructions: as in :func:`merge_scheduled_circuits`.
+        qubit_to_block: required; CEO needs block ownership to align slots
+            between branches.
+
+    Returns:
+        ``(moments_entries, schedule)`` where ``moments_entries[i]`` is the
+        ``list[CircuitEntry]`` for the moment at ``schedule[i]``. Callers
+        assemble the result into a :class:`~tqec.compile.conditional.circuit.ConditionalCircuit`
+        (or unwrap to a plain ``stim.Circuit`` when no ``IfBlock`` surfaces).
+
+    Raises:
+        TQECError: if the two branches diverge in moment count, schedule, or
+            number of CEO slots at a moment.
+
+    """
+    sched_z = _ScheduledCircuits(zero_circuits, global_qubit_map)
+    sched_o = _ScheduledCircuits(one_circuits, global_qubit_map)
+    global_i2q = QubitMap({i: q for q, i in global_qubit_map.q2i.items()})
+    mergeable = frozenset(mergeable_instructions)
+
+    moments_entries: list[list[CircuitEntry]] = []
+    schedule_out = Schedule()
+
+    while sched_z.has_pending_moment() or sched_o.has_pending_moment():
+        if not (sched_z.has_pending_moment() and sched_o.has_pending_moment()):
+            raise TQECError(
+                "merge_scheduled_circuits_per_branch: branches disagree on moment "
+                "count; Equal Measurement Count violated."
+            )
+        schedule_z, moments_z = sched_z.collect_moments_at_minimum_schedule()
+        schedule_o, moments_o = sched_o.collect_moments_at_minimum_schedule()
+        if schedule_z != schedule_o:
+            raise TQECError(
+                "merge_scheduled_circuits_per_branch: schedule mismatch between "
+                f"branches (zero={schedule_z}, one={schedule_o})."
+            )
+        instructions_z = functools.reduce(
+            operator.iadd, (list(m.instructions) for m in moments_z), []
+        )
+        instructions_o = functools.reduce(
+            operator.iadd, (list(m.instructions) for m in moments_o), []
+        )
+        merged_z = merge_instructions(
+            remove_duplicate_instructions(instructions_z, mergeable)
+        )
+        merged_o = merge_instructions(
+            remove_duplicate_instructions(instructions_o, mergeable)
+        )
+        entries = _emit_moment_with_ceo(
+            merged_z,
+            qubit_to_block,
+            global_i2q.i2q,
+            branch_merged_instructions=merged_o,
+            condition_recs=condition_recs,
+        )
+        moments_entries.append(entries)
+        schedule_out.append(schedule_z)
+    return moments_entries, schedule_out
 
 
 def relabel_circuits_qubit_indices(
