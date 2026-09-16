@@ -544,9 +544,7 @@ class TopologicalComputationGraph:
         noise_model: NoiseModel | None = None,
         manhattan_radius: int = 2,
         detector_database: DetectorDatabase | None = None,
-        database_path: str | Path = DEFAULT_DETECTOR_DATABASE_PATH,
-        do_not_use_database: bool = False,
-        only_use_database: bool = False,
+        database_path: str | Path | None = DEFAULT_DETECTOR_DATABASE_PATH,
         reschedule_measurements: bool = True,
         noiseless_injection: bool = False,
     ) -> stim.Circuit:
@@ -571,12 +569,7 @@ class TopologicalComputationGraph:
             database_path: specify where to save to after the calculation. This
                 defaults to :data:`.DEFAULT_DETECTOR_DATABASE_PATH`
                 if not specified. If detector_database is not passed in, the code
-                attempts to retrieve the database from this location. The user
-                may pass in the path either in str format, or as a Path instance.
-            do_not_use_database: if ``True``, even the default database will not be used.
-            only_use_database: if ``True``, only detectors from the database
-                will be used. An error will be raised if a situation that is not
-                registered in the database is encountered.
+                attempts to retrieve the database from this location.
             reschedule_measurements: whether to reschedule measurements in a ``LayoutLayer``
                 to be in the same moment. Since each plaquette may have its own measurement
                 schedule, setting this may be necessary for hardware that requires
@@ -602,8 +595,6 @@ class TopologicalComputationGraph:
             manhattan_radius=manhattan_radius,
             detector_database=detector_database,
             database_path=database_path,
-            do_not_use_database=do_not_use_database,
-            only_use_database=only_use_database,
             reschedule_measurements=reschedule_measurements,
         )
         # If provided, apply the noise model.
@@ -653,8 +644,6 @@ class TopologicalComputationGraph:
         manhattan_radius: int = 2,
         detector_database: DetectorDatabase | None = None,
         database_path: str | Path = DEFAULT_DETECTOR_DATABASE_PATH,
-        do_not_use_database: bool = False,
-        only_use_database: bool = False,
         reschedule_measurements: bool = True,
         noiseless_injection: bool = False,
     ) -> stim.Circuit:
@@ -677,8 +666,6 @@ class TopologicalComputationGraph:
             manhattan_radius,
             detector_database,
             database_path,
-            do_not_use_database,
-            only_use_database,
             reschedule_measurements,
             noiseless_injection,
         )
@@ -690,8 +677,6 @@ class TopologicalComputationGraph:
         manhattan_radius: int = 2,
         detector_database: DetectorDatabase | None = None,
         database_path: str | Path = DEFAULT_DETECTOR_DATABASE_PATH,
-        do_not_use_database: bool = False,
-        only_use_database: bool = False,
         reschedule_measurements: bool = True,
         noiseless_injection: bool = False,
     ) -> str:
@@ -732,8 +717,6 @@ class TopologicalComputationGraph:
                     manhattan_radius=manhattan_radius,
                     detector_database=detector_database,
                     database_path=database_path,
-                    do_not_use_database=do_not_use_database,
-                    only_use_database=only_use_database,
                     reschedule_measurements=reschedule_measurements,
                 ).to_stim_text()
             )
@@ -744,8 +727,6 @@ class TopologicalComputationGraph:
                 manhattan_radius,
                 detector_database,
                 database_path,
-                do_not_use_database,
-                only_use_database,
                 reschedule_measurements,
                 noiseless_injection,
             )
@@ -757,8 +738,6 @@ class TopologicalComputationGraph:
         manhattan_radius: int = 2,
         detector_database: DetectorDatabase | None = None,
         database_path: str | Path = DEFAULT_DETECTOR_DATABASE_PATH,
-        do_not_use_database: bool = False,
-        only_use_database: bool = False,
         reschedule_measurements: bool = True,
     ) -> "ConditionalCircuit":
         """Compile a graph with conditional cubes into an ``IF``/``ELSE`` circuit.
@@ -789,10 +768,6 @@ class TopologicalComputationGraph:
                 if not specified. If detector_database is not passed in, the code
                 attempts to retrieve the database from this location. The user
                 may pass in the path either in str format, or as a Path instance.
-            do_not_use_database: if ``True``, even the default database will not be used.
-            only_use_database: if ``True``, only detectors from the database
-                will be used. An error will be raised if a situation that is not
-                registered in the database is encountered.
             reschedule_measurements: whether to reschedule measurements in a ``LayoutLayer``
                 to be in the same moment. Since each plaquette may have its own measurement
                 schedule, setting this may be necessary for hardware that requires
@@ -879,8 +854,6 @@ class TopologicalComputationGraph:
             manhattan_radius=manhattan_radius,
             detector_database=detector_database,
             database_path=database_path,
-            do_not_use_database=do_not_use_database,
-            only_use_database=only_use_database,
             reschedule_measurements=reschedule_measurements,
         )
 
@@ -890,8 +863,6 @@ class TopologicalComputationGraph:
         manhattan_radius: int = 2,
         detector_database: DetectorDatabase | None = None,
         database_path: str | Path = DEFAULT_DETECTOR_DATABASE_PATH,
-        do_not_use_database: bool = False,
-        only_use_database: bool = False,
         reschedule_measurements: bool = True,
     ) -> str:
         """Compile the graph into ``IF``/``ELSE``-annotated Stim text.
@@ -908,8 +879,6 @@ class TopologicalComputationGraph:
             manhattan_radius=manhattan_radius,
             detector_database=detector_database,
             database_path=database_path,
-            do_not_use_database=do_not_use_database,
-            only_use_database=only_use_database,
             reschedule_measurements=reschedule_measurements,
         )
 
