@@ -13,12 +13,18 @@ import stim
 
 from tqec import BlockGraph, compile_block_graph
 from tqec.compile.blocks.layers.atomic.layout import LayoutLayer
-from tqec.compile.blocks.positioning import LayoutPosition3D
+from tqec.compile.blocks.layers.atomic.plaquettes import PlaquetteLayer
+from tqec.compile.blocks.positioning import LayoutPosition2D, LayoutPosition3D
 from tqec.compile.specs.base import CubeSpec
+from tqec.compile.specs.library.generators.fixed_bulk import FixedBulkConventionGenerator
 from tqec.compile.tree.node import LayerNode
+from tqec.compile.tree.tree import LayerTree
 from tqec.computation.cube import LeafCubeKind, ZXCube
+from tqec.plaquette.compilation.base import IdentityPlaquetteCompiler
+from tqec.plaquette.rpng.translators.default import DefaultRPNGTranslator
+from tqec.utils.enums import Orientation
 from tqec.utils.noise_model import NoiseModel
-from tqec.utils.position import BlockPosition3D, Position3D
+from tqec.utils.position import BlockPosition3D, Direction3D, Position3D
 
 
 def _y_capped_column(kind: str = "ZXZ") -> BlockGraph:
@@ -130,17 +136,39 @@ def test_temporal_pipe_does_not_overwrite_the_transition_round(k: int) -> None:
         assert my_targets == expected_y_cubes
 
 
+def _branch_axis(kind: str) -> Direction3D:
+    """Return the axis a side branch of ``kind`` cubes may run along.
+
+    A pipe's two walls must carry different bases. A pipe along ``X`` has its
+    walls in ``Y`` and ``Z``, one along ``Y`` has them in ``X`` and ``Z``; so a
+    ``ZXZ``/``XZX`` column can branch sideways in ``x`` and a ``ZXX``/``XZZ`` one
+    in ``y``. Neither can do both, which is why the two-cap graph exists in two
+    mirror-image shapes rather than one.
+    """
+    if kind[1] != kind[2]:
+        return Direction3D.X
+    assert kind[0] != kind[2], f"{kind} cannot branch along either spatial axis"
+    return Direction3D.Y
+
+
 def _two_y_caps_with_main_column(kind: str = "ZXZ") -> BlockGraph:
     """Build the notebook cells 7-8 graph.
 
-    A 5-cube main column (x=0) with two Y caps on side branches (x=1) at z=2 and
-    z=4, each coexisting in a z-slice with a continuing main-column memory cube
-    (mismatched temporal schedules).
+    A 5-cube main column at the origin with two Y caps on side branches at z=2
+    and z=4, each coexisting in a z-slice with a continuing main-column memory
+    cube (mismatched temporal schedules). The branch runs along whichever spatial
+    axis ``kind`` permits -- see :func:`_branch_axis`.
     """
     g = BlockGraph("two_y_caps")
     b = [Position3D(0, 0, i) for i in range(5)]
-    c1, c3 = Position3D(1, 0, 1), Position3D(1, 0, 3)
-    y2, y4 = Position3D(1, 0, 2), Position3D(1, 0, 4)
+
+    def beside(z: int) -> Position3D:
+        if _branch_axis(kind) is Direction3D.X:
+            return Position3D(1, 0, z)
+        return Position3D(0, 1, z)
+
+    c1, c3 = beside(1), beside(3)
+    y2, y4 = beside(2), beside(4)
     for p in b:
         g.add_cube(p, ZXCube.from_str(kind))
     g.add_cube(c1, ZXCube.from_str(kind))
@@ -156,7 +184,7 @@ def _two_y_caps_with_main_column(kind: str = "ZXZ") -> BlockGraph:
     return g
 
 
-@pytest.mark.parametrize("kind", ["ZXZ", "XZX"])
+@pytest.mark.parametrize("kind", _BELOW_KINDS)
 @pytest.mark.parametrize("k", [1, 2])
 def test_two_y_caps_coexistence_compiles_dem_clean(k: int, kind: str) -> None:
     """Two Y caps coexisting with a continuing memory column compile cleanly.
@@ -173,9 +201,8 @@ def test_two_y_caps_coexistence_compiles_dem_clean(k: int, kind: str) -> None:
 
 
 # The closed surface is the S^2 = Z algebra of the two gadgets. Its basis on the
-# main column follows that column's top face: ``ZZYY`` for ``ZXZ``, ``XXYY`` for
-# the transposed ``XZX``.
-_SURFACE_BY_KIND = {"ZXZ": "ZZYY", "XZX": "XXYY"}
+# main column follows that column's top face.
+_SURFACE_BY_KIND = {"ZXZ": "ZZYY", "ZXX": "XXYY", "XZX": "XXYY", "XZZ": "ZZYY"}
 
 
 def _closed_surface(kind: str = "ZXZ") -> tuple[BlockGraph, list]:
@@ -185,7 +212,7 @@ def _closed_surface(kind: str = "ZXZ") -> tuple[BlockGraph, list]:
     return graph, surfaces
 
 
-@pytest.mark.parametrize("kind", ["ZXZ", "XZX"])
+@pytest.mark.parametrize("kind", _BELOW_KINDS)
 @pytest.mark.parametrize("k", [1, 2])
 def test_two_y_caps_observable_is_deterministic(k: int, kind: str) -> None:
     """The closed ``in . out . Y_cap1 . Y_cap2`` surface lowers deterministically.
@@ -201,31 +228,137 @@ def test_two_y_caps_observable_is_deterministic(k: int, kind: str) -> None:
     assert len({bool(v) for v in observables.reshape(-1)}) == 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Known defect: the Y cap collapses the circuit distance of the closed "
-        "surface to k + 1 (2 at k=1, 3 at k=2) instead of 2k + 1. The shortest "
-        "undetectable logical error is a timelike string of ancilla measurement "
-        "flips running from the transition round through the cap's boundary and "
-        "final rounds. Reproduced for both ZXZ and XZX; the same block graph with "
-        "ordinary caps instead of Y caps keeps full distance, and Gidney's own "
-        "Y-basis memory experiment (tests/_vendor/midout) keeps full distance, so "
-        "the loss is specific to tqec's Y cap."
-    ),
-)
-@pytest.mark.parametrize("kind", ["ZXZ", "XZX"])
+def _bulk_z_rpngs(tree: LayerTree, k: int) -> list[tuple[int, LayoutPosition2D, set[str]]]:
+    """Every ``(leaf index, position, RPNG strings)`` of the plaquette sub-layers."""
+
+    def leaves(node: LayerNode) -> list[LayerNode]:
+        return [node] if node.is_leaf else [n for c in node.children for n in leaves(c)]
+
+    found = []
+    for index, leaf in enumerate(leaves(tree._root)):
+        layer = leaf._layer
+        if not isinstance(layer, LayoutLayer):
+            continue
+        for position, sublayer in layer.layers.items():
+            if not isinstance(sublayer, PlaquetteLayer):
+                continue
+            found.append(
+                (
+                    index,
+                    position,
+                    {
+                        str(plaquette.debug_information.rpng)
+                        for plaquette in sublayer.plaquettes.collection.values()
+                        if plaquette.debug_information.rpng is not None
+                    },
+                )
+            )
+    return found
+
+
+def test_the_cap_interaction_order_reaches_exactly_the_junction_rounds() -> None:
+    """Only the round directly below a Y cap is re-timed.
+
+    The temporal pipe below a cap supplies two memory rounds. Its ``Z_POSITIVE``
+    border becomes the cap's junction round and must carry the cap's interaction
+    order; its ``Z_NEGATIVE`` border is the last round of the cube *below*, which
+    can share a time slice with a spatial pipe still on the fixed-bulk schedule.
+    Re-timing that one instead makes the two collide on their shared data qubits,
+    so the scope of the change is asserted rather than left to chance.
+    """
+    generator = FixedBulkConventionGenerator(DefaultRPNGTranslator(), IdentityPlaquetteCompiler)
+    retimed = {
+        str(plaquette.debug_information.rpng)
+        for plaquette in generator.get_y_cap_junction_plaquettes(
+            Orientation.HORIZONTAL, False
+        ).collection.values()
+        if plaquette.debug_information.rpng is not None
+    }
+    plain = {
+        str(plaquette.debug_information.rpng)
+        for plaquette in generator.get_memory_qubit_plaquettes(
+            Orientation.HORIZONTAL, None, None
+        ).collection.values()
+        if plaquette.debug_information.rpng is not None
+    }
+    marker = next(iter(retimed - plain))
+
+    graph = _two_y_caps_with_main_column("ZXZ")
+    tree = compile_block_graph(graph, observables=[]).to_layer_tree(k=1)
+    carrying = [
+        (index, position) for index, position, rpngs in _bulk_z_rpngs(tree, 1) if marker in rpngs
+    ]
+    # One junction round per cap, and both at the capped column's position.
+    assert len(carrying) == 2
+    assert len({position for _, position in carrying}) == 1
+    # Consecutive z-slices, so the two are genuinely the two caps' first rounds.
+    assert carrying[0][0] < carrying[1][0]
+
+    # A graph with no Y cap is untouched.
+    memory = BlockGraph("memory_column")
+    for z in range(3):
+        memory.add_cube(Position3D(0, 0, z), ZXCube.from_str("ZXZ"))
+    for z in range(2):
+        memory.add_pipe(Position3D(0, 0, z), Position3D(0, 0, z + 1))
+    plain_tree = compile_block_graph(memory, observables=[]).to_layer_tree(k=1)
+    assert not [entry for entry in _bulk_z_rpngs(plain_tree, 1) if marker in entry[2]], (
+        "the fixed-bulk schedule must be untouched wherever no Y cap is involved"
+    )
+
+
+@pytest.mark.parametrize("transposed", [False, True])
+def test_y_cap_junction_plaquettes_change_only_the_interaction_order(transposed: bool) -> None:
+    """Re-timing the junction round preserves everything except the times.
+
+    The round must keep measuring exactly the same stabilizers on exactly the same
+    qubits -- only the order in which their data qubits are touched may change.
+    """
+    orientation = Orientation.VERTICAL if transposed else Orientation.HORIZONTAL
+    generator = FixedBulkConventionGenerator(DefaultRPNGTranslator(), IdentityPlaquetteCompiler)
+    plain = generator.get_memory_qubit_plaquettes(orientation, None, None)
+    retimed = generator.get_y_cap_junction_plaquettes(orientation, transposed)
+
+    assert set(plain.collection.keys()) == set(retimed.collection.keys())
+    changed = 0
+    for index, before in plain.collection.items():
+        after = retimed.collection[index]
+        b, a = before.debug_information.rpng, after.debug_information.rpng
+        assert b is not None and a is not None
+        assert a.ancilla == b.ancilla
+        # Same corners occupied, same reset/measure/basis on each.
+        assert [(c.r, c.p, c.g) for c in a.corners] == [(c.r, c.p, c.g) for c in b.corners]
+        if [c.n for c in a.corners] != [c.n for c in b.corners]:
+            changed += 1
+    assert changed > 0, "the re-timed round must actually differ from the fixed-bulk one"
+
+
+@pytest.mark.parametrize("kind", _BELOW_KINDS)
 @pytest.mark.parametrize("k", [1, 2])
 def test_two_y_caps_observable_preserves_distance(k: int, kind: str) -> None:
     """The Y seam does not collapse the code distance of the closed surface.
 
+    This is a regression test for a hook-error mismatch at the junction between
+    the memory round the temporal pipe supplies and the cap's transition round.
+    While the junction round ran the fixed-bulk interaction order, two faults
+    straddling that seam produced the same syndrome but different logical
+    effects, giving an undetectable weight-2 logical error and a circuit distance
+    of ``k + 1`` instead of ``2k + 1``. See
+    :meth:`.FixedBulkConventionGenerator.get_y_cap_junction_plaquettes`.
+
     Uses :meth:`stim.Circuit.search_for_undetectable_logical_errors` rather than
     :meth:`~stim.Circuit.shortest_graphlike_error`. The latter, called with
     ``ignore_ungraphlike_errors=False``, decomposes the error model before
-    searching; that decomposition splits one of the two parallel
-    ``D_a D_b`` / ``D_a D_b L0`` edges into boundary components and so hides the
-    weight-2 logical error. It is the distance of the decomposed matching graph,
-    not of the circuit.
+    searching; that decomposition split one of the two parallel
+    ``D_a D_b`` / ``D_a D_b L0`` edges into boundary components and so reported
+    the full ``2k + 1`` throughout the period when the circuit really had
+    distance ``k + 1``. It measures the decomposed matching graph, not the
+    circuit.
+
+    The defect only appears under *correlated* two-qubit gate noise: each of the
+    two faults was a single ``DEPOLARIZE2`` carrying both an X and a Z component.
+    Splitting that noise into independent single-qubit errors hides it, so
+    ``uniform_depolarizing`` (which emits ``DEPOLARIZE2`` after two-qubit gates)
+    is required here.
     """
     graph, surfaces = _closed_surface(kind)
     circuit = compile_block_graph(graph, observables=surfaces).generate_stim_circuit(k=k)
