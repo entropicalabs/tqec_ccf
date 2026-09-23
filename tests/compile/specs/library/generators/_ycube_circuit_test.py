@@ -28,10 +28,13 @@ from tqec.compile.specs.library.generators._ycube_circuit import (
     _middle_line_correction_plaquettes,
     _tqec_logical_y_observable_spec,
     memory_experiment_circuit,
+    reverse_round_circuit,
     standard_round,
     transition_round,
+    y_cap_magic_experiment_circuit,
     y_cap_raw_circuit,
     y_cap_segment_circuit,
+    y_init_magic_experiment_circuit,
 )
 from tqec.compile.specs.library.generators.ycube import (
     gidney_to_tqec,
@@ -40,6 +43,7 @@ from tqec.compile.specs.library.generators.ycube import (
 )
 from tqec.computation.cube import LeafCubeKind, ZXCube
 from tqec.utils.enums import Basis
+from tqec.utils.noise_model import NoiseModel
 from tqec.utils.position import Position3D
 
 
@@ -475,3 +479,133 @@ def test_compiled_y_capped_column_detectors_match_oracle_exactly(k: int) -> None
         oracle, _coord_map(oracle, lambda x, y, *rest: gidney_to_tqec(complex(x, y)))
     )
     assert compiled_sig == oracle_sig
+
+
+_NOISE_INSTRUCTIONS = frozenset(
+    {
+        "DEPOLARIZE1",
+        "DEPOLARIZE2",
+        "X_ERROR",
+        "Y_ERROR",
+        "Z_ERROR",
+        "PAULI_CHANNEL_1",
+        "PAULI_CHANNEL_2",
+        "E",
+        "ELSE_CORRELATED_ERROR",
+    }
+)
+
+
+def _noisy_except_mpp(circuit: stim.Circuit, p: float = 0.001) -> stim.Circuit:
+    """Layer uniform depolarizing noise, leaving the magic ``MPP`` moments alone.
+
+    The magic head/tail is a simulator-only readout with no physical counterpart,
+    so it must stay noiseless -- including the idling noise its moments would
+    otherwise charge every other qubit. tqec's ``NoiseModel`` also cannot
+    classify a multi-product ``MPP``: ``_measure_basis`` assumes a single Pauli
+    product. Both are handled by keeping those moments out of the model entirely.
+    """
+    moments: list[list[stim.CircuitInstruction]] = [[]]
+    for instruction in circuit.flattened():
+        if instruction.name == "TICK":
+            moments.append([])
+        elif instruction.name != "QUBIT_COORDS":
+            moments[-1].append(instruction)
+    magic = [any(i.name == "MPP" for i in moment) for moment in moments]
+
+    body = stim.Circuit()
+    for index, coords in circuit.get_final_qubit_coordinates().items():
+        body.append("QUBIT_COORDS", [index], list(coords))
+    for position, moment in enumerate(moments):
+        if magic[position]:
+            continue
+        for instruction in moment:
+            body.append(instruction)
+        body.append("TICK")
+    noisy_body = NoiseModel.uniform_depolarizing(p).noisy_circuit(
+        body, system_qubits=set(range(circuit.num_qubits))
+    )
+
+    noised: list[list[stim.CircuitInstruction]] = [[]]
+    for instruction in noisy_body.flattened():
+        if instruction.name == "TICK":
+            noised.append([])
+        elif instruction.name != "QUBIT_COORDS":
+            noised[-1].append(instruction)
+
+    out = stim.Circuit()
+    for index, coords in circuit.get_final_qubit_coordinates().items():
+        out.append("QUBIT_COORDS", [index], list(coords))
+    cursor = 0
+    for position, moment in enumerate(moments):
+        source = moment if magic[position] else noised[cursor]
+        if not magic[position]:
+            cursor += 1
+        for instruction in source:
+            out.append(instruction)
+        if position != len(moments) - 1:
+            out.append("TICK")
+    assert out.num_measurements == circuit.num_measurements
+    assert out.num_detectors == circuit.num_detectors
+    return out
+
+
+def _circuit_distance(circuit: stim.Circuit) -> int:
+    noisy = _noisy_except_mpp(circuit)
+    return len(
+        noisy.search_for_undetectable_logical_errors(
+            dont_explore_detection_event_sets_with_size_above=4,
+            dont_explore_edges_with_degree_above=4,
+            dont_explore_edges_increasing_symptom_degree=False,
+        )
+    )
+
+
+def test_reverse_round_circuit_inverts_the_transition_round() -> None:
+    """Reversing the transition round turns it into a patch *preparation*.
+
+    The forward round folds the ``xtop`` patch onto the degenerate Y-boundary
+    patch and measures its stabilizers out; the reverse must prepare every
+    ``xtop`` stabilizer, which is what ``solve_flow_measurements`` is asked here.
+    """
+    d = 3
+    forward, _ = _build_transition_round(d)
+    reversed_circuit = reverse_round_circuit(forward)
+    assert {i.name for i in reversed_circuit.flattened()} >= {"RY", "SQRT_X_DAG"}
+
+    index = {
+        (int(v[0]), int(v[1])): i for i, v in reversed_circuit.get_final_qubit_coordinates().items()
+    }
+    n = reversed_circuit.num_qubits
+    for stabilizer in xtop_qubit_patch(d).stabilizers:
+        paulis = ["_"] * n
+        for data in stabilizer.ordered_data:
+            if data is not None:
+                paulis[index[data]] = stabilizer.basis.value
+        flow = stim.Flow(input=stim.PauliString(n), output=stim.PauliString("".join(paulis)))
+        assert reversed_circuit.solve_flow_measurements([flow])[0] is not None, stabilizer.ancilla
+
+
+@pytest.mark.parametrize("d", [3, 5])
+def test_y_basis_initialisation_matches_the_measurement_cap(d: int) -> None:
+    """The time-reversed cap is a full-distance Y-basis initialisation.
+
+    Both experiments are bracketed by Gidney-style noiseless magic ``MPP``
+    operations: a preparation head for the measurement cap, a readout tail for
+    the initialisation. Each must be deterministic and carry the code's full
+    distance, and the reversal must preserve the detector count exactly.
+    """
+    cap = y_cap_magic_experiment_circuit(d, mem_rounds=d)
+    init = y_init_magic_experiment_circuit(d, mem_rounds=d)
+
+    for name, circuit in (("cap", cap), ("init", init)):
+        circuit.detector_error_model(decompose_errors=False)  # raises if non-deterministic
+        _, observables = circuit.compile_detector_sampler().sample(200, separate_observables=True)
+        assert len({bool(v) for v in observables.reshape(-1)}) == 1, name
+        assert _circuit_distance(circuit) == d, name
+
+    assert init.num_detectors == cap.num_detectors
+    assert init.num_observables == cap.num_observables
+    # Reversing turns the cap's transversal data measurement into a reset, so the
+    # initialisation makes strictly fewer measurements.
+    assert init.num_measurements < cap.num_measurements
