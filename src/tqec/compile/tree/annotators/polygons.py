@@ -39,9 +39,10 @@ def generate_polygons_for_layout_layer(layer: LayoutLayer, k: int) -> list[Polyg
     """Generate the polygons that might be used to visualise stabilizers in Crumble.
 
     A raw round carries a circuit but no plaquettes, so it contributes no
-    polygons, e.g. a round of the Y-basis measurement cap. Positions holding one are skipped, and the remaining plaquette positions
-    are outlined as usual. A layer that is entirely raw yields no polygons at all,
-    which is right --- a round with no plaquettes has no stabilizers to outline.
+    polygons, e.g. a round of the Y-basis measurement cap. Positions holding one
+    are skipped, and the remaining plaquette positions are outlined as usual. A
+    layer that is entirely raw yields no polygons at all, which is right --- a
+    round with no plaquettes has no stabilizers to outline.
     """
     plaquette_positions = [
         pos for pos, sublayer in layer.layers.items() if not isinstance(sublayer, RawCircuitLayer)
