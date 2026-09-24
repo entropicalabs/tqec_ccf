@@ -217,6 +217,11 @@ linkcheck_ignore = [
     r"https://quantum-journal\.org/.*",
     # Fowler review paper
     r"https://drive\.google\.com/file/.*",
+    # GitHub answers 404 to a logged-out client on a stargazers page; linked from
+    # the star-history badge in the README
+    r"https://github\.com/[^/]+/[^/]+/stargazers",
+    # Stack Overflow answers 403 to automated requests
+    r"https://stackoverflow\.com/.*",
 ]
 linkcheck_timeout = 30
 linkcheck_retries = 2
