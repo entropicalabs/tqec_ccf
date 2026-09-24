@@ -67,19 +67,59 @@ def test_y_cap_transposed_is_derived_from_the_cube_below() -> None:
         assert specs[Position3D(0, 0, 0)].y_cap_transposed is False, kind
 
 
-def test_y_basis_initialisation_is_rejected_with_a_clear_error() -> None:
-    """A Y cube with no cube below it is refused where it is diagnosable.
+def _y_init_column(kind: str = "ZXZ") -> BlockGraph:
+    """Build a Y-basis initialisation feeding a memory cube above it."""
+    g = BlockGraph("y_init_column")
+    g.add_cube(Position3D(0, 0, 0), LeafCubeKind.Y_HALF_CUBE)
+    g.add_cube(Position3D(0, 0, 1), ZXCube.from_str(kind))
+    g.add_pipe(Position3D(0, 0, 0), Position3D(0, 0, 1))
+    return g
 
-    Only the measurement half of the construction is lowered. Without this
-    check, a Y-basis initialisation is built as a measurement cap and fails much
-    later with a seam-detector mismatch.
+
+def test_a_y_cube_attached_only_to_a_port_is_rejected_with_a_clear_error() -> None:
+    """A Y cube needs a regular cube on one temporal side or the other.
+
+    With a cube below it is a measurement cap, with one above it is a Y-basis
+    initialisation; with neither there is no patch to run on, and the failure is
+    much clearer here than the seam-detector mismatch it would otherwise become.
     """
-    graph = BlockGraph("y_init")
-    graph.add_cube(Position3D(0, 0, 0), LeafCubeKind.Y_HALF_CUBE)
-    graph.add_cube(Position3D(0, 0, 1), ZXCube.from_str("ZXZ"))
-    graph.add_pipe(Position3D(0, 0, 0), Position3D(0, 0, 1))
-    with pytest.raises(NotImplementedError, match="not a Y-basis measurement cap"):
-        compile_block_graph(graph, observables=[]).generate_stim_circuit(k=1)
+    graph = BlockGraph("y_on_port")
+    graph.add_cube(Position3D(0, 0, 0), LeafCubeKind.PORT, label="p")
+    graph.add_cube(Position3D(0, 0, 1), LeafCubeKind.Y_HALF_CUBE)
+    graph.add_pipe(Position3D(0, 0, 0), Position3D(0, 0, 1), "ZXO")
+    # Asserted at the spec, which is where the rule lives: a whole-graph compile
+    # of this never reaches it, because open ports are refused earlier.
+    with pytest.raises(NotImplementedError, match="no regular cube directly below or above"):
+        CubeSpec.from_cube(graph[Position3D(0, 0, 1)], graph)
+
+
+@pytest.mark.parametrize("kind", _BELOW_KINDS)
+@pytest.mark.parametrize("k", [1, 2])
+def test_y_basis_initialisation_compiles_deterministically(k: int, kind: str) -> None:
+    """A Y cube *below* a regular cube initialises it in the Y basis.
+
+    The time reverse of the measurement cap: deterministic throughout and free of
+    fictitious ``MPP``. It runs one round *longer* than a cap, because it needs
+    two rounds in the cap's own interaction order next to its fold where a cap
+    needs one, and the temporal pipe supplies only one of them --- see
+    :func:`handoff_raw_slice`.
+    """
+    init = compile_block_graph(_y_init_column(kind), observables="auto").generate_stim_circuit(k=k)
+    cap = compile_block_graph(_y_capped_column(kind), observables="auto").generate_stim_circuit(k=k)
+    init.detector_error_model(decompose_errors=False)  # raises if non-deterministic
+    assert not any(inst.name == "MPP" for inst in init.flattened())
+    assert init.num_detectors > cap.num_detectors
+    assert init.num_measurements > cap.num_measurements
+
+
+def test_y_cube_direction_is_derived_from_its_neighbour() -> None:
+    """``y_cube_initialises`` follows which side the regular cube is on."""
+    for graph, position, expected in (
+        (_y_capped_column(), Position3D(0, 0, 1), False),
+        (_y_init_column(), Position3D(0, 0, 0), True),
+    ):
+        spec = CubeSpec.from_cube(graph[position], graph)
+        assert spec.y_cube_initialises is expected
 
 
 @pytest.mark.parametrize("k", [1, 2])
@@ -330,6 +370,65 @@ def test_y_cap_junction_plaquettes_change_only_the_interaction_order(transposed:
         if [c.n for c in a.corners] != [c.n for c in b.corners]:
             changed += 1
     assert changed > 0, "the re-timed round must actually differ from the fixed-bulk one"
+
+
+def _two_y_inits_with_main_column(kind: str = "ZXZ") -> BlockGraph:
+    """The two-cap graph run backwards: Y cubes below, feeding up into the branch."""
+    g = BlockGraph("two_y_inits")
+    b = [Position3D(0, 0, i) for i in range(5)]
+
+    def beside(z: int) -> Position3D:
+        if _branch_axis(kind) is Direction3D.X:
+            return Position3D(1, 0, z)
+        return Position3D(0, 1, z)
+
+    c1, c3 = beside(1), beside(3)
+    y0, y2 = beside(0), beside(2)
+    for p in [*b, c1, c3]:
+        g.add_cube(p, ZXCube.from_str(kind))
+    g.add_cube(y0, LeafCubeKind.Y_HALF_CUBE)
+    g.add_cube(y2, LeafCubeKind.Y_HALF_CUBE)
+    for i in range(4):
+        g.add_pipe(b[i], b[i + 1])
+    g.add_pipe(b[1], c1)
+    g.add_pipe(b[3], c3)
+    g.add_pipe(y0, c1)
+    g.add_pipe(y2, c3)
+    return g
+
+
+@pytest.mark.parametrize("kind", _BELOW_KINDS)
+@pytest.mark.parametrize("k", [1, 2])
+def test_two_y_inits_observable_preserves_distance(k: int, kind: str) -> None:
+    """Two Y-basis initialisations close the same surface at full distance.
+
+    The mirror of :func:`test_two_y_caps_observable_preserves_distance`. An
+    initialisation needs *two* rounds in the cap's interaction order after its
+    fold where a cap needs one before it; with only the pipe's junction round the
+    distance is 4 instead of 5 at ``k = 2``, and the block's own handoff round is
+    what restores it.
+
+    That defect is invisible to :meth:`~stim.Circuit.shortest_graphlike_error` in
+    *both* its modes: two of the four faults flip four detectors each, so the
+    error is a hyperedge no matching graph can represent and the graphlike search
+    reports the full ``2k + 1`` regardless. Only
+    ``search_for_undetectable_logical_errors`` sees it.
+    """
+    graph = _two_y_inits_with_main_column(kind)
+    surfaces = graph.find_correlation_surfaces()
+    assert [cs.external_stabilizer_on_graph(graph) for cs in surfaces] == [_SURFACE_BY_KIND[kind]]
+    circuit = compile_block_graph(graph, observables=surfaces).generate_stim_circuit(k=k)
+    circuit.detector_error_model(decompose_errors=False)
+    _, observables = circuit.compile_detector_sampler().sample(300, separate_observables=True)
+    assert len({bool(v) for v in observables.reshape(-1)}) == 1
+
+    noisy = NoiseModel.uniform_depolarizing(0.001).noisy_circuit(circuit)
+    error = noisy.search_for_undetectable_logical_errors(
+        dont_explore_detection_event_sets_with_size_above=4,
+        dont_explore_edges_with_degree_above=4,
+        dont_explore_edges_increasing_symptom_degree=False,
+    )
+    assert len(error) == 2 * k + 1
 
 
 @pytest.mark.parametrize("kind", _BELOW_KINDS)

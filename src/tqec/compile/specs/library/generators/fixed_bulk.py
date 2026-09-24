@@ -36,7 +36,9 @@ _CORNER_OF_OFFSET: Final = {(-1, -1): 0, (1, -1): 1, (-1, 1): 2, (1, 1): 3}
 
 
 @functools.cache
-def _y_cap_interaction_times(transposed: bool) -> Mapping[str, tuple[int, int, int, int]]:
+def _y_cap_interaction_times(
+    transposed: bool, reverse: bool = False
+) -> Mapping[str, tuple[int, int, int, int]]:
     """Return the Y cap's interaction times, keyed by stabilizer basis.
 
     Read off :func:`.xtop_qubit_patch`, the patch the cap's own rounds are built
@@ -55,6 +57,19 @@ def _y_cap_interaction_times(transposed: bool) -> Mapping[str, tuple[int, int, i
             assert data is not None
             corners[_CORNER_OF_OFFSET[(data[0] - ax, data[1] - ay)]] = step + 1
         times[basis] = (corners[0], corners[1], corners[2], corners[3])
+    if reverse:
+        # A Y-basis initialisation runs every round backwards, so the junction
+        # round above one may want the reversed order; see the caller.
+        steps = len(next(iter(times.values())))
+        times = {
+            basis: (
+                steps + 1 - v[0],
+                steps + 1 - v[1],
+                steps + 1 - v[2],
+                steps + 1 - v[3],
+            )
+            for basis, v in times.items()
+        }
     return times
 
 
@@ -411,6 +426,7 @@ class FixedBulkConventionGenerator:
         self,
         z_orientation: Orientation = Orientation.HORIZONTAL,
         transposed: bool = False,
+        reverse: bool = False,
     ) -> Plaquettes:
         """Return the memory plaquettes retimed to the Y cap's interaction order.
 
@@ -442,13 +458,15 @@ class FixedBulkConventionGenerator:
                 :meth:`get_memory_qubit_plaquettes`.
             transposed: whether the cap's patch is reflected across its main
                 diagonal, i.e. :attr:`.CubeSpec.y_cap_transposed`.
+            reverse: run the order backwards, which a Y-basis *initialisation*
+                does for every one of its own rounds.
 
         Returns:
             the plaquettes of a standard memory round, carrying the cap's
             interaction order.
 
         """
-        times = _y_cap_interaction_times(transposed)
+        times = _y_cap_interaction_times(transposed, reverse)
         descriptions = self.get_memory_qubit_rpng_descriptions(z_orientation, None, None)
         return Plaquettes(
             descriptions.map_values(lambda d: _retimed(d, times)).map_values(

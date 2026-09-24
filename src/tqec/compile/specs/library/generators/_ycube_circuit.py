@@ -1276,6 +1276,54 @@ class _InitialRawLayer(_YRoundRawLayer):
         return initial_raw_slice(2 * k + 1, self._transposed)[1]
 
 
+def handoff_raw_slice(
+    distance: int, transposed: bool = False
+) -> tuple[stim.Circuit, dict[Coord, list[Coord]]]:
+    """Build the handoff round a Y-basis initialisation ends with.
+
+    An ordinary memory round on the ``xtop`` patch, run in the cap's own
+    interaction order rather than the fixed-bulk one.
+
+    A Y cap needs exactly one round in its own order next to its fold -- the
+    junction round the temporal pipe supplies. An initialisation needs **two**:
+    measured at ``d = 5``, an init followed by one own-order round and then
+    fixed-bulk host rounds has circuit distance 4 instead of 5, and only a second
+    own-order round restores it. The pipe supplies one, so the block carries the
+    other itself, right after the reversed transition round.
+
+    Returns the round and its ``start_spec``; the caller also publishes the same
+    map as the ``end_spec`` the junction round above closes against.
+    """
+    xtop = xtop_qubit_patch(distance, transposed)
+    b = _Builder()
+    b.allocate(set(xtop.data_qubits) | {s.ancilla for s in xtop.stabilizers})
+    standard_round(b, xtop, "H")
+    spec = {s.ancilla: [s.ancilla] for s in xtop.stabilizers}
+    return _strip_trailing_tick(b.circuit), spec
+
+
+class _HandoffRawLayer(_YRoundRawLayer):
+    """The extra own-order round a Y-basis initialisation ends with.
+
+    Publishes both a ``start_spec`` and an ``end_spec``. The ``start_spec`` closes
+    against the reversed transition round below (whose ``end_spec`` prepares these
+    stabilizers with several records each); the ``end_spec`` is what the junction
+    round *above* -- an ordinary ``PlaquetteLayer`` -- closes against. Omitting the
+    ``end_spec`` silently opens a time boundary there and collapses the distance
+    to 1.
+    """
+
+    def __init__(self, transposed: bool = False) -> None:
+        self._transposed = transposed
+        super().__init__(lambda d: handoff_raw_slice(d, transposed)[0], _STANDARD_NUM_MOMENTS)
+
+    def start_spec(self, k: int) -> dict[Coord, list[Coord]]:
+        return handoff_raw_slice(2 * k + 1, self._transposed)[1]
+
+    def end_spec(self, k: int) -> dict[Coord, list[Coord]] | None:
+        return handoff_raw_slice(2 * k + 1, self._transposed)[1]
+
+
 class _BoundaryInvRawLayer(_YRoundRawLayer):
     def __init__(self, transposed: bool = False) -> None:
         self._transposed = transposed
@@ -1305,16 +1353,22 @@ class _TransitionInvRawLayer(_YRoundRawLayer):
 def make_y_init_layers(transposed: bool = False) -> list[BaseLayer | BaseComposedLayer]:
     """Build the sliced Y-basis *initialisation* layer sequence.
 
-    The exact reverse of :func:`make_y_cap_layers`: ``[initial,
-    RepeatedLayer(boundary, k-1), boundary, transition_inv]``, i.e. ``k`` boundary
-    rounds in total, ending with the round that unfolds onto the ``xtop`` patch
-    the cube above continues on.
+    ``[initial, RepeatedLayer(boundary, k-1), boundary, transition_inv, handoff]``:
+    the reverse of :func:`make_y_cap_layers` --- ``k`` boundary rounds in total,
+    ending with the round that unfolds back onto the ``xtop`` patch the cube above
+    continues on --- plus a trailing handoff round.
+
+    The handoff round is not a mirror of anything in the cap, and it is
+    load-bearing: an initialisation needs *two* rounds in the cap's interaction
+    order after its fold where a cap needs one before it, and the temporal pipe
+    supplies only one. See :func:`handoff_raw_slice`.
     """
     return [
         _InitialRawLayer(transposed),
         RepeatedLayer(_BoundaryInvRawLayer(transposed), LinearFunction(1, -1)),
         _BoundaryInvRawLayer(transposed),
         _TransitionInvRawLayer(transposed),
+        _HandoffRawLayer(transposed),
     ]
 
 
@@ -1350,19 +1404,24 @@ class YHalfCubeBlock(Block):
         layer_sequence: Sequence[BaseLayer | BaseComposedLayer],
         trimmed_spatial_borders: frozenset[SpatialBlockBorder] = frozenset(),
         template: RectangularTemplate | None = None,
+        initialises: bool = False,
     ) -> None:
-        """Build a Y-basis measurement cap from its per-round layers.
+        """Build a Y-basis measurement cap or initialisation from its rounds.
 
         Args:
-            layer_sequence: the cap's rounds, as returned by
-                :func:`make_y_cap_layers`.
+            layer_sequence: the block's rounds, as returned by
+                :func:`make_y_cap_layers` or :func:`make_y_init_layers`.
             trimmed_spatial_borders: all the spatial borders that have been
                 removed from the block.
             template: the block's spatial footprint. See the class docstring.
+            initialises: ``True`` for a Y-basis initialisation, whose regular
+                cube sits *above* it, so it gains its junction round at the end
+                rather than the beginning.
 
         """
         super().__init__(layer_sequence, trimmed_spatial_borders)
         self._template = template
+        self._initialises = initialises
 
     @property
     @override
@@ -1373,8 +1432,10 @@ class YHalfCubeBlock(Block):
     @override
     def releases_its_qubits(self) -> bool:
         # The cap's final round measures every data qubit of the degenerate
-        # patch transversally, so nothing of it survives into later rounds.
-        return True
+        # patch transversally, so nothing of it survives into later rounds. An
+        # initialisation is the opposite: it hands its data qubits on to the cube
+        # above and must stay present in every trailing layer of its slice.
+        return not self._initialises
 
     @override
     def with_temporal_borders_replaced(
@@ -1388,7 +1449,9 @@ class YHalfCubeBlock(Block):
         layers = self._layers_with_temporal_borders_replaced(border_replacements)
         if not layers:
             return None
-        return YHalfCubeBlock(layers, self.trimmed_spatial_borders, self._template)
+        return YHalfCubeBlock(
+            layers, self.trimmed_spatial_borders, self._template, self._initialises
+        )
 
     @override
     def with_spatial_borders_trimmed(self, borders: Iterable[SpatialBlockBorder]) -> YHalfCubeBlock:
@@ -1397,6 +1460,7 @@ class YHalfCubeBlock(Block):
             self._layers_with_spatial_borders_trimmed(borders),
             self.trimmed_spatial_borders | frozenset(borders),
             self._template,
+            self._initialises,
         )
 
     @override
@@ -1404,15 +1468,22 @@ class YHalfCubeBlock(Block):
         self,
         border_replacements: Mapping[TemporalBlockBorder, BaseLayer | None],
     ) -> list[BaseLayer | BaseComposedLayer]:
-        below = border_replacements.get(TemporalBlockBorder.Z_NEGATIVE)
+        # A cap gains the pipe's layer at the start, an initialisation at the
+        # end: the junction round always sits between the Y block's fold and the
+        # regular cube it attaches to, which is below a cap and above an init.
+        gained = (
+            TemporalBlockBorder.Z_POSITIVE if self._initialises else TemporalBlockBorder.Z_NEGATIVE
+        )
+        junction = border_replacements.get(gained)
         remaining = {
-            border: layer
-            for border, layer in border_replacements.items()
-            if border is not TemporalBlockBorder.Z_NEGATIVE
+            border: layer for border, layer in border_replacements.items() if border is not gained
         }
         layers = super()._layers_with_temporal_borders_replaced(remaining)
-        if below is not None:
-            layers.insert(0, below)
+        if junction is not None:
+            if self._initialises:
+                layers.append(junction)
+            else:
+                layers.insert(0, junction)
         return layers
 
 
