@@ -180,6 +180,15 @@ class LookbackStack:
             plaquettes_one[::-1],
         )
 
+    def previous_round_has_template(self) -> bool:
+        """Whether the round immediately before the current one has a template.
+
+        A round generated from a raw circuit has none, so the fixed-radius
+        detector computation cannot reach across it.
+        """
+        templates, _, _, _ = self._get_last_n(1)
+        return bool(templates) and templates[0] is not None
+
     def lookback_records(self, n: int) -> MeasurementRecordsMap:
         """Get the merged measurement records of the last ``n`` QEC rounds.
 
@@ -231,7 +240,8 @@ class LookbackStack:
     ]:
         """Get the last ``n`` QEC rounds with parallel branch-zero and branch-one
         plaquette lists. Rounds with no branch-one alternate fall back to the
-        branch-zero entry (both branches share that round's content)."""
+        branch-zero entry (both branches share that round's content).
+        """
         templates, plaquettes_zero, measurement_records, plaquettes_one = self._get_last_n(n)
         if any(t is None for t in templates) or any(p is None for p in plaquettes_zero):
             raise NotImplementedError(
@@ -340,21 +350,40 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
         plaquettes_one_for_round: Plaquettes | None = None
         active_condition_recs: list[int] | None = None
         if self._condition_recs is not None and node._layer.conditional_layers:
-            active_condition_recs = self._condition_recs.get(
-                self._min_z + self._z_index
-            )
+            active_condition_recs = self._condition_recs.get(self._min_z + self._z_index)
         leaf_is_conditional = active_condition_recs is not None
         if leaf_is_conditional:
-            template_one, plaquettes_one_for_round = (
-                node._layer._compute_template_and_plaquettes(
-                    node._layer._branch_one_layers()
-                )
+            template_one, plaquettes_one_for_round = node._layer._compute_template_and_plaquettes(
+                node._layer._branch_one_layers()
             )
             if template_one != template_zero:
                 raise TQECError(
-                    "AnnotateDetectorsOnLayerNode: per-branch templates differ; "
-                    "EMC + CEO violated."
+                    "AnnotateDetectorsOnLayerNode: per-branch templates differ; EMC + CEO violated."
                 )
+        # A round whose predecessor is raw cannot use the template computation:
+        # the previous round has no template to compute against. That happens
+        # above a Y-basis *initialisation*, whose last round hands its
+        # ``end_spec`` forward exactly as the measurement cap's transition round
+        # does, and above the state-injection encoder, which prepares the
+        # stabilizers rather than measuring them -- so the seam is closed from
+        # that spec instead, and the template path is skipped for this one round.
+        if self._pending_end_spec is not None:
+            # The seam always comes from the spec. Whether the *rest* of this
+            # round can still use the template path depends on the previous
+            # round: a slice that was entirely raw (a lone Y column) leaves no
+            # template to compute against, but a mixed slice does, and the
+            # positions that were plaquettes there must keep their detectors.
+            skip_template = not self._lookback_stack.previous_round_has_template()
+            self._emit_seam_against_raw_round(annotations)
+            if skip_template:
+                self._lookback_stack.append(
+                    template_zero,
+                    plaquettes_zero,
+                    MeasurementRecordsMap.from_scheduled_circuit(annotations.circuit),
+                    plaquettes_branch_one=plaquettes_one_for_round,
+                )
+                return
+
         self._lookback_stack.append(
             template_zero,
             plaquettes_zero,
@@ -380,7 +409,6 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
                 annotations.detectors.append(
                     DetectorAnnotation.from_detector(detector, measurement_records)
                 )
-            self._emit_prepared_stabilizer_detectors(annotations, measurement_records)
             return
 
         # Per-branch detector computation. The lookback gives parallel
@@ -432,44 +460,6 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
                 )
             )
 
-    def _emit_prepared_stabilizer_detectors(
-        self,
-        annotations: LayerNodeAnnotations,
-        records: MeasurementRecordsMap,
-    ) -> None:
-        """Close the stabilizers a preceding raw round reported as prepared.
-
-        A raw round that prepares stabilizers rather than measuring them -- the
-        state-injection encoder -- hands them forward through
-        ``self._pending_end_spec``, keyed by ancilla coordinate. This round is a
-        template round, so the fixed-radius computation has no way to see that
-        preparation; the detectors are formed here instead, exactly as
-        :meth:`_emit_raw_seam` does for a raw round.
-
-        The encoder's spec carries an empty list of preparing measurements for
-        every stabilizer, which makes each detector this round's own single
-        ancilla measurement.
-        """
-        pending = self._pending_end_spec
-        if not pending:
-            return
-        self._pending_end_spec = None
-        for ancilla, prepared_by in pending.items():
-            gq = GridQubit(*ancilla)
-            if gq not in records:
-                raise TQECError(
-                    f"A preceding raw round reported the stabilizer at {ancilla} as "
-                    "prepared, but this round did not measure it; the raw round "
-                    "does not match the patch above it."
-                )
-            offsets = [records[gq][-1]] + [records[GridQubit(*q)][-1] for q in prepared_by]
-            annotations.detectors.append(
-                DetectorAnnotation(
-                    StimCoordinates(float(ancilla[0]), float(ancilla[1]), 0.0),
-                    sorted(offsets),
-                )
-            )
-
     def _annotate_raw_slice(
         self,
         layout: LayoutLayer,
@@ -513,7 +503,7 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
             # stack shifts no offsets and keeps the window unbroken. Pushing it
             # would instead blind ``lookback`` to the round that follows, which
             # is the round carrying the encoder's detectors (see
-            # ``_emit_prepared_stabilizer_detectors``).
+            # ``_emit_seam_against_raw_round``).
             return
         # Push this slice's own records so later rounds can look back through it.
         # A raw round has neither template nor plaquettes, hence the ``None``s:
@@ -635,6 +625,53 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
             self._pending_end_spec = {sh(c): [sh(q) for q in v] for c, v in end_spec.items()}
         else:
             self._pending_end_spec = None
+
+    def _emit_seam_against_raw_round(self, annotations: LayerNodeAnnotations) -> None:
+        """Close a plaquette round against the raw round that precedes it.
+
+        The mirror of the ``pending`` branch of :meth:`_emit_raw_seam`. The raw
+        round handed forward, per stabilizer, the qubit coordinates whose records
+        prepare it; this round measures each of those stabilizers once, by
+        ancilla. Pairing the two gives the seam detectors, and consumes the
+        pending spec.
+
+        Two raw rounds hand a spec forward: the last round of a Y-basis
+        initialisation, and the state-injection encoder. The encoder measures
+        nothing, so its spec lists no preparing coordinates and each detector is
+        this round's single ancilla measurement.
+
+        Raises:
+            TQECError: if this round does not measure a stabilizer the raw round
+                reported as prepared, i.e. the raw round does not match the
+                patch above it.
+
+        """
+        assert annotations.circuit is not None
+        pending = self._pending_end_spec
+        assert pending is not None
+        self._pending_end_spec = None
+
+        records = MeasurementRecordsMap.from_scheduled_circuit(annotations.circuit)
+        total = annotations.circuit.get_circuit().num_measurements
+        previous = self._lookback_stack.lookback_records(1)
+
+        for ancilla, prepared_by in pending.items():
+            gq = GridQubit(*ancilla)
+            if gq not in records:
+                raise TQECError(
+                    f"A preceding raw round reported the stabilizer at {ancilla} as "
+                    "prepared, but this round did not measure it; the raw round "
+                    "does not match the patch above it."
+                )
+            offsets = [records[gq][-1]] + [
+                previous[GridQubit(*coord)][-1] - total for coord in prepared_by
+            ]
+            annotations.detectors.append(
+                DetectorAnnotation(
+                    StimCoordinates(float(ancilla[0]), float(ancilla[1]), 0.0),
+                    sorted(offsets),
+                )
+            )
 
     def _annotate_mixed_slice(
         self,

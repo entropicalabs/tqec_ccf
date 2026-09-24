@@ -92,6 +92,7 @@ class FixedBulkCubeBuilder(CubeBuilder):
             from tqec.compile.specs.library.generators._ycube_circuit import (
                 YHalfCubeBlock,
                 make_y_cap_layers,
+                make_y_init_layers,
             )
 
             # The Y-basis measurement cap is sliced into per-round raw layers
@@ -101,9 +102,11 @@ class FixedBulkCubeBuilder(CubeBuilder):
             # transition's seam detectors close against -- is the temporal pipe's
             # junction layer, which ``YHalfCubeBlock`` prepends instead of letting
             # it overwrite the transition round.
+            make_layers = make_y_init_layers if spec.y_cube_initialises else make_y_cap_layers
             return YHalfCubeBlock(
-                make_y_cap_layers(spec.y_cap_transposed),
+                make_layers(spec.y_cap_transposed),
                 template=self._generator.get_memory_qubit_raw_template(),
+                initialises=spec.y_cube_initialises,
             )
         elif kind is LeafCubeKind.INJECTION:
             # The injection cube is the encoder and nothing else: the memory
@@ -216,12 +219,37 @@ class FixedBulkPipeBuilder(PipeBuilder):
             z_observable_orientation, None, None
         )
         template = self._generator.get_memory_qubit_raw_template()
-        return Block(
-            [
-                PlaquetteLayer(template, memory_plaquettes)
-                for _ in range(3 if spec.at_temporal_hadamard_layer else 2)
-            ]
-        )
+        layers: list[BaseLayer | BaseComposedLayer] = [
+            PlaquetteLayer(template, memory_plaquettes)
+            for _ in range(3 if spec.at_temporal_hadamard_layer else 2)
+        ]
+        # A Y cap above turns the last layer into the cap's *junction round*, which
+        # has to run the cap's interaction order rather than the fixed-bulk one --
+        # see `get_y_cap_junction_plaquettes`. Only the last layer: this block's
+        # `Z_NEGATIVE` border (layer 0) replaces the top border of the cube *below*,
+        # which may share a time slice with a spatial pipe still on the fixed-bulk
+        # schedule, and re-timing it makes the two collide on their shared data
+        # qubits. `CompiledGraph._add_temporal_pipe` maps the borders that way, and
+        # `YHalfCubeBlock` prepends the `Z_NEGATIVE` replacement it receives.
+        # `CompiledGraph._add_temporal_pipe` hands this block's `Z_NEGATIVE`
+        # border (layer 0) to the cube *below* and its `Z_POSITIVE` border
+        # (layer -1) to the cube *above*, so each endpoint owns one layer. Re-time
+        # whichever layer lands inside a Y block, and only that one: the other is
+        # an ordinary memory round that may share a time slice with a spatial pipe
+        # still on the fixed-bulk schedule, and re-timing it makes the two collide
+        # on their shared data qubits.
+        for endpoint, index in ((spec.cube_specs[0], 0), (spec.cube_specs[1], -1)):
+            if endpoint.kind is not LeafCubeKind.Y_HALF_CUBE:
+                continue
+            layers[index] = PlaquetteLayer(
+                template,
+                self._generator.get_y_cap_junction_plaquettes(
+                    z_observable_orientation,
+                    endpoint.y_cap_transposed,
+                    reverse=endpoint.y_cube_initialises,
+                ),
+            )
+        return Block(layers)
 
     def _get_temporal_hadamard_pipe_block(self, spec: PipeSpec) -> Block:
         """Return the block to implement a temporal Hadamard pipe.

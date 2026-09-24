@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import functools
 import inspect
-from typing import Literal
+from collections.abc import Mapping
+from typing import Final, Literal
 
 import stim
 
@@ -10,12 +12,13 @@ from tqec.compile.specs.base import CubeSpec
 from tqec.compile.specs.enums import SpatialArms
 from tqec.compile.specs.library.generators.extended_stabilizers import ExtendedPlaquetteCollection
 from tqec.compile.specs.library.generators.utils import PlaquetteMapper
+from tqec.compile.specs.library.generators.ycube import xtop_qubit_patch
 from tqec.plaquette.compilation.base import PlaquetteCompiler
 from tqec.plaquette.debug import DrawPolygon, PlaquetteDebugInformation
 from tqec.plaquette.enums import PlaquetteOrientation
 from tqec.plaquette.plaquette import Plaquette, Plaquettes
 from tqec.plaquette.qubit import SquarePlaquetteQubits
-from tqec.plaquette.rpng.rpng import PauliBasis, RPNGDescription
+from tqec.plaquette.rpng.rpng import RPNG, PauliBasis, RPNGDescription
 from tqec.plaquette.rpng.translators.base import RPNGTranslator
 from tqec.templates.base import RectangularTemplate
 from tqec.templates.qubit import (
@@ -27,6 +30,62 @@ from tqec.templates.qubit import (
 from tqec.utils.enums import Basis, Orientation
 from tqec.utils.exceptions import TQECError
 from tqec.utils.frozendefaultdict import FrozenDefaultDict
+
+# ``RPNGDescription`` lists its corners top-left, top-right, bottom-left, bottom-right.
+_CORNER_OF_OFFSET: Final = {(-1, -1): 0, (1, -1): 1, (-1, 1): 2, (1, 1): 3}
+
+
+@functools.cache
+def _y_cap_interaction_times(
+    transposed: bool, reverse: bool = False
+) -> Mapping[str, tuple[int, int, int, int]]:
+    """Return the Y cap's interaction times, keyed by stabilizer basis.
+
+    Read off :func:`.xtop_qubit_patch`, the patch the cap's own rounds are built
+    from, so the two cannot drift apart. The patch's order function depends only
+    on a stabilizer's checkerboard basis, so one 4-body stabilizer per basis fixes
+    the order for the whole patch, its 2-body boundary plaquettes included.
+    """
+    times: dict[str, tuple[int, int, int, int]] = {}
+    for stabilizer in xtop_qubit_patch(3, transposed).stabilizers:
+        basis = stabilizer.basis.value.lower()
+        if basis in times or any(d is None for d in stabilizer.ordered_data):
+            continue
+        corners = [0, 0, 0, 0]
+        ax, ay = stabilizer.ancilla
+        for step, data in enumerate(stabilizer.ordered_data):
+            assert data is not None
+            corners[_CORNER_OF_OFFSET[(data[0] - ax, data[1] - ay)]] = step + 1
+        times[basis] = (corners[0], corners[1], corners[2], corners[3])
+    if reverse:
+        # A Y-basis initialisation runs every round backwards, so the junction
+        # round above one may want the reversed order; see the caller.
+        steps = len(next(iter(times.values())))
+        times = {
+            basis: (
+                steps + 1 - v[0],
+                steps + 1 - v[1],
+                steps + 1 - v[2],
+                steps + 1 - v[3],
+            )
+            for basis, v in times.items()
+        }
+    return times
+
+
+def _retimed(
+    description: RPNGDescription, times: Mapping[str, tuple[int, int, int, int]]
+) -> RPNGDescription:
+    """Reassign a single-basis plaquette's interaction times, leaving all else alone."""
+    corners = list(description.corners)
+    bases = {c.p.value.lower() for c in corners if c.p is not None}
+    if len(bases) != 1:
+        return description
+    basis_times = times[bases.pop()]
+    tl, tr, bl, br = (
+        c if c.p is None else RPNG(c.r, c.p, n, c.g) for c, n in zip(corners, basis_times)
+    )
+    return RPNGDescription((tl, tr, bl, br), description.ancilla)
 
 
 def make_fixed_bulk_realignment_plaquette(
@@ -361,6 +420,58 @@ class FixedBulkConventionGenerator:
         """
         return self._mapper(self.get_memory_qubit_rpng_descriptions)(
             z_orientation, reset, measurement
+        )
+
+    def get_y_cap_junction_plaquettes(
+        self,
+        z_orientation: Orientation = Orientation.HORIZONTAL,
+        transposed: bool = False,
+        reverse: bool = False,
+    ) -> Plaquettes:
+        """Return the memory plaquettes retimed to the Y cap's interaction order.
+
+        The memory round directly below a ``Y_HALF_CUBE`` -- the *junction round*
+        -- is followed immediately by the cap's transition round, which is a port
+        of Gidney's construction and uses his interaction order. The fixed-bulk
+        order and Gidney's disagree about which pair of data qubits each
+        stabilizer touches last, i.e. about where the hook error lies, and that
+        disagreement across the seam costs the assembled circuit its distance: a
+        fault part-way through a junction-round ancilla leaves a residual on a
+        data qubit shared with the neighbouring stabilizer that the transition
+        round faults on directly, so the two faults produce the same syndrome but
+        different logical effects. Running the junction round in the cap's own
+        order removes the coincidence.
+
+        Only the interaction *times* change. The plaquette geometry, the resets
+        and the measurements are the fixed-bulk ones, so the round still measures
+        exactly the same stabilizers; it just measures them in a different order.
+
+        Note:
+            The order is read off :func:`.xtop_qubit_patch` rather than written
+            out here, so it tracks the cap's own schedule by construction. Both
+            bases have to move together: the schedule is a proper edge colouring
+            of the data/ancilla interaction graph, and re-timing one basis alone
+            makes two plaquettes touch a shared data qubit in the same moment.
+
+        Args:
+            z_orientation: orientation of the ``Z`` observable, as for
+                :meth:`get_memory_qubit_plaquettes`.
+            transposed: whether the cap's patch is reflected across its main
+                diagonal, i.e. :attr:`.CubeSpec.y_cap_transposed`.
+            reverse: run the order backwards, which a Y-basis *initialisation*
+                does for every one of its own rounds.
+
+        Returns:
+            the plaquettes of a standard memory round, carrying the cap's
+            interaction order.
+
+        """
+        times = _y_cap_interaction_times(transposed, reverse)
+        descriptions = self.get_memory_qubit_rpng_descriptions(z_orientation, None, None)
+        return Plaquettes(
+            descriptions.map_values(lambda d: _retimed(d, times)).map_values(
+                self._mapper.get_plaquette
+            )
         )
 
     ########################################
