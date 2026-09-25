@@ -2,8 +2,10 @@
 
 from typing import Final, Literal
 
+from tqec.compile.blocks.block import Block
 from tqec.compile.blocks.layers.atomic.base import BaseLayer
 from tqec.compile.blocks.layers.atomic.plaquettes import PlaquetteLayer
+from tqec.compile.blocks.layers.atomic.raw import RawCircuitLayer
 from tqec.compile.blocks.layers.composed.base import BaseComposedLayer
 from tqec.compile.blocks.layers.composed.repeated import RepeatedLayer
 from tqec.compile.blocks.layers.composed.sequenced import SequencedLayers
@@ -20,6 +22,7 @@ from tqec.computation.block_graph import BlockGraph
 from tqec.computation.correlation import (
     ConditionalCorrelationSurface,
     CorrelationSurface,
+    find_correlation_surfaces,
 )
 from tqec.computation.cube import Cube
 from tqec.templates.base import RectangularTemplate
@@ -135,7 +138,7 @@ def _classify_conditions(
 
 def _get_template_from_layer(
     root: BaseLayer | BaseComposedLayer,
-) -> RectangularTemplate:
+) -> RectangularTemplate | None:
     """Get a unique template from any given layer.
 
     This helper function try its best to recover the template a given layer uses.
@@ -153,6 +156,13 @@ def _get_template_from_layer(
 
     """
     if isinstance(root, BaseLayer):
+        if isinstance(root, RawCircuitLayer):
+            # A raw-circuit layer (e.g. one round of the Y-basis measurement cap)
+            # carries no Template. It is skipped when recovering a block's
+            # template; a block that mixes raw layers with plaquette layers (a Y
+            # cap once its junction round has been prepended) yields the
+            # plaquette layer's template for the temporal-pipe junction.
+            return None
         if not isinstance(root, PlaquetteLayer):
             raise TQECError(
                 f"Trying to get the Template from a {type(root).__name__} "
@@ -160,13 +170,25 @@ def _get_template_from_layer(
             )
         return root.template
     elif isinstance(root, SequencedLayers):
-        possible_templates = {_get_template_from_layer(layer) for layer in root.layer_sequence}
+        # A block built only from raw layers (the Y-basis measurement cap) has no
+        # plaquette layer to recover a template from, so it declares its spatial
+        # footprint directly. Checked before walking the layers, which would
+        # otherwise find nothing and raise.
+        if isinstance(root, Block) and root.declared_template is not None:
+            return root.declared_template
+        possible_templates = {
+            template
+            for layer in root.layer_sequence
+            if (template := _get_template_from_layer(layer)) is not None
+        }
         if len(possible_templates) > 1:
             raise TQECError(
                 "Multiple possible Template found:\n  -"
                 + "\n  -".join(type(t).__name__ for t in possible_templates)
                 + "\nWhich is not supported at the moment."
             )
+        if not possible_templates:
+            raise TQECError("No Template found among the layers of a block.")
         return next(iter(possible_templates))
     elif isinstance(root, RepeatedLayer):
         return _get_template_from_layer(root.internal_layer)
@@ -255,7 +277,13 @@ def compile_block_graph(
     cond_obs_included: list[ConditionalAbstractObservable] = []
     if observables is not None:
         if observables == "auto":
-            observables = block_graph.find_correlation_surfaces()
+            # Deliberately not ``block_graph.find_correlation_surfaces()``: that
+            # raises when the graph has no deterministic observable, which is the
+            # right answer for a user asking for one explicitly but not here.
+            # ``"auto"`` means "include whatever deterministic observables exist",
+            # and a computation may legitimately have none -- a Y-basis
+            # measurement cap reads out at random by construction.
+            observables = find_correlation_surfaces(block_graph.to_zx_graph())
         else:
             observables = [cs.shift_by(dz=-minz) for cs in observables]
         include_temporal_hadamard_pipes = convention.name == "fixed_bulk"

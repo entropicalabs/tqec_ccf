@@ -7,9 +7,14 @@ from typing import Final, TypeGuard
 from typing_extensions import override
 
 from tqec.circuit.schedule.circuit import ScheduledCircuit
+from tqec.circuit.schedule.manipulation import (
+    merge_scheduled_circuits,
+    relabel_circuits_qubit_indices,
+)
 from tqec.compile.blocks.enums import SpatialBlockBorder
 from tqec.compile.blocks.layers.atomic.base import BaseLayer
 from tqec.compile.blocks.layers.atomic.plaquettes import PlaquetteLayer
+from tqec.compile.blocks.layers.atomic.raw import RawCircuitLayer
 from tqec.compile.blocks.positioning import (
     LayoutCubePosition2D,
     LayoutPipePosition2D,
@@ -202,11 +207,22 @@ class LayoutLayer(BaseLayer):
             )
         self._layers = new_layers
 
-    def to_template_and_plaquettes(self) -> tuple[LayoutTemplate, Plaquettes]:
+    def to_template_and_plaquettes(
+        self, positions: Iterable[LayoutPosition2D] | None = None
+    ) -> tuple[LayoutTemplate, Plaquettes]:
         """Return an equivalent representation of ``self`` with a template and some plaquettes.
 
+        Args:
+            positions: the positions of ``self`` to represent, or ``None`` to
+                represent all of them. Restricting them is for a caller that can
+                make sense of part of a layer while the rest has no template to
+                offer --- Crumble polygons, which a raw round simply does not
+                have. Note the returned template shifts its own bounding box to
+                the origin, so dropping the position holding the minimum
+                coordinate moves the frame the result is expressed in.
+
         Raises:
-            NotImplementedError: if not all layers composing ``self`` are instances
+            NotImplementedError: if any of the selected layers is not an instance
                 of :class:`~tqec.compile.blocks.layers.atomic.plaquette.PlaquetteLayer`.
 
         Returns:
@@ -215,7 +231,9 @@ class LayoutLayer(BaseLayer):
             circuit representing ``self``.
 
         """
-        return self._compute_template_and_plaquettes(self.layers)
+        if positions is None:
+            return self._compute_template_and_plaquettes(self.layers)
+        return self._compute_template_and_plaquettes({pos: self.layers[pos] for pos in positions})
 
     def _branch_one_layers(self) -> dict[LayoutPosition2D, BaseLayer]:
         """Build branch-``one`` layer map. Falls back to ``self.layers`` at positions
@@ -409,6 +427,13 @@ class LayoutLayer(BaseLayer):
             quantum circuit representing the layer.
 
         """
+        raw_positions = [
+            pos for pos, layer in self.layers.items() if isinstance(layer, RawCircuitLayer)
+        ]
+        if raw_positions:
+            if len(self.layers) == len(raw_positions):
+                return self._raw_to_circuit(k, raw_positions)
+            return self._mixed_to_circuit(k, raw_positions, reschedule_measurements)
         if reschedule_measurements:
             self.reschedule_measurements()
         template, plaquettes = self.to_template_and_plaquettes()
@@ -432,6 +457,84 @@ class LayoutLayer(BaseLayer):
         shift = Shift2D(mincube.x * (eshape.x - 1), mincube.y * (eshape.y - 1))
         shifted_circuit = scheduled_circuit.map_to_qubits(lambda q: q + shift)
         return shifted_circuit
+
+    def _raw_to_circuit(self, k: int, raw_positions: list[LayoutPosition2D]) -> ScheduledCircuit:
+        """Emit a layer that carries a :class:`RawCircuitLayer` at a cube position.
+
+        The raw layer supplies a self-contained ``ScheduledCircuit`` in the local
+        element frame; it is shifted into this layer's qubit coordinate frame
+        exactly as the plaquette path shifts its generated circuit. Only the
+        single-cube-position case (one raw layer, no parallel plaquette content)
+        is supported -- the shape a lone Y cap needs.
+        """
+        if len(self.layers) != 1 or len(raw_positions) != 1:
+            raise NotImplementedError(
+                f"{type(self).__name__}.to_circuit only supports a single "
+                "RawCircuitLayer occupying the whole layer; got "
+                f"{len(raw_positions)} raw layer(s) among {len(self.layers)} "
+                "positions."
+            )
+        pos = raw_positions[0]
+        if not isinstance(pos, LayoutCubePosition2D):
+            raise NotImplementedError("A RawCircuitLayer is only supported at a cube position.")
+        raw_layer = self.layers[pos]
+        assert isinstance(raw_layer, RawCircuitLayer)
+        scheduled = raw_layer.circuit_factory(k)
+        mincube, _ = self.bounds
+        eshape = self.element_shape.to_shape_2d(k)
+        shift = Shift2D(mincube.x * (eshape.x - 1), mincube.y * (eshape.y - 1))
+        return scheduled.map_to_qubits(lambda q: q + shift)
+
+    def _mixed_to_circuit(
+        self, k: int, raw_positions: list[LayoutPosition2D], reschedule_measurements: bool
+    ) -> ScheduledCircuit:
+        """Emit a layer mixing raw Y-cap rounds and plaquette memory rounds.
+
+        The two kinds of layer sit at distinct cube positions: a
+        :class:`RawCircuitLayer` for the Y-cap round, a :class:`PlaquetteLayer`
+        for the memory round coexisting with it. The plaquette positions are
+        rendered via the standard template path; each raw position supplies its
+        own ``ScheduledCircuit``. All circuits are
+        placed into a common qubit frame (shifted by their cube position) and
+        merged moment-by-moment (schedule-aligned), so a shorter raw round simply
+        contributes no operations to the trailing moments of a longer plaquette
+        round (and vice versa).
+
+        That common frame is **absolute**: a block at position ``bp`` occupies
+        qubit coordinates starting at ``bp * (eshape - 1)``. The plaquette path
+        already lands there, since :meth:`to_circuit` shifts its template-relative
+        output by its own bounds minimum. An earlier revision shifted the raw
+        circuits by the position *relative* to ``self.bounds`` instead, which
+        agrees only when this layer's minimum block position is zero: with a
+        minimum of one, a plaquette cube at ``bp = 1`` and a raw cube at
+        ``bp = 2`` both landed on the same qubits.
+        """
+        eshape = self.element_shape.to_shape_2d(k)
+
+        circuits: list[ScheduledCircuit] = []
+        plaquette_layers = {
+            pos: layer
+            for pos, layer in self.layers.items()
+            if not isinstance(layer, RawCircuitLayer)
+        }
+        if plaquette_layers:
+            plaquette_only = LayoutLayer(plaquette_layers, self.element_shape)
+            circuits.append(plaquette_only.to_circuit(k, reschedule_measurements))
+
+        for pos in raw_positions:
+            if not isinstance(pos, LayoutCubePosition2D):
+                raise NotImplementedError("A RawCircuitLayer is only supported at a cube position.")
+            raw_layer = self.layers[pos]
+            assert isinstance(raw_layer, RawCircuitLayer)
+            block_pos = pos.to_block_position()
+            shift = Shift2D(
+                block_pos.x * (eshape.x - 1),
+                block_pos.y * (eshape.y - 1),
+            )
+            circuits.append(raw_layer.circuit_factory(k).map_to_qubits(lambda q: q + shift))
+
+        relabeled, qubit_map = relabel_circuits_qubit_indices(circuits)
+        return merge_scheduled_circuits(relabeled, qubit_map)
 
     @property
     @override

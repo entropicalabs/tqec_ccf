@@ -235,3 +235,16 @@ def test_scalable_num_moments(
         ).scalable_num_moments
         == plaquette_layer.scalable_num_moments
     )
+
+
+def test_to_template_and_plaquettes_restricted_to_some_positions(
+    empty_plaquette_layer: PlaquetteLayer,
+) -> None:
+    pos1 = LayoutPosition2D.from_block_position(BlockPosition2D(0, 0))
+    pos2 = LayoutPosition2D.from_block_position(BlockPosition2D(-1, 12))
+    layer = LayoutLayer(
+        {pos1: empty_plaquette_layer, pos2: empty_plaquette_layer}, LOGICAL_QUBIT_SHAPE
+    )
+    template, _ = layer.to_template_and_plaquettes([pos2])
+
+    assert set(template._layout.keys()) == {pos2.to_block_position()}

@@ -24,6 +24,33 @@ These kind of computation require special handling that is not currently impleme
 ``Y``-basis measurements
 ------------------------
 
+An in-place ``Y``-basis *measurement* --- a :class:`.YHalfCube` capping a
+column, i.e. the readout half of an ``S`` gate --- is implemented for the
+fixed-bulk convention, following `Gidney's construction
+<https://quantum-journal.org/papers/q-2024-04-08-1310/>`_. The cap may coexist
+in a ``z``-slice with cubes that keep running, and its logical readout closes a
+correlation surface like any other, so the ``S``-gate observable is compiled
+without user intervention.
+
+A ``Y``-basis **initialization** --- a ``Y`` cube with a pipe above it rather
+than below --- is lowered as the time reverse of the measurement cap. It is one
+round longer than the cap (``k + 4`` rounds rather than ``k + 3``): the
+interaction-order seam needs two rounds in the cap's order next to the fold of
+an initialization but only one next to that of a measurement, and the temporal
+pipe supplies only one.
+
+Both halves are verified to preserve the circuit distance ``2k + 1`` only for
+``k <= 2``. At ``k = 3`` they measure ``2k``: the degenerate patch carries
+``k`` boundary rounds, which is too few at ``d = 7``. Gidney's own reference
+circuit, with the same number of boundary rounds, falls short in exactly the
+same way.
+
+The following are **not** implemented yet:
+
+* the same cube under the **fixed-boundary** convention, which still raises
+  ``NotImplementedError``.
+* a ``Y`` cube directly connected to a ``Port``.
+
 Walking codes
 -------------
 

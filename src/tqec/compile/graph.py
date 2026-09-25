@@ -479,7 +479,7 @@ class TopologicalComputationGraph:
             key = LayoutPosition3D.from_pipe_position((source, sink))
             self._blocks[key] = block
 
-    def to_layer_tree(self) -> LayerTree:
+    def to_layer_tree(self, k: int | None = None) -> LayerTree:
         """Merge layers happening in parallel at each time step.
 
         This method considers all the layers contained in added blocks (cubes and
@@ -488,6 +488,14 @@ class TopologicalComputationGraph:
         :class:`~tqec.compile.blocks.layers.composed.base.BaseComposedLayer`
         wrapping :class:`~tqec.compile.blocks.layers.atomic.layout.LayoutLayer`
         instances.
+
+        Args:
+            k: scaling factor. Only required when a z-slice contains cubes with
+                mismatched temporal schedules (e.g. a Y-basis measurement cap
+                coexisting with a continuing memory cube). Such a slice cannot be
+                merged into a scalable structure, so it is flattened at the
+                concrete ``k``. When every slice has a uniform schedule, ``k`` is
+                unused and the merged structure stays scalable.
 
         Returns:
             A tree representing the topological computation.
@@ -515,8 +523,8 @@ class TopologicalComputationGraph:
             SequencedLayers(
                 [
                     SequencedLayers(
-                        merge_parallel_block_layers(blocks, self._scalable_qubit_shape)
-                        + merge_parallel_block_layers(pipes, self._scalable_qubit_shape),
+                        merge_parallel_block_layers(blocks, self._scalable_qubit_shape, k)
+                        + merge_parallel_block_layers(pipes, self._scalable_qubit_shape, k),
                     )
                     for blocks, pipes in zip(blocks_by_z, temporal_pipes_by_z)
                 ]
@@ -561,7 +569,7 @@ class TopologicalComputationGraph:
             A compiled stim circuit.
 
         """
-        circuit = self.to_layer_tree().generate_circuit(
+        circuit = self.to_layer_tree(k).generate_circuit(
             k,
             manhattan_radius=manhattan_radius,
             detector_database=detector_database,
@@ -660,7 +668,7 @@ class TopologicalComputationGraph:
                 "cube on a distinct z-layer (e.g. by adding a temporal pipe "
                 "to a non-conditional cube on the offending layer)."
             )
-        layer_tree = self.to_layer_tree()
+        layer_tree = self.to_layer_tree(k)
         # Pre-annotate circuits so resolver can read MeasurementRecordsMap.
         layer_tree._annotate_circuits(
             k, reschedule_measurements=reschedule_measurements
@@ -747,6 +755,10 @@ class TopologicalComputationGraph:
             a string representing the Crumble URL of the quantum circuit.
 
         """
-        return self.to_layer_tree().generate_crumble_url(  # pragma: no cover
+        # ``k`` is needed here, not only by the tree: a z-slice whose blocks have
+        # mismatched temporal schedules (a Y cap beside an ordinary column) can
+        # only be merged by flattening it at a concrete scaling factor, and
+        # ``to_layer_tree`` refuses to guess one.
+        return self.to_layer_tree(k).generate_crumble_url(
             k, manhattan_radius, detector_database, add_polygons=add_polygons
         )

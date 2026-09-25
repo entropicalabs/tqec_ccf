@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from typing import Protocol, runtime_checkable
 
 from typing_extensions import override
 
@@ -8,6 +9,58 @@ from tqec.circuit.schedule.circuit import ScheduledCircuit
 from tqec.compile.blocks.enums import SpatialBlockBorder
 from tqec.compile.blocks.layers.atomic.base import BaseLayer
 from tqec.utils.scale import LinearFunction, PhysicalQubitScalable2D
+
+Coord2D = tuple[int, int]
+"""A qubit coordinate in a layer's local element frame."""
+
+
+@runtime_checkable
+class FlowSpecLayer(Protocol):
+    """A raw round that describes its stabilizer flows to the annotators.
+
+    A :class:`RawCircuitLayer` provides a circuit but no template, so the
+    detector annotator cannot recover the round's stabilizers the way it does
+    for a :class:`~tqec.compile.blocks.layers.atomic.plaquettes.PlaquetteLayer`.
+    A raw round that is one round of a longer construction (the rounds of the
+    Y-basis measurement cap) instead states its flows explicitly, and the
+    annotators build the cross-round detectors and the logical readout from
+    them.
+
+    Every spec is keyed by, and made of, **qubit coordinates in the round's
+    local element frame** --- never measurement record indices, which do not
+    survive the interleaving performed when this round is merged with a
+    coexisting round at another position.
+
+    """
+
+    def start_spec(self, k: int) -> Mapping[Coord2D, Sequence[Coord2D]]:
+        """Qubits this round measures to detect each stabilizer.
+
+        Keyed by the stabilizer's ancilla coordinate, matched against the
+        *previous* round's measurement of that same stabilizer.
+        """
+        ...
+
+    def end_spec(self, k: int) -> Mapping[Coord2D, Sequence[Coord2D]] | None:
+        """Qubits this round measures while *preparing* each stabilizer.
+
+        ``None`` when the next round can recover the match on its own, which it
+        can whenever this round measures every stabilizer with a single ancilla
+        (every standard round).
+        """
+        ...
+
+    def observable_spec(self, k: int) -> Sequence[Coord2D] | None:
+        """Qubits whose measurements reconstruct a logical operator, if any."""
+        ...
+
+    def reconstruction_spec(self, k: int) -> Mapping[Coord2D, Sequence[Coord2D]] | None:
+        """Stabilizers reconstructed within this round, if any.
+
+        Keyed by ancilla coordinate; the values are the qubits (ancilla plus
+        transversally measured data qubits) whose parity is deterministic.
+        """
+        ...
 
 
 class RawCircuitLayer(BaseLayer):

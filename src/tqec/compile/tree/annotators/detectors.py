@@ -1,18 +1,23 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 from typing_extensions import override
 
 from tqec.circuit.measurement_map import MeasurementRecordsMap
+from tqec.circuit.qubit import GridQubit
 from tqec.compile.blocks.layers.atomic.layout import LayoutLayer
+from tqec.compile.blocks.layers.atomic.raw import Coord2D, FlowSpecLayer, RawCircuitLayer
+from tqec.compile.blocks.positioning import LayoutCubePosition2D, LayoutPosition2D
 from tqec.compile.conditional.circuit import IfBlock
 from tqec.compile.detectors.compute import compute_detectors_for_fixed_radius
 from tqec.compile.detectors.database import DetectorDatabase
-from tqec.compile.tree.annotations import DetectorAnnotation
+from tqec.compile.tree.annotations import DetectorAnnotation, LayerNodeAnnotations
 from tqec.compile.tree.node import LayerNode, NodeWalker
 from tqec.plaquette.plaquette import Plaquettes
 from tqec.templates.base import Template
+from tqec.utils.coordinates import StimCoordinates
 from tqec.utils.exceptions import TQECError
 
 
@@ -24,10 +29,14 @@ class LookbackInformation:
     compute detectors. It only represents one QEC round.
 
     Attributes:
-        template: template representing the QEC round.
+        template: template representing the QEC round, or ``None`` for a round
+            generated from a raw circuit (a round of the Y-basis measurement
+            cap), which has no template. Detectors cannot be computed by the
+            template-based machinery across such a round; its measurement
+            records remain available.
         plaquettes: plaquettes that can be used in conjunction with
             ``self.template`` to generate the quantum circuit representing the
-            QEC round.
+            QEC round. ``None`` exactly when ``template`` is.
         measurement_records: all the measurement records of the QEC round
             represented by ``self``. This could in theory be computed from
             ``self.template`` and ``self.plaquettes`` by generating the quantum
@@ -37,8 +46,8 @@ class LookbackInformation:
 
     """
 
-    template: Template
-    plaquettes: Plaquettes
+    template: Template | None
+    plaquettes: Plaquettes | None
     measurement_records: MeasurementRecordsMap
     plaquettes_branch_one: Plaquettes | None = None
     """Branch-one plaquettes for the round, when this round belongs to a
@@ -56,8 +65,8 @@ class LookbackInformationList:
 
     def append(
         self,
-        template: Template,
-        plaquettes: Plaquettes,
+        template: Template | None,
+        plaquettes: Plaquettes | None,
         measurement_records: MeasurementRecordsMap,
         plaquettes_branch_one: Plaquettes | None = None,
     ) -> None:
@@ -118,21 +127,23 @@ class LookbackStack:
 
     def append(
         self,
-        template: Template,
-        plaquettes: Plaquettes,
+        template: Template | None,
+        plaquettes: Plaquettes | None,
         measurement_records: MeasurementRecordsMap,
         plaquettes_branch_one: Plaquettes | None = None,
     ) -> None:
-        """Append a new QEC round in the data-structure."""
-        self._stack[-1].append(
-            template, plaquettes, measurement_records, plaquettes_branch_one
-        )
+        """Append a new QEC round in the data-structure.
+
+        ``template`` and ``plaquettes`` are ``None`` for a round generated from
+        a raw circuit; see :class:`LookbackInformation`.
+        """
+        self._stack[-1].append(template, plaquettes, measurement_records, plaquettes_branch_one)
 
     def _get_last_n(
         self, n: int
     ) -> tuple[
-        list[Template],
-        list[Plaquettes],
+        list[Template | None],
+        list[Plaquettes | None],
         list[MeasurementRecordsMap],
         list[Plaquettes | None],
     ]:
@@ -142,8 +153,8 @@ class LookbackStack:
             )
         if n == 0:
             return [], [], [], []
-        templates: list[Template] = []
-        plaquettes: list[Plaquettes] = []
+        templates: list[Template | None] = []
+        plaquettes: list[Plaquettes | None] = []
         measurement_records: list[MeasurementRecordsMap] = []
         plaquettes_one: list[Plaquettes | None] = []
         # Filling the lists in reverse order (i.e., from earlier time to oldest
@@ -169,16 +180,54 @@ class LookbackStack:
             plaquettes_one[::-1],
         )
 
+    def previous_round_has_template(self) -> bool:
+        """Whether the round immediately before the current one has a template.
+
+        A round generated from a raw circuit has none, so the fixed-radius
+        detector computation cannot reach across it.
+        """
+        templates, _, _, _ = self._get_last_n(1)
+        return bool(templates) and templates[0] is not None
+
+    def lookback_records(self, n: int) -> MeasurementRecordsMap:
+        """Get the merged measurement records of the last ``n`` QEC rounds.
+
+        Unlike :meth:`lookback`, this works through rounds generated from a raw
+        circuit (which have no template): only their records are needed.
+        """
+        _, _, measurement_records, _ = self._get_last_n(n)
+        measurement_record = MeasurementRecordsMap()
+        for mrec in measurement_records:
+            measurement_record = measurement_record.with_added_measurements(mrec)
+        return measurement_record
+
     def lookback(
         self,
         n: int,
     ) -> tuple[list[Template], list[Plaquettes], MeasurementRecordsMap]:
-        """Get the last ``self._lookback`` QEC rounds."""
+        """Get the last ``self._lookback`` QEC rounds.
+
+        Raises:
+            NotImplementedError: if any of the ``n`` last rounds was generated
+                from a raw circuit, and so has no template to compute detectors
+                from. Use :meth:`lookback_records` when only the measurement
+                records are needed.
+
+        """
         templates, plaquettes, measurement_records, _ = self._get_last_n(n)
+        kept_templates = [t for t in templates if t is not None]
+        kept_plaquettes = [p for p in plaquettes if p is not None]
+        if len(kept_templates) != len(templates) or len(kept_plaquettes) != len(plaquettes):
+            raise NotImplementedError(
+                "Cannot compute detectors across a round generated from a raw "
+                "circuit: it has no template. This happens when a z-slice that "
+                "only contains a Y-basis measurement cap is followed by a slice "
+                "with ordinary cubes."
+            )
         measurement_record = MeasurementRecordsMap()
         for mrec in measurement_records:
             measurement_record = measurement_record.with_added_measurements(mrec)
-        return templates, plaquettes, measurement_record
+        return kept_templates, kept_plaquettes, measurement_record
 
     def lookback_per_branch(
         self,
@@ -191,18 +240,23 @@ class LookbackStack:
     ]:
         """Get the last ``n`` QEC rounds with parallel branch-zero and branch-one
         plaquette lists. Rounds with no branch-one alternate fall back to the
-        branch-zero entry (both branches share that round's content)."""
-        templates, plaquettes_zero, measurement_records, plaquettes_one = (
-            self._get_last_n(n)
-        )
+        branch-zero entry (both branches share that round's content).
+        """
+        templates, plaquettes_zero, measurement_records, plaquettes_one = self._get_last_n(n)
+        if any(t is None for t in templates) or any(p is None for p in plaquettes_zero):
+            raise NotImplementedError(
+                "A conditional cube cannot look back through a round generated "
+                "from a raw circuit, which has no template."
+            )
+        kept_templates = [t for t in templates if t is not None]
+        kept_zero = [p for p in plaquettes_zero if p is not None]
         plaquettes_one_filled: list[Plaquettes] = [
-            (po if po is not None else pz)
-            for po, pz in zip(plaquettes_one, plaquettes_zero)
+            (po if po is not None else pz) for po, pz in zip(plaquettes_one, kept_zero)
         ]
         measurement_record = MeasurementRecordsMap()
         for mrec in measurement_records:
             measurement_record = measurement_record.with_added_measurements(mrec)
-        return templates, plaquettes_zero, plaquettes_one_filled, measurement_record
+        return kept_templates, kept_zero, plaquettes_one_filled, measurement_record
 
     def __len__(self) -> int:
         if len(self._stack) > 1:
@@ -266,6 +320,11 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
         self._min_z = min_z
         self._depth = 0
         self._z_index = -1
+        # Explicit multi-qubit end_spec handed forward by the transition round
+        # (Y cap), consumed by the next raw round: for each (shifted) stabilizer
+        # ancilla coordinate, the (shifted) qubit coordinates the transition
+        # measured to prepare that stabilizer.
+        self._pending_end_spec: dict[Coord2D, list[Coord2D]] | None = None
 
     @override
     def visit_node(self, node: LayerNode) -> None:
@@ -275,25 +334,55 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
         if annotations.circuit is None:
             raise TQECError("Cannot compute detectors without the circuit annotation.")
 
+        raw_by_pos = {
+            pos: layer
+            for pos, layer in node._layer.layers.items()
+            if isinstance(layer, RawCircuitLayer)
+        }
+        if raw_by_pos:
+            if len(raw_by_pos) == len(node._layer.layers):
+                self._annotate_raw_slice(node._layer, annotations, raw_by_pos)
+            else:
+                self._annotate_mixed_slice(node._layer, annotations, raw_by_pos)
+            return
+
         template_zero, plaquettes_zero = node._layer.to_template_and_plaquettes()
         plaquettes_one_for_round: Plaquettes | None = None
         active_condition_recs: list[int] | None = None
         if self._condition_recs is not None and node._layer.conditional_layers:
-            active_condition_recs = self._condition_recs.get(
-                self._min_z + self._z_index
-            )
+            active_condition_recs = self._condition_recs.get(self._min_z + self._z_index)
         leaf_is_conditional = active_condition_recs is not None
         if leaf_is_conditional:
-            template_one, plaquettes_one_for_round = (
-                node._layer._compute_template_and_plaquettes(
-                    node._layer._branch_one_layers()
-                )
+            template_one, plaquettes_one_for_round = node._layer._compute_template_and_plaquettes(
+                node._layer._branch_one_layers()
             )
             if template_one != template_zero:
                 raise TQECError(
-                    "AnnotateDetectorsOnLayerNode: per-branch templates differ; "
-                    "EMC + CEO violated."
+                    "AnnotateDetectorsOnLayerNode: per-branch templates differ; EMC + CEO violated."
                 )
+        # A round whose predecessor is raw cannot use the template computation:
+        # the previous round has no template to compute against. That happens
+        # above a Y-basis *initialisation*, whose last round hands its
+        # ``end_spec`` forward exactly as the measurement cap's transition round
+        # does -- so the seam is closed from that spec instead, and the template
+        # path is skipped for this one round.
+        if self._pending_end_spec is not None:
+            # The seam always comes from the spec. Whether the *rest* of this
+            # round can still use the template path depends on the previous
+            # round: a slice that was entirely raw (a lone Y column) leaves no
+            # template to compute against, but a mixed slice does, and the
+            # positions that were plaquettes there must keep their detectors.
+            skip_template = not self._lookback_stack.previous_round_has_template()
+            self._emit_seam_against_raw_round(annotations)
+            if skip_template:
+                self._lookback_stack.append(
+                    template_zero,
+                    plaquettes_zero,
+                    MeasurementRecordsMap.from_scheduled_circuit(annotations.circuit),
+                    plaquettes_branch_one=plaquettes_one_for_round,
+                )
+                return
+
         self._lookback_stack.append(
             template_zero,
             plaquettes_zero,
@@ -368,6 +457,248 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
                     then_body=then_body,
                     else_body=else_body if else_body else None,
                 )
+            )
+
+    def _annotate_raw_slice(
+        self,
+        layout: LayoutLayer,
+        annotations: LayerNodeAnnotations,
+        raw_by_pos: dict[LayoutPosition2D, RawCircuitLayer],
+    ) -> None:
+        """Handle a leaf whose layer carries a :class:`RawCircuitLayer`.
+
+        The Y-basis measurement cap is sliced into per-round raw layers
+        (transition, boundary0, repeated boundary, final). A single round carries
+        no cross-round detectors: those *seam* / *bulk* detectors are formed here
+        from each round's flow specs, which close a round's ``start_spec`` against
+        the previous round's measurements. The previous round is either
+
+        * a *standard* round (the below memory round, a boundary round, or the
+          last boundary before the final round): its stabilizers are measured by
+          a single ancilla, recovered from the previous round's measurement
+          records keyed by ancilla coordinate (via the lookback stack); or
+        * the *transition* round, whose ``end_spec`` prepares each degenerate
+          stabilizer with multiple records not recoverable from a
+          coordinate-keyed record map, so it is handed forward explicitly via
+          ``self._pending_end_spec``.
+
+        Any detectors internal to a single round (the final round's stabilizer
+        reconstruction) stay inside the round's own circuit.
+        """
+        if len(raw_by_pos) != 1:
+            raise TQECError("Only a single RawCircuitLayer per layer is supported.")
+        assert annotations.circuit is not None
+        pos, raw_layer = next(iter(raw_by_pos.items()))
+        raw_records = MeasurementRecordsMap.from_scheduled_circuit(annotations.circuit)
+        raw_total = annotations.circuit.get_circuit().num_measurements
+
+        self._emit_raw_seam(
+            annotations, raw_layer, raw_records, raw_total, self._raw_shift(layout, pos)
+        )
+
+        # Push this slice's own records so later rounds can look back through it.
+        # A raw round has neither template nor plaquettes, hence the ``None``s:
+        # the fixed-radius detector computation cannot see through such a round
+        # (see ``_annotate_mixed_slice``), but its records stay reachable.
+        self._lookback_stack.append(None, None, raw_records)
+
+    def _raw_shift(self, layout: LayoutLayer, pos: LayoutPosition2D) -> Coord2D:
+        """Return the qubit-coordinate offset of the raw layer at ``pos``.
+
+        A raw round's flow specs are written in *patch-local* coordinates --- the
+        standalone patch of :func:`xtop_qubit_patch`, starting at the origin ---
+        while the measurement records they are resolved against are keyed by the
+        circuit's qubit coordinates. This is the offset between the two, and it is
+        **absolute**: a block at position ``bp`` occupies qubit coordinates
+        starting at ``bp * (eshape - 1)``, whatever else the layer contains.
+
+        Deliberately *not* relative to ``layout.bounds``. An earlier revision
+        subtracted the layer's minimum block position, which agrees with the
+        absolute offset only when the slice happens to contain a block at the
+        computation's minimum ``x``/``y``. A Y cap alone in its z-slice --- a
+        logical qubit that moves sideways and is then capped --- has a slice
+        minimum equal to its own position, so the offset collapsed to zero and
+        every seam detector looked its ancillas up one block pitch away from
+        where they were measured.
+        """
+        if not isinstance(pos, LayoutCubePosition2D):
+            raise TQECError("A RawCircuitLayer is only supported at a cube position.")
+        eshape = layout.element_shape.to_shape_2d(self._k)
+        bp = pos.to_block_position()
+        return bp.x * (eshape.x - 1), bp.y * (eshape.y - 1)
+
+    def _emit_raw_seam(
+        self,
+        annotations: LayerNodeAnnotations,
+        raw_layer: RawCircuitLayer,
+        raw_records: MeasurementRecordsMap,
+        raw_total: int,
+        shift: Coord2D,
+    ) -> None:
+        """Emit the cross-round seam / bulk / reconstruction detectors of one raw round.
+
+        The round's flow-spec qubit coordinates are offset by ``shift`` into the
+        layer's qubit frame. All spec values are qubit coordinates; a measurement is located by
+        looking the (shifted) coordinate up in the relevant round's
+        measurement-record map (``raw_records`` for this round, the lookback for
+        the previous round). This is robust to a coexisting memory cube whose
+        measurements interleave with the cap's in the merged round circuit.
+
+        Offsets are expressed relative to the end of *this* round's circuit (as
+        :class:`DetectorAnnotation` requires): this round's records already are;
+        the previous round's records (relative to that round's end) are rebased
+        by subtracting ``raw_total`` (this round's measurement count).
+        """
+        dx, dy = shift
+
+        def sh(c: Coord2D) -> Coord2D:
+            return (c[0] + dx, c[1] + dy)
+
+        def this_offsets(coords: Sequence[Coord2D]) -> list[int]:
+            return [raw_records[GridQubit(*sh(c))][-1] for c in coords]
+
+        if not isinstance(raw_layer, FlowSpecLayer):
+            # A raw round that does not describe its flows carries whatever
+            # detectors it needs inside its own circuit; nothing to do here.
+            self._pending_end_spec = None
+            return
+        start_spec = raw_layer.start_spec(self._k)
+
+        if start_spec:
+            prev_records = self._lookback_stack.lookback_records(1)
+            pending = self._pending_end_spec
+            for anc_coord, cur_coords in start_spec.items():
+                sc = sh(anc_coord)
+                cur_offsets = this_offsets(cur_coords)
+                if pending is not None:
+                    # Previous round is the transition round: XOR the qubits it
+                    # used to prepare this stabilizer (resolved in the previous
+                    # round's record map) with this round's ancilla.
+                    if sc not in pending:
+                        continue
+                    prev_offsets = [
+                        prev_records[GridQubit(*pc)][-1] - raw_total for pc in pending[sc]
+                    ]
+                else:
+                    # Previous round is a standard round: this stabilizer's single
+                    # ancilla measurement, recovered by coordinate.
+                    gq = GridQubit(*sc)
+                    if gq not in prev_records:
+                        raise TQECError(
+                            f"Y-cap seam detector references ancilla {sc} that was "
+                            "not measured in the previous round; the below round "
+                            "does not match the Y patch."
+                        )
+                    prev_offsets = [prev_records[gq][-1] - raw_total]
+                annotations.detectors.append(
+                    DetectorAnnotation(
+                        StimCoordinates(float(sc[0]), float(sc[1]), 0.0),
+                        sorted(prev_offsets + cur_offsets),
+                    )
+                )
+
+        # Reconstruction detectors internal to this round (final round only).
+        reconstruction = raw_layer.reconstruction_spec(self._k)
+        if reconstruction:
+            for anc_coord, coords in reconstruction.items():
+                sc = sh(anc_coord)
+                annotations.detectors.append(
+                    DetectorAnnotation(
+                        StimCoordinates(float(sc[0]), float(sc[1]), 2.0),
+                        sorted(this_offsets(coords)),
+                    )
+                )
+
+        # Hand this round's explicit end_spec forward, if any (only the
+        # transition round has one). Cleared once consumed by the next round.
+        end_spec = raw_layer.end_spec(self._k)
+        if end_spec is not None:
+            self._pending_end_spec = {sh(c): [sh(q) for q in v] for c, v in end_spec.items()}
+        else:
+            self._pending_end_spec = None
+
+    def _emit_seam_against_raw_round(self, annotations: LayerNodeAnnotations) -> None:
+        """Close a plaquette round against the raw round that precedes it.
+
+        The mirror of the ``pending`` branch of :meth:`_emit_raw_seam`. The raw
+        round handed forward, per stabilizer, the qubit coordinates whose records
+        prepare it; this round measures each of those stabilizers once, by
+        ancilla. Pairing the two gives the seam detectors, and consumes the
+        pending spec.
+        """
+        assert annotations.circuit is not None
+        pending = self._pending_end_spec
+        assert pending is not None
+        self._pending_end_spec = None
+
+        records = MeasurementRecordsMap.from_scheduled_circuit(annotations.circuit)
+        total = annotations.circuit.get_circuit().num_measurements
+        previous = self._lookback_stack.lookback_records(1)
+
+        for ancilla, prepared_by in pending.items():
+            gq = GridQubit(*ancilla)
+            if gq not in records:
+                # The round above does not measure this stabilizer: nothing to
+                # close the flow against here.
+                continue
+            offsets = [records[gq][-1]] + [
+                previous[GridQubit(*coord)][-1] - total for coord in prepared_by
+            ]
+            annotations.detectors.append(
+                DetectorAnnotation(
+                    StimCoordinates(float(ancilla[0]), float(ancilla[1]), 0.0),
+                    sorted(offsets),
+                )
+            )
+
+    def _annotate_mixed_slice(
+        self,
+        layout: LayoutLayer,
+        annotations: LayerNodeAnnotations,
+        raw_by_pos: Mapping[LayoutPosition2D, RawCircuitLayer],
+    ) -> None:
+        """Handle a leaf mixing raw Y-cap rounds with plaquette memory rounds.
+
+        The two kinds of round sit at distinct cube positions. Memory-position
+        detectors are computed with the standard template path (restricted to
+        the plaquette positions); each raw position contributes
+        its shift-aware seam detectors. Both read measurement offsets from the
+        combined round circuit, so the two sets never collide (they reference
+        disjoint qubit coordinates).
+        """
+        assert annotations.circuit is not None
+        full_records = MeasurementRecordsMap.from_scheduled_circuit(annotations.circuit)
+        raw_total = annotations.circuit.get_circuit().num_measurements
+
+        # Raw (Y-cap) seam detectors first, while the lookback's most recent
+        # entry is still the *previous* round (this round is pushed below).
+        for pos, raw_layer in raw_by_pos.items():
+            self._emit_raw_seam(
+                annotations, raw_layer, full_records, raw_total, self._raw_shift(layout, pos)
+            )
+
+        # Plaquette (memory) detectors: build a sub-layer over just those
+        # positions, push this round, and reuse the fixed-radius computation
+        # against the lookback (which now includes this round).
+        plaquette_layers = {
+            pos: layer for pos, layer in layout.layers.items() if pos not in raw_by_pos
+        }
+        sub_layer = LayoutLayer(plaquette_layers, layout.element_shape)
+        template, plaquettes = sub_layer.to_template_and_plaquettes()
+        self._lookback_stack.append(template, plaquettes, full_records)
+        templates, plaqs, measurement_records = self._lookback_stack.lookback(self._lookback_size)
+        detectors = compute_detectors_for_fixed_radius(
+            templates,
+            self._k,
+            plaqs,
+            self._manhattan_radius,
+            self._database,
+            only_use_database=False,
+            parallel_process_count=self._parallel_process_count,
+        )
+        for detector in detectors:
+            annotations.detectors.append(
+                DetectorAnnotation.from_detector(detector, measurement_records)
             )
 
     @override

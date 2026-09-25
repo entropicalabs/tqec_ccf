@@ -1,0 +1,1521 @@
+"""Dependency-free circuit construction for the native Y-half cube.
+
+Builds the surface-code rounds (memory, transition, boundary, final) that make
+up a Y-basis measurement, directly as a ``stim.Circuit`` in tqec integer
+coordinates, on top of the patch geometry in
+:mod:`tqec.compile.specs.library.generators.ycube`. No dependency on Gidney's
+``gen`` framework at runtime; correctness is checked against a vendored copy of
+``gen`` used purely as a test oracle.
+
+The construction mirrors Gidney's ``build_surface_code_round_circuit`` (gate
+schedule) and his per-chunk ``Flow`` bookkeeping (which measurements form a
+detector), but reimplemented over the local geometry. Detectors are formed by
+matching a round's *end* flows to the next round's *start* flows (same
+stabilizer, adjacent rounds).
+
+The module is organised in three parts:
+
+1. the round builders (:func:`standard_round`, :func:`transition_round`) and the
+   standalone experiments built from them, which exist to validate the physics
+   against the oracle;
+2. the per-round *raw slices* (:func:`transition_raw_slice`,
+   :func:`boundary_raw_slice`, :func:`final_raw_slice`) and the
+   :class:`~tqec.compile.blocks.layers.atomic.raw.RawCircuitLayer` wrappers that
+   publish their flow specs to the annotators;
+3. :class:`YHalfCubeBlock`, the block the ``Y_HALF_CUBE`` cube builder returns.
+"""
+
+from __future__ import annotations
+
+import functools
+from collections import Counter
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
+from typing import Final
+
+import stim
+from typing_extensions import override
+
+from tqec.circuit.schedule.circuit import ScheduledCircuit
+from tqec.compile.blocks.block import Block
+from tqec.compile.blocks.enums import SpatialBlockBorder, TemporalBlockBorder
+from tqec.compile.blocks.layers.atomic.base import BaseLayer
+from tqec.compile.blocks.layers.atomic.raw import RawCircuitLayer
+from tqec.compile.blocks.layers.composed.base import BaseComposedLayer
+from tqec.compile.blocks.layers.composed.repeated import RepeatedLayer
+from tqec.compile.specs.library.generators.ycube import (
+    PatchGeometry,
+    Stabilizer,
+    gidney_to_tqec,
+    tqec_to_gidney,
+    xtop_qubit_patch,
+    ztop_yboundary_patch,
+)
+from tqec.templates.base import RectangularTemplate
+from tqec.utils.enums import Basis
+from tqec.utils.exceptions import TQECError
+from tqec.utils.scale import LinearFunction, PhysicalQubitScalable2D
+
+Coord = tuple[int, int]
+
+# Every round of the Y cap occupies the same physical footprint as a memory
+# cube (element shape 4k+5).
+_YCAP_ELEMENT_SHAPE = PhysicalQubitScalable2D(LinearFunction(4, 5), LinearFunction(4, 5))
+
+# Gidney's diagonal directions in complex coordinates (DR, DL, UL, UR).
+_DR = 0.5 + 0.5j
+_DL = -0.5 + 0.5j
+_UL = -0.5 - 0.5j
+_UR = 0.5 - 0.5j
+
+
+@dataclass
+class _Builder:
+    """Accumulates a ``stim.Circuit`` over integer-coordinate qubits, tracking
+    measurement record indices keyed by ``(round_tag, qubit_coord)``.
+
+    A stabilizer ancilla is measured once per round, so ``(round_tag, coord)``
+    uniquely identifies a measurement and lets later rounds form detectors that
+    reference earlier rounds by coordinate.
+    """
+
+    circuit: stim.Circuit = field(default_factory=stim.Circuit)
+    q2i: dict[Coord, int] = field(default_factory=dict)
+    num_measurements: int = 0
+    # (round_tag, coord) -> absolute measurement index (0-based, in emission order).
+    records: dict[tuple[str, Coord], int] = field(default_factory=dict)
+
+    def allocate(self, coords: set[Coord]) -> None:
+        """Assign qubit indices (sorted by (y, x)) and emit QUBIT_COORDS."""
+        for c in sorted(coords, key=lambda p: (p[1], p[0])):
+            if c not in self.q2i:
+                idx = len(self.q2i)
+                self.q2i[c] = idx
+                self.circuit.append("QUBIT_COORDS", [idx], [float(c[0]), float(c[1])])
+
+    def _idx(self, coords: list[Coord]) -> list[int]:
+        return [self.q2i[c] for c in coords]
+
+    def gate1(self, name: str, coords: list[Coord]) -> None:
+        if coords:
+            self.circuit.append(stim.CircuitInstruction(name, self._idx(coords)))
+
+    def gate2(self, name: str, pairs: list[tuple[Coord, Coord]]) -> None:
+        if pairs:
+            flat: list[int] = []
+            for a, b in pairs:
+                flat.extend((self.q2i[a], self.q2i[b]))
+            self.circuit.append(stim.CircuitInstruction(name, flat))
+
+    def tick(self) -> None:
+        self.circuit.append(stim.CircuitInstruction("TICK", []))
+
+    def measure(self, name: str, coords: list[Coord], round_tag: str) -> None:
+        """Emit a measurement instruction; record each qubit's absolute index."""
+        if not coords:
+            return
+        self.circuit.append(stim.CircuitInstruction(name, self._idx(coords)))
+        for c in coords:
+            self.records[(round_tag, c)] = self.num_measurements
+            self.num_measurements += 1
+
+    def rec(self, round_tag: str, coord: Coord) -> int:
+        """Absolute record index of the measurement of ``coord`` in ``round_tag``."""
+        return self.records[(round_tag, coord)]
+
+    def detector(self, abs_indices: list[int], coord: tuple[float, ...]) -> None:
+        """Append a DETECTOR referencing the given absolute measurement indices."""
+        targets = [stim.target_rec(i - self.num_measurements) for i in abs_indices]
+        self.circuit.append("DETECTOR", targets, list(coord))
+
+
+def _split_by_basis(stabs: tuple[Stabilizer, ...]) -> tuple[list[Stabilizer], list[Stabilizer]]:
+    xs = [s for s in stabs if s.basis == Basis.X]
+    zs = [s for s in stabs if s.basis == Basis.Z]
+    return xs, zs
+
+
+def standard_round(
+    b: _Builder,
+    patch: PatchGeometry,
+    round_tag: str,
+    *,
+    init_data_basis: dict[Coord, Basis] | None = None,
+    measure_data_basis: dict[Coord, Basis] | None = None,
+) -> None:
+    """Emit one standard surface-code round on ``patch`` into ``b``.
+
+    Port of Gidney's ``build_surface_code_round_circuit``: reset X-ancillas in
+    X and Z-ancillas in Z (plus any data-qubit inits), run the four CX layers
+    (ancilla->data for X stabilizers, data->ancilla for Z), then measure
+    X-ancillas in X and Z-ancillas in Z (plus any data-qubit measurements).
+    """
+    init_data_basis = init_data_basis or {}
+    measure_data_basis = measure_data_basis or {}
+    xs, zs = _split_by_basis(patch.stabilizers)
+    x_anc = [s.ancilla for s in xs]
+    z_anc = [s.ancilla for s in zs]
+
+    # Resets.
+    b.gate1("RX", x_anc)
+    for basis in (Basis.X, Basis.Z):
+        qs = [q for q, bb in init_data_basis.items() if bb == basis]
+        b.gate1(f"R{basis.value}", qs)
+    b.gate1("R", z_anc)
+    b.tick()
+
+    # Four CX layers (ordered_data has length 4).
+    for k in range(4):
+        pairs: list[tuple[Coord, Coord]] = []
+        for s in patch.stabilizers:
+            data = s.ordered_data[k]
+            if data is None:
+                continue
+            # X-basis: control = ancilla, target = data. Z-basis: reversed.
+            pairs.append((s.ancilla, data) if s.basis == Basis.X else (data, s.ancilla))
+        b.gate2("CX", pairs)
+        b.tick()
+
+    # Measurements: X-ancillas, then data (by basis), then Z-ancillas.
+    b.measure("MX", x_anc, round_tag)
+    for basis in (Basis.X, Basis.Z):
+        qs = [q for q, bb in measure_data_basis.items() if bb == basis]
+        b.measure(f"M{basis.value}", qs, round_tag)
+    b.measure("M", z_anc, round_tag)
+    # Trailing TICK so the next round's resets land in a fresh moment (each
+    # moment holds at most one operation per qubit, as tqec's Moment requires).
+    b.tick()
+
+
+def _bulk_detectors(b: _Builder, patch: PatchGeometry, prev_tag: str, cur_tag: str) -> None:
+    """Emit the consecutive-round detectors of ``patch``.
+
+    Each ancilla measured this round is XORed with the same ancilla last round
+    (both measure the same stabilizer).
+    """
+    for s in patch.stabilizers:
+        b.detector(
+            [b.rec(prev_tag, s.ancilla), b.rec(cur_tag, s.ancilla)],
+            (s.ancilla[0], s.ancilla[1], 0),
+        )
+
+
+def _first_round_detectors(
+    b: _Builder, patch: PatchGeometry, tag: str, init_data_basis: dict[Coord, Basis]
+) -> None:
+    """Emit the detectors of the first round after a data reset.
+
+    A stabilizer all of whose data qubits are reset in that stabilizer's own
+    basis is deterministic on its own.
+    """
+    for s in patch.stabilizers:
+        data = [d for d in s.ordered_data if d is not None]
+        if all(init_data_basis.get(d) == s.basis for d in data):
+            b.detector([b.rec(tag, s.ancilla)], (s.ancilla[0], s.ancilla[1], 0))
+
+
+def _split_dl_md_ur(
+    ps: set[complex],
+) -> tuple[set[complex], set[complex], set[complex]]:
+    """Partition measure qubits into below-diagonal / on-diagonal / above-diagonal.
+
+    Port of Gidney's ``_split_dl_md_ur``.
+    """
+    dl: set[complex] = set()
+    md: set[complex] = set()
+    ur: set[complex] = set()
+    for m in ps:
+        if m.real > m.imag + 1:
+            ur.add(m)
+        elif m.real == m.imag or m.real == m.imag + 1:
+            md.add(m)
+        else:
+            dl.add(m)
+    return dl, md, ur
+
+
+@dataclass
+class TransitionFlows:
+    """The measurement records (as tqec coords, in the transition round) that
+    form each stabilizer's detector, matched to adjacent rounds by ancilla.
+
+    Attributes:
+        start: ``{xtop ancilla (complex) -> [tqec coords measured this round]}``.
+            Matched against the preceding memory round's measurement of the
+            same ancilla to form the seam detector.
+        end: ``{ztop ancilla (complex) -> [tqec coords measured this round]}``.
+            Matched against the following boundary round's measurement of the
+            same ancilla.
+        observable: tqec coords measured this round that flow into the logical-Y
+            observable, in Gidney's representative (corner Y plus the X-basis
+            ancillas). The compiler emits a different representative, matched to
+            the observable builder's middle-line convention --- see
+            :func:`_tqec_logical_y_observable_spec`.
+
+    """
+
+    start: dict[complex, list[Coord]]
+    end: dict[complex, list[Coord]]
+    observable: list[Coord]
+
+
+def transition_round(
+    b: _Builder, distance: int, round_tag: str, transposed: bool = False
+) -> TransitionFlows:
+    """Emit the Y-basis transition round (xtop patch -> degenerate ztop patch).
+
+    Direct port of Gidney's ``make_y_transition_round_nesw_xzxz_to_xzzx``: the
+    corner data qubit is measured in the Y basis and the patch is folded onto
+    the degenerate Y-boundary patch. Gate positions are computed in Gidney's
+    complex-plane convention and mapped to tqec integer coordinates on emission.
+    """
+    d = distance
+    start = xtop_qubit_patch(d, transposed)
+    end = ztop_yboundary_patch(d, transposed)
+    # `used`: every qubit either patch touches, in Gidney complex coords.
+    used: set[complex] = set()
+    for patch in (start, end):
+        for s in patch.stabilizers:
+            # reconstruct gidney data qubits from the stabilizer's gidney ancilla
+            used.add(s.gidney_ancilla)
+        for dq in patch.data_qubits:
+            used.add(tqec_to_gidney(dq, transposed))
+
+    def mbasis(q: complex) -> str | None:
+        if q.real % 1 == 0:
+            return None
+        return "X" if int(q.real + q.imag) & 1 == 0 else "Z"
+
+    xs = {q for q in used if mbasis(q) == "X"}
+    zs = {q for q in used if mbasis(q) == "Z"}
+    top_row = {q for q in used if q.imag == -0.5}
+    right_col = {q for q in used if q.real == d - 0.5}
+
+    def toward(qs: set[complex], delta: complex, sign: int) -> list[tuple[complex, complex]]:
+        result = []
+        for q in qs:
+            if q + delta in used:
+                pair = (q, q + delta)
+                result.append(pair if sign == 1 else pair[::-1])
+        return result
+
+    xs_dl, xs_md, xs_ur = _split_dl_md_ur(xs)
+    zs_dl, zs_md, zs_ur = _split_dl_md_ur(zs)
+
+    def g(q: complex) -> Coord:
+        return gidney_to_tqec(q, transposed)
+
+    def e1(name: str, qs: set[complex]) -> None:
+        b.gate1(name, [g(q) for q in qs])
+
+    def e2(name: str, pairs: list[tuple[complex, complex]]) -> None:
+        b.gate2(name, [(g(a), g(bb)) for a, bb in pairs])
+
+    e1("RX", (xs - right_col) | top_row)
+    e1("R", (zs - top_row) | right_col)
+    b.tick()
+    e2("CX", toward(xs - right_col, _DL, +1))
+    e2("CX", toward(zs - top_row, _DL, -1))
+    b.tick()
+    e2("CX", toward(xs - right_col, _DR, +1))
+    e2("CX", toward(zs - top_row, _UL, -1))
+    b.tick()
+    e2("CX", toward(xs_ur | xs_md, _UL, -1))
+    e2("CX", toward(zs_ur, _DR, +1))
+    e2("XCY", toward(zs_md, _DR, +1))
+    e2("CX", toward(xs_dl, _UL, +1))
+    e2("CX", toward(zs_dl, _DR, -1))
+    b.tick()
+    e2("CX", toward(xs_ur, _DL, -1))
+    e2("CX", toward(zs_ur, _DL, +1))
+    e2("CX", toward(xs_dl, _UR, +1))
+    e2("CX", toward(zs_dl, _UR, -1))
+    b.tick()
+    e2("XCY", toward(xs_md - top_row, _DL, -1))
+    b.tick()
+    e1("H", {q for q in used if q.real > q.imag})
+    e1("SQRT_X", {q for q in used if q.real == q.imag and q.real % 1 == 0.5})
+    b.tick()
+
+    # Measurements: X-basis (xms), then the corner data qubit in Y, then Z-basis.
+    xms = (xs - top_row) | right_col
+    zms = (zs - right_col) | top_row
+    b.measure("MX", [g(q) for q in sorted(xms, key=lambda q: (q.imag, q.real))], round_tag)
+    b.measure("MY", [g(0j)], round_tag)
+    b.measure("M", [g(q) for q in sorted(zms, key=lambda q: (q.imag, q.real))], round_tag)
+    # Trailing TICK so the next round starts in a fresh moment.
+    b.tick()
+
+    # Start flows: input stabilizers (xtop tiles) measured this round.
+    start_flows: dict[complex, list[Coord]] = {}
+    for s in start.stabilizers:
+        m = s.gidney_ancilla
+        if m.real == m.imag:
+            meas = [m, m + 1]
+        elif m.real == d - 0.5:
+            meas = [m]
+        elif m.imag == -0.5:
+            meas = [m]
+        elif m.real > m.imag and s.basis == Basis.X:
+            meas = [m - 1j]
+        elif m.real > m.imag and s.basis == Basis.Z:
+            meas = [m + 1]
+        elif m.real < m.imag:
+            meas = [m]
+        else:
+            raise NotImplementedError(f"unexpected start ancilla {m!r}")
+        start_flows[m] = [g(q) for q in meas]
+
+    # End flows: output stabilizers (ztop tiles) prepared this round.
+    end_flows: dict[complex, list[Coord]] = {}
+    for s in end.stabilizers:
+        m = s.gidney_ancilla
+        if m == 0.5 + 0.5j:
+            meas = [m, m + 1, m - 1j, m + _UL]
+        elif m == d - 0.5 + 0.5j:
+            meas = [m]
+        elif m == d - 1.5 - 0.5j:
+            meas = [m]
+        elif m.real == d - 0.5:
+            meas = [m, m - 1j]
+        elif m.imag == -0.5:
+            meas = [m, m + 1]
+        elif m.real == m.imag:
+            meas = [m, m + 1, m - 1j]
+        else:
+            meas = [m]
+        end_flows[m] = [g(q) for q in meas]
+
+    # Observable flow: logical Y = corner Y + xms records.
+    obs = [g(0j)] + [g(q) for q in xms]
+
+    return TransitionFlows(start=start_flows, end=end_flows, observable=obs)
+
+
+def _final_round(
+    b: _Builder,
+    patch: PatchGeometry,
+    prev_tag: str,
+    tag: str,
+    distance: int,
+    transposed: bool = False,
+) -> None:
+    """Emit the transversal final data measurement on the degenerate patch and
+    the stabilizer-reconstruction detectors it enables.
+
+    Data qubit basis follows Gidney's anti-diagonal split: ``Z`` if
+    ``x + y < d`` else ``X`` (in Gidney coords). A stabilizer whose every data
+    qubit is measured in the stabilizer's own basis is reconstructed and paired
+    with its last ancilla measurement in ``prev_tag``.
+    """
+    measure_basis: dict[Coord, Basis] = {}
+    for dq in patch.data_qubits:
+        g = tqec_to_gidney(dq, transposed)
+        measure_basis[dq] = Basis.Z if g.real + g.imag < distance else Basis.X
+    standard_round(b, patch, tag, measure_data_basis=measure_basis)
+    # Bulk detectors: this round's ancilla measurement vs the previous round's
+    # (the final round still measures every stabilizer via its ancilla).
+    _bulk_detectors(b, patch, prev_tag, tag)
+    # Reconstruction detectors: a stabilizer whose data are all measured in its
+    # own basis is closed by the transversal data measurement.
+    for s in patch.stabilizers:
+        data = [d for d in s.ordered_data if d is not None]
+        if all(measure_basis.get(d) == s.basis for d in data):
+            b.detector(
+                [b.rec(tag, s.ancilla)] + [b.rec(tag, d) for d in data],
+                (s.ancilla[0], s.ancilla[1], 2),
+            )
+
+
+def y_cap_segment_circuit(distance: int, mem_rounds: int, init_basis: Basis) -> stim.Circuit:
+    """Full standalone Y-cap experiment for validation.
+
+    Initialise the xtop patch data in ``init_basis``, run ``mem_rounds`` memory
+    rounds, then the Y-cap segment (transition, ``d//2`` boundary rounds, final
+    transversal measurement), wiring every detector including the transition
+    seam detectors. No logical observable is included (a lone Y cap has no
+    deterministic logical on a non-Y-eigenstate input); this validates that the
+    detector structure across the transition is deterministic.
+    """
+    d = distance
+    xtop = xtop_qubit_patch(d)
+    ztop = ztop_yboundary_patch(d)
+    b = _Builder()
+    all_coords = (
+        set(xtop.data_qubits)
+        | {s.ancilla for s in xtop.stabilizers}
+        | set(ztop.data_qubits)
+        | {s.ancilla for s in ztop.stabilizers}
+    )
+    b.allocate(all_coords)
+
+    init = {dq: init_basis for dq in xtop.data_qubits}
+    mem_tags = [f"m{i}" for i in range(mem_rounds)]
+    standard_round(b, xtop, mem_tags[0], init_data_basis=init)
+    _first_round_detectors(b, xtop, mem_tags[0], init)
+    for i in range(1, mem_rounds):
+        standard_round(b, xtop, mem_tags[i])
+        _bulk_detectors(b, xtop, mem_tags[i - 1], mem_tags[i])
+
+    # Transition round + seam detectors against the last memory round.
+    t_tag = "T"
+    flows = transition_round(b, d, t_tag)
+    for s in xtop.stabilizers:
+        m = s.gidney_ancilla
+        b.detector(
+            [b.rec(mem_tags[-1], s.ancilla)] + [b.rec(t_tag, c) for c in flows.start[m]],
+            (s.ancilla[0], s.ancilla[1], 0),
+        )
+
+    # Boundary (padding) rounds on the degenerate patch.
+    pad = d // 2
+    b_tags = [f"b{i}" for i in range(pad)]
+    prev = t_tag
+    for i in range(pad):
+        standard_round(b, ztop, b_tags[i])
+        if i == 0:
+            # First boundary round's start flows match the transition end flows.
+            for s in ztop.stabilizers:
+                m = s.gidney_ancilla
+                b.detector(
+                    [b.rec(t_tag, c) for c in flows.end[m]] + [b.rec(b_tags[0], s.ancilla)],
+                    (s.ancilla[0], s.ancilla[1], 0),
+                )
+        else:
+            _bulk_detectors(b, ztop, b_tags[i - 1], b_tags[i])
+        prev = b_tags[i]
+
+    # Final transversal data measurement.
+    _final_round(b, ztop, prev, "F", d)
+    return b.circuit
+
+
+_TIME_REVERSED_GATE: Final[dict[str, str]] = {
+    "CX": "CX",
+    "CZ": "CZ",
+    "H": "H",
+    "XCY": "XCY",
+    "SQRT_X": "SQRT_X_DAG",
+    "SQRT_X_DAG": "SQRT_X",
+    "RX": "MX",
+    "RY": "MY",
+    "R": "M",
+    "MX": "RX",
+    "MY": "RY",
+    "M": "R",
+}
+
+
+def reverse_round_circuit(circuit: stim.Circuit) -> stim.Circuit:
+    """Return the time reverse of a single Y-cap round.
+
+    Moments run in the opposite order and every gate is replaced by its inverse:
+    ``CX``, ``CZ``, ``H`` and ``XCY`` are self-inverse, ``SQRT_X`` pairs with
+    ``SQRT_X_DAG``, and resets and measurements swap roles.
+
+    This is the building block of a Y-basis *initialisation*: the measurement
+    cap's transition round reversed maps the degenerate ``ztop`` Y-boundary patch
+    back onto the ``xtop`` patch, and its final transversal measurement reversed
+    becomes a transversal reset.
+
+    Note:
+        Only the gate stream is reversed. Detectors and observables are not
+        carried across -- use :meth:`stim.Circuit.time_reversed_for_flows` for a
+        whole annotated experiment, as :func:`y_init_magic_experiment_circuit`
+        does.
+
+    Raises:
+        TQECError: if the circuit contains a gate with no registered inverse.
+
+    """
+    moments: list[list[stim.CircuitInstruction]] = [[]]
+    for instruction in circuit.flattened():
+        # ``flattened`` yields no REPEAT blocks, but the annotation says it may.
+        assert isinstance(instruction, stim.CircuitInstruction)
+        if instruction.name == "TICK":
+            moments.append([])
+        elif instruction.name != "QUBIT_COORDS":
+            if instruction.name not in _TIME_REVERSED_GATE:
+                raise TQECError(
+                    f"Cannot time-reverse a round containing {instruction.name!r}: "
+                    "no inverse is registered for it."
+                )
+            moments[-1].append(instruction)
+    body = [moment for moment in moments if moment]
+
+    reversed_circuit = stim.Circuit()
+    for index, coords in circuit.get_final_qubit_coordinates().items():
+        reversed_circuit.append("QUBIT_COORDS", [index], list(coords))
+    for position, moment in enumerate(reversed(body)):
+        for instruction in moment:
+            reversed_circuit.append(
+                _TIME_REVERSED_GATE[instruction.name],
+                [t.value for t in instruction.targets_copy()],
+                instruction.gate_args_copy(),
+            )
+        if position != len(body) - 1:
+            reversed_circuit.append(stim.CircuitInstruction("TICK", []))
+    return reversed_circuit
+
+
+def _logical_y_support(distance: int, transposed: bool = False) -> dict[Coord, str]:
+    """Return the Pauli support of tqec's logical-Y representative on ``xtop``.
+
+    ``X`` along the middle data column and ``Z`` along the middle data row, which
+    cross at a single ``Y``. This is the representative the observable builder
+    lowers arriving correlation surfaces onto, and the one
+    :func:`_tqec_logical_y_observable_spec` reads out.
+    """
+    support: dict[Coord, str] = {}
+    for i in range(1, 2 * distance, 2):
+        support[(distance, i)] = "X"
+    for i in range(1, 2 * distance, 2):
+        support[(i, distance)] = "Y" if (i, distance) in support else "Z"
+    if transposed:
+        support = {(c[1], c[0]): p for c, p in support.items()}
+    return support
+
+
+def _append_mpp(b: _Builder, support: dict[Coord, str], key: Coord) -> None:
+    """Append a noiseless ``MPP`` measuring ``support``, recorded under ``key``."""
+    targets: list[stim.GateTarget] = []
+    builders = {"X": stim.target_x, "Y": stim.target_y, "Z": stim.target_z}
+    for position, (coord, basis) in enumerate(
+        sorted(support.items(), key=lambda kv: (kv[0][1], kv[0][0]))
+    ):
+        if position:
+            targets.append(stim.target_combiner())
+        targets.append(builders[basis](b.q2i[coord]))
+    b.circuit.append(stim.CircuitInstruction("MPP", targets))
+    b.records[("MPP", key)] = b.num_measurements
+    b.num_measurements += 1
+
+
+def y_cap_magic_experiment_circuit(distance: int, mem_rounds: int) -> stim.Circuit:
+    """Build a Y-basis *measurement* experiment with a noiseless magic head.
+
+    Gidney's shape: a head of noiseless ``MPP`` instructions magically prepares
+    the logical Y **and the whole stabilizer group**, then ``mem_rounds`` memory
+    rounds run on the ``xtop`` patch, then the Y cap measures the logical out.
+    The observable is the head's logical record XORed with the cap's readout, so
+    it is deterministic.
+
+    The stabilizers must be prepared as well as the logical. With only the
+    logical prepared, the first round's stabilizer outcomes are random, which
+    leaves a time boundary a single fault can cross undetected --- the
+    experiment then reports distance 1 however good the cap is.
+
+    Args:
+        distance: the code distance ``d``.
+        mem_rounds: number of memory rounds between the head and the cap.
+
+    Returns:
+        the experiment, with all detectors and one observable.
+
+    """
+    d = distance
+    xtop = xtop_qubit_patch(d)
+    ztop = ztop_yboundary_patch(d)
+    b = _Builder()
+    b.allocate(
+        set(xtop.data_qubits)
+        | {s.ancilla for s in xtop.stabilizers}
+        | set(ztop.data_qubits)
+        | {s.ancilla for s in ztop.stabilizers}
+    )
+
+    _append_mpp(b, _logical_y_support(d), (0, 0))
+    for s in xtop.stabilizers:
+        _append_mpp(b, {dq: s.basis.value for dq in s.ordered_data if dq is not None}, s.ancilla)
+    b.tick()
+
+    mem_tags = [f"m{i}" for i in range(mem_rounds)]
+    standard_round(b, xtop, mem_tags[0])
+    for s in xtop.stabilizers:
+        b.detector(
+            [b.rec("MPP", s.ancilla), b.rec(mem_tags[0], s.ancilla)],
+            (s.ancilla[0], s.ancilla[1], 0),
+        )
+    for i in range(1, mem_rounds):
+        standard_round(b, xtop, mem_tags[i])
+        _bulk_detectors(b, xtop, mem_tags[i - 1], mem_tags[i])
+
+    t_tag = "T"
+    flows = transition_round(b, d, t_tag)
+    for s in xtop.stabilizers:
+        b.detector(
+            [b.rec(mem_tags[-1], s.ancilla)]
+            + [b.rec(t_tag, c) for c in flows.start[s.gidney_ancilla]],
+            (s.ancilla[0], s.ancilla[1], 0),
+        )
+
+    pad = d // 2
+    b_tags = [f"b{i}" for i in range(pad)]
+    prev = t_tag
+    for i in range(pad):
+        standard_round(b, ztop, b_tags[i])
+        if i == 0:
+            for s in ztop.stabilizers:
+                b.detector(
+                    [b.rec(t_tag, c) for c in flows.end[s.gidney_ancilla]]
+                    + [b.rec(b_tags[0], s.ancilla)],
+                    (s.ancilla[0], s.ancilla[1], 0),
+                )
+        else:
+            _bulk_detectors(b, ztop, b_tags[i - 1], b_tags[i])
+        prev = b_tags[i]
+    _final_round(b, ztop, prev, "F", d)
+
+    observable = [b.rec("MPP", (0, 0))] + [
+        b.rec(t_tag, c) for c in _tqec_logical_y_observable_spec(d)
+    ]
+    b.circuit.append(
+        "OBSERVABLE_INCLUDE",
+        [stim.target_rec(i - b.num_measurements) for i in observable],
+        [0],
+    )
+    return b.circuit
+
+
+def y_init_magic_experiment_circuit(distance: int, mem_rounds: int) -> stim.Circuit:
+    """Build a Y-basis *initialisation* experiment ending in a magic readout.
+
+    The exact time reverse of :func:`y_cap_magic_experiment_circuit`: the cap
+    becomes a Y-basis initialisation (transversal reset, boundary rounds, the
+    transition round run backwards from the degenerate patch onto ``xtop``),
+    the memory rounds follow, and the magic ``MPP`` head becomes a noiseless
+    ``MPP`` tail that reads the logical Y back out.
+
+    ``stim.Circuit.time_reversed_for_flows`` does the work, so the detectors and
+    the observable are carried across rather than re-derived, and the resulting
+    experiment must show the same code distance as the forward one.
+    """
+    forward = y_cap_magic_experiment_circuit(distance, mem_rounds)
+    reversed_circuit, _ = forward.time_reversed_for_flows([])
+    return reversed_circuit
+
+
+def y_cap_raw_circuit(distance: int) -> tuple[stim.Circuit, dict[Coord, list[int]]]:
+    """Build the raw Y-cap slice ``[transition, boundary x d//2, final]`` for a
+    ``RawCircuitLayer``, in tqec integer coordinates.
+
+    The data qubits are NOT reset here -- they carry the logical state in from
+    the below cube's memory column, which tqec emits natively. All detectors
+    that are internal to the slice are emitted here (transition end-flows vs the
+    first boundary round, boundary bulk, and the final round's bulk +
+    reconstruction), together with nothing that references a prior slice.
+
+    The transition round's *start* flows can only be closed against the below
+    cube's last memory round, which lives in a different slice and whose record
+    layout is not visible to a ``circuit_factory``. Those seam detectors are
+    therefore left for the detector annotator: this function returns a
+    ``seam_spec`` mapping each below-cube ancilla coordinate to the list of
+    *raw-slice-relative* measurement record indices (0-based within the returned
+    circuit) that, XORed with that ancilla's measurement in the previous round,
+    form the seam detector.
+
+    Returns:
+        ``(circuit, seam_spec)``.
+
+    """
+    d = distance
+    xtop = xtop_qubit_patch(d)
+    ztop = ztop_yboundary_patch(d)
+    b = _Builder()
+    b.allocate(
+        set(xtop.data_qubits)
+        | {s.ancilla for s in xtop.stabilizers}
+        | set(ztop.data_qubits)
+        | {s.ancilla for s in ztop.stabilizers}
+    )
+
+    t_tag = "T"
+    flows = transition_round(b, d, t_tag)
+
+    # Seam spec: below-cube ancilla coord -> raw-relative record indices of the
+    # transition measurements that close its stabilizer. gidney_to_tqec(m) is the
+    # coordinate the below round measured that same stabilizer's ancilla at.
+    seam_spec: dict[Coord, list[int]] = {}
+    for s in xtop.stabilizers:
+        m = s.gidney_ancilla
+        seam_spec[s.ancilla] = [b.rec(t_tag, c) for c in flows.start[m]]
+
+    pad = d // 2
+    b_tags = [f"b{i}" for i in range(pad)]
+    prev = t_tag
+    for i in range(pad):
+        standard_round(b, ztop, b_tags[i])
+        if i == 0:
+            for s in ztop.stabilizers:
+                m = s.gidney_ancilla
+                b.detector(
+                    [b.rec(t_tag, c) for c in flows.end[m]] + [b.rec(b_tags[0], s.ancilla)],
+                    (s.ancilla[0], s.ancilla[1], 0),
+                )
+        else:
+            _bulk_detectors(b, ztop, b_tags[i - 1], b_tags[i])
+        prev = b_tags[i]
+
+    _final_round(b, ztop, prev, "F", d)
+    return b.circuit, seam_spec
+
+
+# --- Per-round Y-cap slices (milestone 2) --------------------------------
+#
+# The monolithic ``[transition, boundary x k, final]`` slice is sliced into its
+# constituent single rounds, each emitted as its own ``RawCircuitLayer`` so the
+# compile tree treats the cap like any other cube: ``transition (1)`` +
+# ``boundary0 (1)`` + ``RepeatedLayer(boundary, k-1)`` + ``final (1)`` = ``k+2``
+# rounds for ``d = 2k+1`` (``k = d//2`` boundary rounds in total).
+#
+# A single round carries no cross-round detectors: those are formed by the
+# detector annotator across consecutive raw layers from the *flow specs* below.
+# The only detectors internal to a round are the final round's stabilizer
+# reconstruction detectors (they reference only the final round's own records).
+#
+# Flow specs (all keyed by tqec ancilla coordinate; values are lists of *qubit
+# coordinates* measured this round, in the round's local element frame):
+#   start_spec : the qubits this round measures to detect a stabilizer, matched
+#                against the *previous* round's measurement of the same ancilla.
+#   end_spec   : the qubits this round measures preparing a stabilizer, to be
+#                matched by the *next* round's start_spec. Only the transition
+#                round has a non-trivial (multi-qubit) end_spec; standard rounds
+#                measure each stabilizer with a single ancilla, so their
+#                successors recover the match from the measurement records keyed
+#                by coordinate.
+#   reconstruction_spec : (final round only) the ancilla + transversally-measured
+#                data qubits that reconstruct a stabilizer within the final round.
+#
+# Values are *coordinates*, not record indices, because when a Y cap coexists
+# with a memory cube the two rounds' measurements are interleaved by
+# ``merge_scheduled_circuits`` -- so a local record index no longer identifies
+# the right measurement, but a qubit coordinate always does (each qubit is
+# measured at most once per round). The detector annotator resolves each
+# coordinate against the merged round's measurement-record map.
+
+_TRANSITION_NUM_MOMENTS = LinearFunction(0, 8)
+_STANDARD_NUM_MOMENTS = LinearFunction(0, 6)
+
+
+def _strip_trailing_tick(circuit: stim.Circuit) -> stim.Circuit:
+    """Drop a single trailing ``TICK`` from ``circuit``.
+
+    A leaf circuit carries no trailing ``TICK``: the compile tree inserts the
+    inter-round ``TICK`` itself.
+    """
+    n = len(circuit)
+    if n and circuit[n - 1].name == "TICK":
+        stripped = stim.Circuit()
+        for i in range(n - 1):
+            stripped.append(circuit[i])
+        return stripped
+    return circuit
+
+
+def _middle_line_correction_plaquettes(distance: int, transposed: bool = False) -> list[complex]:
+    """Return the input-patch plaquettes separating the two logical-Y representatives.
+
+    Gidney's representative is anchored at the corner: ``X`` down the boundary
+    data column ``Re = 0``, ``Z`` along the boundary row ``Im = 0``, ``Y`` where
+    they meet. tqec's is the patch's *middle cross*: the same two strings moved
+    to ``Re = mid`` and ``Im = mid``, ``mid = (d-1)//2``. Moving a string across
+    one column of plaquettes multiplies it by that column, so the two
+    representatives differ by exactly
+
+    * every ``X`` plaquette in the vertical strip ``0 < Re(m) < mid``, and
+    * every ``Z`` plaquette in the horizontal strip ``0 < Im(m) < mid``,
+
+    which is ``2 * mid * (mid + 1)`` plaquettes (4, 12, 24 at ``d`` = 3, 5, 7).
+
+    Selection happens on the Gidney lattice, so a ``transposed`` patch needs no
+    special case: the reflection is carried by :func:`gidney_to_tqec` alone, as
+    everywhere else in this module.
+
+    Returns:
+        the plaquettes' Gidney ancilla coordinates, which key
+        :attr:`TransitionFlows.start`.
+
+    """
+    middle = (distance - 1) // 2
+    plaquettes: list[complex] = []
+    for stabilizer in xtop_qubit_patch(distance, transposed).stabilizers:
+        ancilla = stabilizer.gidney_ancilla
+        # The lower bounds state the intent rather than exclude anything: the
+        # patch has no X plaquette left of the leftmost data column (that
+        # boundary is Z) and no Z plaquette above the top row (that boundary is
+        # X), so both strips start at the corner either way.
+        in_strip = (
+            0 < ancilla.real < middle if stabilizer.basis is Basis.X else 0 < ancilla.imag < middle
+        )
+        if in_strip:
+            plaquettes.append(ancilla)
+    return plaquettes
+
+
+@functools.cache
+def _tqec_logical_y_observable_spec(distance: int, transposed: bool = False) -> tuple[Coord, ...]:
+    """Return the transition-round records measuring the logical Y operator
+    *in tqec's representative*.
+
+    :func:`transition_round` reports a logical-Y flow of its own
+    (``TransitionFlows.observable``, Gidney's corner-anchored representative).
+    That is a valid logical Y, but it is not the representative the rest of the
+    compiler uses: an incoming correlation surface is lowered by the observable
+    builder onto the patch's *middle* lines --- the X sheet onto the data column
+    ``Re = mid``, the Z sheet onto the data row ``Im = mid`` (see
+    ``build_regular_cube_top_readout_qubits``). Combining Gidney's readout with
+    the builder's host measurements therefore leaves the observable
+    non-deterministic.
+
+    The two representatives differ by the plaquette strip returned by
+    :func:`_middle_line_correction_plaquettes`, so this readout is Gidney's
+    corrected by how *this round* measures each of those input stabilizers, which
+    is what ``TransitionFlows.start`` records. Those records are not free: each is
+    deterministic only together with the previous round's measurement of the same
+    stabilizer --- that pairing is the seam detector --- which is why picking the
+    wrong representative makes the assembled observable random rather than merely
+    flipped.
+
+    The flow holds up to sign: signed, it is ``-1`` relative to ``+Y`` written as
+    (X column) . (Z row) with ``+Y`` at the crossing. That is a constant frame
+    offset, so the observable is constant but its constant is not necessarily 0.
+    """
+    _, flows = _build_transition_round(distance, transposed)
+    records = Counter(flows.observable)
+    for ancilla in _middle_line_correction_plaquettes(distance, transposed):
+        records.update(flows.start[ancilla])
+    return tuple(sorted(coord for coord, count in records.items() if count % 2 == 1))
+
+
+def _build_transition_round(
+    distance: int, transposed: bool = False
+) -> tuple[stim.Circuit, TransitionFlows]:
+    """Build the transition round on its own (no trailing ``TICK``) and its flows."""
+    d = distance
+    xtop = xtop_qubit_patch(d, transposed)
+    ztop = ztop_yboundary_patch(d, transposed)
+    b = _Builder()
+    b.allocate(
+        set(xtop.data_qubits)
+        | {s.ancilla for s in xtop.stabilizers}
+        | set(ztop.data_qubits)
+        | {s.ancilla for s in ztop.stabilizers}
+    )
+    flows = transition_round(b, d, "T", transposed)
+    return _strip_trailing_tick(b.circuit), flows
+
+
+def transition_raw_slice(
+    distance: int, transposed: bool = False
+) -> tuple[stim.Circuit, dict[Coord, list[Coord]], dict[Coord, list[Coord]], list[Coord]]:
+    """Build the single transition round as a standalone circuit plus its flow specs.
+
+    Returns ``(circuit, start_spec, end_spec, observable_spec)`` where
+    ``start_spec`` closes the transition against the below memory round (the
+    seam), ``end_spec`` prepares the degenerate patch stabilizers for the first
+    boundary round, and ``observable_spec`` are the records reconstructing the
+    logical-Y operator in the representative the observable builder uses (see
+    :func:`_tqec_logical_y_observable_spec`).
+    """
+    d = distance
+    circuit, flows = _build_transition_round(d, transposed)
+    xtop = xtop_qubit_patch(d, transposed)
+    ztop = ztop_yboundary_patch(d, transposed)
+    start_spec = {s.ancilla: list(flows.start[s.gidney_ancilla]) for s in xtop.stabilizers}
+    end_spec = {s.ancilla: list(flows.end[s.gidney_ancilla]) for s in ztop.stabilizers}
+    return (
+        circuit,
+        start_spec,
+        end_spec,
+        list(_tqec_logical_y_observable_spec(d, transposed)),
+    )
+
+
+def boundary_raw_slice(
+    distance: int, transposed: bool = False
+) -> tuple[stim.Circuit, dict[Coord, list[Coord]]]:
+    """Build a single boundary (padding) round on the degenerate patch, plus its
+    ``start_spec`` (each stabilizer measured by its ancilla once).
+    """
+    d = distance
+    ztop = ztop_yboundary_patch(d, transposed)
+    b = _Builder()
+    b.allocate(set(ztop.data_qubits) | {s.ancilla for s in ztop.stabilizers})
+    standard_round(b, ztop, "B")
+    start_spec = {s.ancilla: [s.ancilla] for s in ztop.stabilizers}
+    return _strip_trailing_tick(b.circuit), start_spec
+
+
+def final_raw_slice(
+    distance: int, transposed: bool = False
+) -> tuple[stim.Circuit, dict[Coord, list[Coord]], dict[Coord, list[Coord]]]:
+    """Build the transversal final data measurement round, plus its ``start_spec``
+    and ``reconstruction_spec``.
+
+    The bulk detector against the last boundary round is left to the annotator
+    (via ``start_spec`` matched by ancilla coordinate). The stabilizer-
+    reconstruction detectors are also emitted by the annotator (via
+    ``reconstruction_spec``) rather than inline, because when the cap coexists
+    with a memory cube the merged round interleaves both patches' measurements
+    and a local record index would no longer be valid.
+    """
+    d = distance
+    ztop = ztop_yboundary_patch(d, transposed)
+    b = _Builder()
+    b.allocate(set(ztop.data_qubits) | {s.ancilla for s in ztop.stabilizers})
+    measure_basis: dict[Coord, Basis] = {}
+    for dq in ztop.data_qubits:
+        g = tqec_to_gidney(dq, transposed)
+        measure_basis[dq] = Basis.Z if g.real + g.imag < d else Basis.X
+    standard_round(b, ztop, "F", measure_data_basis=measure_basis)
+    start_spec = {s.ancilla: [s.ancilla] for s in ztop.stabilizers}
+    reconstruction_spec: dict[Coord, list[Coord]] = {}
+    for s in ztop.stabilizers:
+        data = [dd for dd in s.ordered_data if dd is not None]
+        if all(measure_basis.get(dd) == s.basis for dd in data):
+            reconstruction_spec[s.ancilla] = [s.ancilla, *data]
+    return _strip_trailing_tick(b.circuit), start_spec, reconstruction_spec
+
+
+def reversed_order_patch(patch: PatchGeometry) -> PatchGeometry:
+    """Return ``patch`` with every stabilizer's data touched in the opposite order.
+
+    A Y-basis *initialisation* is the time reverse of the measurement cap, and a
+    time reversal reverses each round's interaction order as well as the order of
+    the rounds. That is not cosmetic: a hook error is the pair of data qubits
+    touched *last*, so reversing a round moves its hook to the opposite end.
+
+    Measured, at ``d = 3`` and ``d = 5``: an initialisation whose transition round
+    is reversed but whose boundary and memory rounds are not has circuit distance
+    ``k + 1`` instead of ``2k + 1`` --- the same hook mismatch, and the same
+    collapse, as the measurement cap's junction-round bug. Reversing the
+    neighbouring rounds too restores the full distance.
+    """
+    return replace(
+        patch,
+        stabilizers=tuple(
+            replace(s, ordered_data=tuple(reversed(s.ordered_data))) for s in patch.stabilizers
+        ),
+    )
+
+
+def _measured_coords(circuit: stim.Circuit) -> list[Coord]:
+    """Return the qubit coordinate behind each measurement, in record order."""
+    coords = {i: (int(v[0]), int(v[1])) for i, v in circuit.get_final_qubit_coordinates().items()}
+    out: list[Coord] = []
+    for instruction in circuit.flattened():
+        assert isinstance(instruction, stim.CircuitInstruction)
+        if instruction.num_measurements:
+            out += [coords[t.value] for t in instruction.targets_copy() if t.is_qubit_target]
+    return out
+
+
+def _pauli_string(circuit: stim.Circuit, support: Mapping[Coord, str]) -> stim.PauliString:
+    index = {(int(v[0]), int(v[1])): i for i, v in circuit.get_final_qubit_coordinates().items()}
+    paulis = ["_"] * circuit.num_qubits
+    for coord, basis in support.items():
+        paulis[index[coord]] = basis
+    return stim.PauliString("".join(paulis))
+
+
+def _solve_records(
+    circuit: stim.Circuit,
+    labels: Sequence[Coord],
+    inp: stim.PauliString,
+    out: stim.PauliString,
+    what: str,
+) -> list[Coord]:
+    """Return the record coordinates implementing ``inp -> out``, verified.
+
+    ``solve_flow_measurements`` is allowed to return a record set that does not
+    actually satisfy its own guarantee when handed a large circuit, so the
+    solution is fed back through ``has_flow(..., unsigned=True)`` before being
+    trusted. A single round is small enough that this always succeeds; the check
+    is here so that it fails loudly rather than silently if it ever stops.
+    """
+    solution = circuit.solve_flow_measurements([stim.Flow(input=inp, output=out)])[0]
+    if solution is None:
+        raise TQECError(f"No measurement set implements the flow for {what}.")
+    verified = stim.Flow(input=inp, output=out, measurements=solution)
+    if not circuit.has_flow(verified, unsigned=True):
+        raise TQECError(f"solve_flow_measurements returned an invalid set for {what}.")
+    return [labels[i] for i in solution]
+
+
+@functools.cache
+def _reversed_transition_specs(
+    distance: int, transposed: bool = False
+) -> tuple[dict[Coord, list[Coord]], dict[Coord, list[Coord]], list[Coord]]:
+    """Flow specs of the time-reversed transition round.
+
+    Returns ``(start_spec, end_spec, observable_spec)``. The reversed round runs
+    the fold backwards: it *measures* the degenerate ``ztop`` stabilizers out
+    (``start_spec``, closing against the boundary round below it) and *prepares*
+    the ``xtop`` stabilizers (``end_spec``, handed to the junction round above),
+    which is the mirror of the forward round.
+
+    The specs cannot be relabelled from the forward round's. Reversal turns every
+    measurement the forward specs reference into a reset, so the reversed round
+    measures an entirely different set of qubits; the record sets are solved for
+    and each one is verified.
+    """
+    forward, _ = _build_transition_round(distance, transposed)
+    reversed_circuit = reverse_round_circuit(forward)
+    labels = _measured_coords(reversed_circuit)
+    identity = stim.PauliString(reversed_circuit.num_qubits)
+
+    def stabilizer(s: Stabilizer) -> stim.PauliString:
+        return _pauli_string(
+            reversed_circuit,
+            {dq: s.basis.value for dq in s.ordered_data if dq is not None},
+        )
+
+    end_spec = {
+        s.ancilla: _solve_records(
+            reversed_circuit, labels, identity, stabilizer(s), f"preparing xtop {s.ancilla}"
+        )
+        for s in xtop_qubit_patch(distance, transposed).stabilizers
+    }
+    start_spec = {
+        s.ancilla: _solve_records(
+            reversed_circuit, labels, stabilizer(s), identity, f"measuring ztop {s.ancilla}"
+        )
+        for s in ztop_yboundary_patch(distance, transposed).stabilizers
+    }
+    observable_spec = _solve_records(
+        reversed_circuit,
+        labels,
+        identity,
+        _pauli_string(reversed_circuit, _logical_y_support(distance, transposed)),
+        "preparing the logical Y",
+    )
+    return start_spec, end_spec, observable_spec
+
+
+def initial_raw_slice(
+    distance: int, transposed: bool = False
+) -> tuple[stim.Circuit, dict[Coord, list[Coord]]]:
+    """Build the Y-init transversal data reset, plus its ``reconstruction_spec``.
+
+    The time reverse of :func:`final_raw_slice`. Reversing a transversal data
+    *measurement* round gives a round that *resets* the data in the same
+    anti-diagonal basis split and then measures its ancillas, i.e. an ordinary
+    first round after a reset --- so it is built directly rather than by
+    reversing, and the stabilizers made deterministic by the reset are its own
+    self-contained detectors.
+    """
+    d = distance
+    ztop = reversed_order_patch(ztop_yboundary_patch(d, transposed))
+    b = _Builder()
+    b.allocate(set(ztop.data_qubits) | {s.ancilla for s in ztop.stabilizers})
+    init_basis: dict[Coord, Basis] = {}
+    for dq in ztop.data_qubits:
+        g = tqec_to_gidney(dq, transposed)
+        init_basis[dq] = Basis.Z if g.real + g.imag < d else Basis.X
+    standard_round(b, ztop, "I", init_data_basis=init_basis)
+    reconstruction_spec: dict[Coord, list[Coord]] = {}
+    for s in ztop.stabilizers:
+        data = [dd for dd in s.ordered_data if dd is not None]
+        if all(init_basis.get(dd) == s.basis for dd in data):
+            reconstruction_spec[s.ancilla] = [s.ancilla]
+    return _strip_trailing_tick(b.circuit), reconstruction_spec
+
+
+def boundary_inv_raw_slice(
+    distance: int, transposed: bool = False
+) -> tuple[stim.Circuit, dict[Coord, list[Coord]]]:
+    """Build a boundary round for a Y-basis *initialisation*, plus its ``start_spec``.
+
+    Identical to :func:`boundary_raw_slice` except that the interaction order is
+    reversed, which every round of an initialisation must be --- see
+    :func:`reversed_order_patch`.
+    """
+    d = distance
+    ztop = reversed_order_patch(ztop_yboundary_patch(d, transposed))
+    b = _Builder()
+    b.allocate(set(ztop.data_qubits) | {s.ancilla for s in ztop.stabilizers})
+    standard_round(b, ztop, "B")
+    start_spec = {s.ancilla: [s.ancilla] for s in ztop.stabilizers}
+    return _strip_trailing_tick(b.circuit), start_spec
+
+
+def transition_inv_raw_slice(
+    distance: int, transposed: bool = False
+) -> tuple[stim.Circuit, dict[Coord, list[Coord]], dict[Coord, list[Coord]], list[Coord]]:
+    """Build the time-reversed transition round plus its flow specs.
+
+    Mirror of :func:`transition_raw_slice`: the round unfolds the degenerate
+    Y-boundary patch back onto the ``xtop`` patch, so it is the round that turns
+    a Y-basis initialisation into an ordinary surface-code patch.
+    """
+    forward, _ = _build_transition_round(distance, transposed)
+    start_spec, end_spec, observable_spec = _reversed_transition_specs(distance, transposed)
+    return reverse_round_circuit(forward), start_spec, end_spec, observable_spec
+
+
+class _YRoundRawLayer(RawCircuitLayer):
+    """One round of the Y-basis measurement cap, as a :class:`RawCircuitLayer`.
+
+    Implements
+    :class:`~tqec.compile.blocks.layers.atomic.raw.FlowSpecLayer`: the round
+    publishes its flow specs so the annotators can form the cross-round
+    detectors and the logical readout that the sliced structure no longer
+    carries inline. Every spec is empty here and filled in by the subclass for
+    the round that has one.
+
+    """
+
+    def __init__(
+        self,
+        circuit_factory: Callable[[int], stim.Circuit],
+        num_moments: LinearFunction,
+    ) -> None:
+        """Wrap a per-distance circuit factory as one Y-cap round.
+
+        Args:
+            circuit_factory: builds the round's circuit for a code distance
+                ``d = 2k + 1``.
+            num_moments: the number of moments that circuit holds.
+
+        """
+        self._make_circuit = circuit_factory
+        super().__init__(self._make_scheduled_circuit, _YCAP_ELEMENT_SHAPE, num_moments)
+
+    def _make_scheduled_circuit(self, k: int) -> ScheduledCircuit:
+        return ScheduledCircuit.from_circuit(self._make_circuit(2 * k + 1))
+
+    def start_spec(self, k: int) -> dict[Coord, list[Coord]]:
+        """Empty unless overridden.
+
+        See
+        :meth:`~tqec.compile.blocks.layers.atomic.raw.FlowSpecLayer.start_spec`.
+        """
+        return {}
+
+    def end_spec(self, k: int) -> dict[Coord, list[Coord]] | None:
+        """``None`` unless overridden.
+
+        See
+        :meth:`~tqec.compile.blocks.layers.atomic.raw.FlowSpecLayer.end_spec`.
+        """
+        return None
+
+    def observable_spec(self, k: int) -> list[Coord] | None:
+        """``None`` unless overridden.
+
+        See
+        :meth:`~tqec.compile.blocks.layers.atomic.raw.FlowSpecLayer.observable_spec`.
+        """
+        return None
+
+    def reconstruction_spec(self, k: int) -> dict[Coord, list[Coord]] | None:
+        """``None`` unless overridden.
+
+        See
+        :meth:`~tqec.compile.blocks.layers.atomic.raw.FlowSpecLayer.reconstruction_spec`.
+        """
+        return None
+
+
+class _TransitionRawLayer(_YRoundRawLayer):
+    def __init__(self, transposed: bool = False) -> None:
+        self._transposed = transposed
+        super().__init__(lambda d: transition_raw_slice(d, transposed)[0], _TRANSITION_NUM_MOMENTS)
+
+    def start_spec(self, k: int) -> dict[Coord, list[Coord]]:
+        return transition_raw_slice(2 * k + 1, self._transposed)[1]
+
+    def end_spec(self, k: int) -> dict[Coord, list[Coord]] | None:
+        return transition_raw_slice(2 * k + 1, self._transposed)[2]
+
+    def observable_spec(self, k: int) -> list[Coord] | None:
+        return transition_raw_slice(2 * k + 1, self._transposed)[3]
+
+
+class _BoundaryRawLayer(_YRoundRawLayer):
+    def __init__(self, transposed: bool = False) -> None:
+        self._transposed = transposed
+        super().__init__(lambda d: boundary_raw_slice(d, transposed)[0], _STANDARD_NUM_MOMENTS)
+
+    def start_spec(self, k: int) -> dict[Coord, list[Coord]]:
+        return boundary_raw_slice(2 * k + 1, self._transposed)[1]
+
+
+class _FinalRawLayer(_YRoundRawLayer):
+    def __init__(self, transposed: bool = False) -> None:
+        self._transposed = transposed
+        super().__init__(lambda d: final_raw_slice(d, transposed)[0], _STANDARD_NUM_MOMENTS)
+
+    def start_spec(self, k: int) -> dict[Coord, list[Coord]]:
+        return final_raw_slice(2 * k + 1, self._transposed)[1]
+
+    def reconstruction_spec(self, k: int) -> dict[Coord, list[Coord]] | None:
+        return final_raw_slice(2 * k + 1, self._transposed)[2]
+
+
+def make_y_cap_layers(transposed: bool = False) -> list[BaseLayer | BaseComposedLayer]:
+    """Build the sliced Y-cap layer sequence.
+
+    The sequence is ``[transition, boundary0, RepeatedLayer(boundary, k-1),
+    final]``, i.e. ``k`` boundary rounds in total.
+    """
+    return [
+        _TransitionRawLayer(transposed),
+        _BoundaryRawLayer(transposed),
+        RepeatedLayer(_BoundaryRawLayer(transposed), LinearFunction(1, -1)),
+        _FinalRawLayer(transposed),
+    ]
+
+
+class _InitialRawLayer(_YRoundRawLayer):
+    def __init__(self, transposed: bool = False) -> None:
+        self._transposed = transposed
+        super().__init__(lambda d: initial_raw_slice(d, transposed)[0], _STANDARD_NUM_MOMENTS)
+
+    def reconstruction_spec(self, k: int) -> dict[Coord, list[Coord]] | None:
+        return initial_raw_slice(2 * k + 1, self._transposed)[1]
+
+
+def handoff_raw_slice(
+    distance: int, transposed: bool = False
+) -> tuple[stim.Circuit, dict[Coord, list[Coord]]]:
+    """Build the handoff round a Y-basis initialisation ends with.
+
+    An ordinary memory round on the ``xtop`` patch, run in the cap's own
+    interaction order rather than the fixed-bulk one.
+
+    A Y cap needs exactly one round in its own order next to its fold -- the
+    junction round the temporal pipe supplies. An initialisation needs **two**:
+    measured at ``d = 5``, an init followed by one own-order round and then
+    fixed-bulk host rounds has circuit distance 4 instead of 5, and only a second
+    own-order round restores it. The pipe supplies one, so the block carries the
+    other itself, right after the reversed transition round.
+
+    Returns the round and its ``start_spec``; the caller also publishes the same
+    map as the ``end_spec`` the junction round above closes against.
+    """
+    xtop = xtop_qubit_patch(distance, transposed)
+    b = _Builder()
+    b.allocate(set(xtop.data_qubits) | {s.ancilla for s in xtop.stabilizers})
+    standard_round(b, xtop, "H")
+    spec = {s.ancilla: [s.ancilla] for s in xtop.stabilizers}
+    return _strip_trailing_tick(b.circuit), spec
+
+
+class _HandoffRawLayer(_YRoundRawLayer):
+    """The extra own-order round a Y-basis initialisation ends with.
+
+    Publishes both a ``start_spec`` and an ``end_spec``. The ``start_spec`` closes
+    against the reversed transition round below (whose ``end_spec`` prepares these
+    stabilizers with several records each); the ``end_spec`` is what the junction
+    round *above* -- an ordinary ``PlaquetteLayer`` -- closes against. Omitting the
+    ``end_spec`` silently opens a time boundary there and collapses the distance
+    to 1.
+    """
+
+    def __init__(self, transposed: bool = False) -> None:
+        self._transposed = transposed
+        super().__init__(lambda d: handoff_raw_slice(d, transposed)[0], _STANDARD_NUM_MOMENTS)
+
+    def start_spec(self, k: int) -> dict[Coord, list[Coord]]:
+        return handoff_raw_slice(2 * k + 1, self._transposed)[1]
+
+    def end_spec(self, k: int) -> dict[Coord, list[Coord]] | None:
+        return handoff_raw_slice(2 * k + 1, self._transposed)[1]
+
+
+class _BoundaryInvRawLayer(_YRoundRawLayer):
+    def __init__(self, transposed: bool = False) -> None:
+        self._transposed = transposed
+        super().__init__(lambda d: boundary_inv_raw_slice(d, transposed)[0], _STANDARD_NUM_MOMENTS)
+
+    def start_spec(self, k: int) -> dict[Coord, list[Coord]]:
+        return boundary_inv_raw_slice(2 * k + 1, self._transposed)[1]
+
+
+class _TransitionInvRawLayer(_YRoundRawLayer):
+    def __init__(self, transposed: bool = False) -> None:
+        self._transposed = transposed
+        super().__init__(
+            lambda d: transition_inv_raw_slice(d, transposed)[0], _TRANSITION_NUM_MOMENTS
+        )
+
+    def start_spec(self, k: int) -> dict[Coord, list[Coord]]:
+        return transition_inv_raw_slice(2 * k + 1, self._transposed)[1]
+
+    def end_spec(self, k: int) -> dict[Coord, list[Coord]] | None:
+        return transition_inv_raw_slice(2 * k + 1, self._transposed)[2]
+
+    def observable_spec(self, k: int) -> list[Coord] | None:
+        return transition_inv_raw_slice(2 * k + 1, self._transposed)[3]
+
+
+def make_y_init_layers(transposed: bool = False) -> list[BaseLayer | BaseComposedLayer]:
+    """Build the sliced Y-basis *initialisation* layer sequence.
+
+    ``[initial, RepeatedLayer(boundary, k-1), boundary, transition_inv, handoff]``:
+    the reverse of :func:`make_y_cap_layers` --- ``k`` boundary rounds in total,
+    ending with the round that unfolds back onto the ``xtop`` patch the cube above
+    continues on --- plus a trailing handoff round.
+
+    The handoff round is not a mirror of anything in the cap, and it is
+    load-bearing: an initialisation needs *two* rounds in the cap's interaction
+    order after its fold where a cap needs one before it, and the temporal pipe
+    supplies only one. See :func:`handoff_raw_slice`.
+    """
+    return [
+        _InitialRawLayer(transposed),
+        RepeatedLayer(_BoundaryInvRawLayer(transposed), LinearFunction(1, -1)),
+        _BoundaryInvRawLayer(transposed),
+        _TransitionInvRawLayer(transposed),
+        _HandoffRawLayer(transposed),
+    ]
+
+
+class YHalfCubeBlock(Block):
+    """A Y-basis measurement cap, which *gains* its junction round rather than
+    having its first round overwritten.
+
+    For an ordinary cube, a temporal pipe below replaces the block's
+    ``Z_NEGATIVE`` border --- ``layer_sequence[0]`` --- with the pipe's junction
+    layer. A Y cap has no round to spare there: its first layer is the transition
+    round, and letting the substitution proceed would overwrite it with a memory
+    round. Nothing in the substitution machinery objects (``RawCircuitLayer`` is
+    a ``BaseLayer``, so ``get_atomic_temporal_border`` happily returns it); the
+    loss only surfaces further downstream, as a seam-detector mismatch.
+
+    Earlier revisions dodged this by prefixing the cap with a hard-coded memory
+    "adapter" round that existed only to absorb the substitution. That forced the
+    adapter's orientation to be guessed (it was pinned to ``HORIZONTAL``, i.e. a
+    ``ZX*`` cube below). Prepending instead lets the junction round come from the
+    pipe itself, whose kind is derived from the cube below, so no orientation is
+    assumed here. The resulting layer sequence is identical to the one the
+    adapter produced.
+
+    ``template`` is the block's spatial footprint, needed to build the
+    :class:`~tqec.compile.specs.base.PipeSpec` of the temporal pipe below (raw
+    layers carry no template of their own). It describes shape only --- the
+    orientation lives in the plaquettes, which the pipe supplies --- so carrying
+    it here reintroduces no orientation assumption.
+    """
+
+    def __init__(
+        self,
+        layer_sequence: Sequence[BaseLayer | BaseComposedLayer],
+        trimmed_spatial_borders: frozenset[SpatialBlockBorder] = frozenset(),
+        template: RectangularTemplate | None = None,
+        initialises: bool = False,
+    ) -> None:
+        """Build a Y-basis measurement cap or initialisation from its rounds.
+
+        Args:
+            layer_sequence: the block's rounds, as returned by
+                :func:`make_y_cap_layers` or :func:`make_y_init_layers`.
+            trimmed_spatial_borders: all the spatial borders that have been
+                removed from the block.
+            template: the block's spatial footprint. See the class docstring.
+            initialises: ``True`` for a Y-basis initialisation, whose regular
+                cube sits *above* it, so it gains its junction round at the end
+                rather than the beginning.
+
+        """
+        super().__init__(layer_sequence, trimmed_spatial_borders)
+        self._template = template
+        self._initialises = initialises
+
+    @property
+    @override
+    def declared_template(self) -> RectangularTemplate | None:
+        return self._template
+
+    @property
+    @override
+    def releases_its_qubits(self) -> bool:
+        # The cap's final round measures every data qubit of the degenerate
+        # patch transversally, so nothing of it survives into later rounds. An
+        # initialisation is the opposite: it hands its data qubits on to the cube
+        # above and must stay present in every trailing layer of its slice.
+        return not self._initialises
+
+    @override
+    def with_temporal_borders_replaced(
+        self,
+        border_replacements: Mapping[TemporalBlockBorder, BaseLayer | None],
+    ) -> YHalfCubeBlock | None:
+        # Keep the subclass: the merged slice reads ``releases_its_qubits`` off
+        # the block *after* the pipe below has been substituted in.
+        if not border_replacements:
+            return self
+        layers = self._layers_with_temporal_borders_replaced(border_replacements)
+        if not layers:
+            return None
+        return YHalfCubeBlock(
+            layers, self.trimmed_spatial_borders, self._template, self._initialises
+        )
+
+    @override
+    def with_spatial_borders_trimmed(self, borders: Iterable[SpatialBlockBorder]) -> YHalfCubeBlock:
+        # Keep the subclass so a later temporal substitution still prepends.
+        return YHalfCubeBlock(
+            self._layers_with_spatial_borders_trimmed(borders),
+            self.trimmed_spatial_borders | frozenset(borders),
+            self._template,
+            self._initialises,
+        )
+
+    @override
+    def _layers_with_temporal_borders_replaced(
+        self,
+        border_replacements: Mapping[TemporalBlockBorder, BaseLayer | None],
+    ) -> list[BaseLayer | BaseComposedLayer]:
+        # A cap gains the pipe's layer at the start, an initialisation at the
+        # end: the junction round always sits between the Y block's fold and the
+        # regular cube it attaches to, which is below a cap and above an init.
+        gained = (
+            TemporalBlockBorder.Z_POSITIVE if self._initialises else TemporalBlockBorder.Z_NEGATIVE
+        )
+        junction = border_replacements.get(gained)
+        remaining = {
+            border: layer for border, layer in border_replacements.items() if border is not gained
+        }
+        layers = super()._layers_with_temporal_borders_replaced(remaining)
+        if junction is not None:
+            if self._initialises:
+                layers.append(junction)
+            else:
+                layers.insert(0, junction)
+        return layers
+
+
+def memory_experiment_circuit(distance: int, rounds: int, basis: Basis) -> stim.Circuit:
+    """Build a self-contained surface-code memory experiment on the xtop patch.
+
+    Used to validate the standard-round + detector machinery independently of
+    the Y transition: initialise all data qubits in ``basis``, run ``rounds``
+    standard rounds, then measure all data qubits in ``basis``. The resulting
+    circuit's detectors must all be deterministic (its DEM builds cleanly).
+    """
+    patch = xtop_qubit_patch(distance)
+    b = _Builder()
+    b.allocate(set(patch.data_qubits) | {s.ancilla for s in patch.stabilizers})
+    init = {d: basis for d in patch.data_qubits}
+    tags = [f"r{i}" for i in range(rounds)]
+
+    standard_round(b, patch, tags[0], init_data_basis=init)
+    _first_round_detectors(b, patch, tags[0], init)
+    for i in range(1, rounds):
+        standard_round(b, patch, tags[i])
+        _bulk_detectors(b, patch, tags[i - 1], tags[i])
+
+    # Final data measurement + stabilizer reconstruction.
+    final_tag = "final"
+    b.measure(f"M{basis.value}", sorted(patch.data_qubits, key=lambda p: (p[1], p[0])), final_tag)
+    for s in patch.stabilizers:
+        if s.basis != basis:
+            continue
+        data = [d for d in s.ordered_data if d is not None]
+        b.detector(
+            [b.rec(tags[-1], s.ancilla)] + [b.rec(final_tag, d) for d in data],
+            (s.ancilla[0], s.ancilla[1], 1),
+        )
+    return b.circuit

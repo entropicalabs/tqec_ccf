@@ -9,12 +9,77 @@ from tqec.computation.block_graph import BlockGraph
 from tqec.computation.cube import Cube, CubeKind, ZXCube
 from tqec.computation.pipe import PipeKind
 from tqec.templates.base import RectangularTemplate
+from tqec.utils.enums import Basis
 from tqec.utils.exceptions import TQECError
-from tqec.utils.position import Direction3D
+from tqec.utils.position import Direction3D, Position3D
 from tqec.utils.scale import LinearFunction
 
 if TYPE_CHECKING:
     from tqec.computation.correlation import CorrelationSurface
+
+
+def _y_cube_neighbour(cube: Cube, graph: BlockGraph) -> tuple[ZXCube, bool]:
+    """Return the regular cube a ``Y_HALF_CUBE`` attaches to, and its direction.
+
+    A Y cube is either a measurement *cap*, sitting on top of the cube it reads
+    out, or a Y-basis *initialisation*, sitting underneath the cube it feeds. It
+    runs on that cube's patch either way, so the neighbour decides the cap's
+    orientation; the direction decides which way round the construction runs.
+
+    Returns:
+        the neighbouring cube's kind, and ``True`` when the Y cube is an
+        initialisation (the neighbour is *above* it).
+
+    Raises:
+        NotImplementedError: if the Y cube has no regular cube on either
+            temporal side --- a Y cube attached only to a ``Port``, which is not
+            lowered.
+
+    """
+    position = cube.position
+    below = Position3D(position.x, position.y, position.z - 1)
+    if graph.has_pipe_between(below, position):
+        below_kind = graph[below].kind
+        if isinstance(below_kind, ZXCube):
+            return below_kind, False
+    above = Position3D(position.x, position.y, position.z + 1)
+    if graph.has_pipe_between(position, above):
+        above_kind = graph[above].kind
+        if isinstance(above_kind, ZXCube):
+            return above_kind, True
+    raise NotImplementedError(
+        f"The Y cube at {position} has no regular cube directly below or above "
+        "it, so it is neither a Y-basis measurement cap nor a Y-basis "
+        "initialisation. A Y cube connected only to a Port is not implemented."
+    )
+
+
+def _y_capped_cube_kind(cube: Cube, graph: BlockGraph) -> ZXCube:
+    """Return the kind of the regular cube a ``Y_HALF_CUBE`` attaches to."""
+    return _y_cube_neighbour(cube, graph)[0]
+
+
+def _y_cube_is_initialisation(cube: Cube, graph: BlockGraph) -> bool:
+    """Whether a ``Y_HALF_CUBE`` initialises rather than measures.
+
+    ``False`` for any cube that is not a Y cube.
+    """
+    if not cube.is_y_cube:
+        return False
+    return _y_cube_neighbour(cube, graph)[1]
+
+
+def _y_cap_is_transposed(cube: Cube, graph: BlockGraph) -> bool:
+    """Whether a ``Y_HALF_CUBE``'s patch must be reflected across its main diagonal.
+
+    A Y cap continues the patch of the cube below it, so it inherits that cube's
+    spatial orientation. Gidney's construction is written for a ``ZX*`` cube
+    (spatial boundaries normal to ``x`` in ``Z``); an ``XZ*`` cube needs the
+    reflection. Returns ``False`` for any cube that is not a Y cube.
+    """
+    if not cube.is_y_cube:
+        return False
+    return _y_capped_cube_kind(cube, graph).x == Basis.X
 
 
 @dataclass(frozen=True)
@@ -36,13 +101,25 @@ class CubeSpec:
             boundary convention.
         condition: The correlation surface carried over from a conditional ``Cube``;
             ``None`` for non-conditional specs.
+        y_cap_transposed: For a ``Y_HALF_CUBE`` only: whether the cap's patch is
+            reflected across its main diagonal. The Y cap runs on the patch of
+            the cube below it, and Gidney's construction is written for a ``ZX*``
+            cube (left/right boundaries in ``Z``). An ``XZ*`` cube below has those
+            boundaries in ``X`` and needs the reflected patch. ``False`` for every
+            other cube kind.
+        y_cube_initialises: For a ``Y_HALF_CUBE`` only: whether it is a Y-basis
+            *initialisation* (the regular cube it attaches to sits above it)
+            rather than a measurement cap (the regular cube sits below).
+            ``False`` for every other cube kind.
 
     """
 
     kind: CubeKind
     spatial_arms: SpatialArms = SpatialArms.NONE
     has_spatial_up_or_down_pipe_in_timeslice: bool = False
-    condition: "CorrelationSurface | None" = None
+    condition: CorrelationSurface | None = None
+    y_cap_transposed: bool = False
+    y_cube_initialises: bool = False
 
     def __post_init__(self) -> None:
         if self.spatial_arms != SpatialArms.NONE:
@@ -72,6 +149,8 @@ class CubeSpec:
                 cube.kind,
                 has_spatial_up_or_down_pipe_in_timeslice=has_spatial_up_or_down_pipe_in_timeslice,
                 condition=cube.condition,
+                y_cap_transposed=_y_cap_is_transposed(cube, graph),
+                y_cube_initialises=_y_cube_is_initialisation(cube, graph),
             )
         spatial_arms = SpatialArms.from_cube_in_graph(cube, graph)
         return CubeSpec(
