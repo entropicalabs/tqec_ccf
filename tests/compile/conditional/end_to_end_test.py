@@ -29,16 +29,13 @@ from tqec.computation.cube import ConditionalLeafCubeKind
 from tqec.utils.enums import Basis
 from tqec.utils.position import Position3D
 
-
 _TEMPORAL_PAIRS = ["XZZ_XZX", "ZXX_ZXZ", "XZX_XZZ"]
 _MEAS_RE = re.compile(r"^\s*(M[XYZ]?R?|MR[XYZ]?)\s+([0-9 ]+)", re.MULTILINE)
 
 
 def _condition() -> CorrelationSurface:
     p = Position3D(0, 0, 0)
-    return CorrelationSurface(
-        span=frozenset([ZXEdge(ZXNode(p, Basis.Z), ZXNode(p, Basis.Z))])
-    )
+    return CorrelationSurface(span=frozenset([ZXEdge(ZXNode(p, Basis.Z), ZXNode(p, Basis.Z))]))
 
 
 def _graph(pair_name: str) -> BlockGraph:
@@ -114,7 +111,9 @@ def test_end_to_end_conditional_pair(pair_name: str) -> None:
 
 
 def test_branch_zero_is_lowercase_branch_kind() -> None:
-    """The else-branch (rec=0) of XZX_XZZ should reflect the XZX cube --
+    """Emit the XZX cube's X-basis readout in the else-branch.
+
+    The else-branch (rec=0) of XZX_XZZ should reflect the XZX cube --
     final data-qubit meas all in X basis -> single MX run, no M instructions.
     """
     g = _graph("XZX_XZZ")

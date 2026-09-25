@@ -72,4 +72,3 @@ def test_to_stim_circuit_strict_roundtrip_when_no_branches() -> None:
     c.append("M", [0])
     sc = c.to_stim_circuit_strict()
     assert len(sc) == 2
-

@@ -34,9 +34,7 @@ def _build_graph() -> tuple[BlockGraph, ConditionalCorrelationSurface]:
         t2,
         ConditionalLeafCubeKind.ZXX_ZXZ,
         condition=CorrelationSurface(
-            span=frozenset(
-                {ZXEdge(u=ZXNode(b1, Basis.Z), v=ZXNode(c1, Basis.Z))}
-            )
+            span=frozenset({ZXEdge(u=ZXNode(b1, Basis.Z), v=ZXNode(c1, Basis.Z))})
         ),
     )
     g.add_pipe(b1, c1)
@@ -84,9 +82,7 @@ def test_conditional_observable_emits_observable_include() -> None:
     # New flat-XOR canonical form: shared baseline OBSERVABLE_INCLUDE on the
     # trunk PLUS at least one IF(rec[...]) { OBSERVABLE_INCLUDE(0) ... }
     # (no ELSE) carrying the flip-delta for the single condition.
-    if_then_only = re.findall(
-        r"IF\(.*?\) \{\n(.*?)\n\}(?!\s*ELSE)", text, re.DOTALL
-    )
+    if_then_only = re.findall(r"IF\(.*?\) \{\n(.*?)\n\}(?!\s*ELSE)", text, re.DOTALL)
     observable_ifs = [body for body in if_then_only if "OBSERVABLE_INCLUDE(0)" in body]
     assert observable_ifs, (
         "expected at least one IF { ... OBSERVABLE_INCLUDE(0) ... } block "
@@ -152,8 +148,11 @@ def _build_multi_cube_graph() -> tuple[BlockGraph, ConditionalCorrelationSurface
 
 
 def test_multi_conditional_observable_compiles_when_all_branches_identical() -> None:
-    """All four resolutions identical → trivially XOR-decomposable, no IF
-    blocks for the observable (shared baseline only)."""
+    """Emit no IF block for an observable whose resolutions all agree.
+
+    All four resolutions identical → trivially XOR-decomposable, no IF
+    blocks for the observable (shared baseline only).
+    """
     g, cond_obs = _build_multi_cube_graph()
     cg = compile_block_graph(g, FIXED_BULK_CONVENTION, observables=[cond_obs])
     text = cg.generate_conditional_stim_text(k=1)
@@ -162,9 +161,12 @@ def test_multi_conditional_observable_compiles_when_all_branches_identical() -> 
 
 
 def test_multi_condition_flat_xor_emits_one_if_per_cube_no_else() -> None:
-    """Two conditional cubes, identical resolutions across the truth table:
+    """Emit one IF block per conditional cube for its observable flip-delta.
+
+    Two conditional cubes, identical resolutions across the truth table:
     flat-XOR decomposable trivially; emission produces one IF(no-ELSE) per
-    cube wrapping OBSERVABLE_INCLUDE(0) for that cube's flip-delta."""
+    cube wrapping OBSERVABLE_INCLUDE(0) for that cube's flip-delta.
+    """
     g, cond_obs = _build_multi_cube_graph()
     cg = compile_block_graph(g, FIXED_BULK_CONVENTION, observables=[cond_obs])
     text = cg.generate_conditional_stim_text(k=1)
@@ -180,9 +182,12 @@ def test_multi_condition_flat_xor_emits_one_if_per_cube_no_else() -> None:
 
 
 def test_surface_anchored_conditional_observable_on_plain_block_graph() -> None:
-    """Plain ZXZ BlockGraph (no ConditionalLeafCubeKind anywhere) carrying a
+    """Compile a surface-anchored conditional observable on a plain graph.
+
+    Plain ZXZ BlockGraph (no ConditionalLeafCubeKind anywhere) carrying a
     surface-anchored ConditionalCorrelationSurface. The conditional observable
-    gates only OBSERVABLE_INCLUDE lines; no per-branch circuit divergence."""
+    gates only OBSERVABLE_INCLUDE lines; no per-branch circuit divergence.
+    """
     b1 = Position3D(0, 0, 0)
     b2 = Position3D(0, 0, 1)
     b3 = Position3D(0, 0, 2)
@@ -236,9 +241,8 @@ def test_conditional_observable_flat_form_has_no_else() -> None:
     text = cg.generate_conditional_stim_text(k=1)
     # No paired IF { OBSERVABLE_INCLUDE(0) ... } ELSE { ... OBSERVABLE_INCLUDE(0) ... }
     paired = re.findall(
-        r"IF\(.*?\) \{\n((?:.|\n)*?OBSERVABLE_INCLUDE\(0\)[^\n]*)\n\} ELSE \{\n((?:.|\n)*?OBSERVABLE_INCLUDE\(0\)[^\n]*)\n\}",
+        r"IF\(.*?\) \{\n((?:.|\n)*?OBSERVABLE_INCLUDE\(0\)[^\n]*)\n\} "
+        r"ELSE \{\n((?:.|\n)*?OBSERVABLE_INCLUDE\(0\)[^\n]*)\n\}",
         text,
     )
-    assert not paired, (
-        "flat-XOR emission must not produce IF/ELSE pairs for observables"
-    )
+    assert not paired, "flat-XOR emission must not produce IF/ELSE pairs for observables"

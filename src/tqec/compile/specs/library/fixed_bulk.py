@@ -19,6 +19,11 @@ from tqec.compile.specs.enums import SpatialArms
 from tqec.compile.specs.library.generators._injection_layer import (
     make_injection_block,
 )
+from tqec.compile.specs.library.generators._ycube_circuit import (
+    YHalfCubeBlock,
+    make_y_cap_layers,
+    make_y_init_layers,
+)
 from tqec.compile.specs.library.generators.fixed_bulk import (
     FixedBulkConventionGenerator,
 )
@@ -89,12 +94,6 @@ class FixedBulkCubeBuilder(CubeBuilder):
         if kind is LeafCubeKind.PORT:
             raise TQECError("Cannot build a block for a Port.")
         elif kind is LeafCubeKind.Y_HALF_CUBE:
-            from tqec.compile.specs.library.generators._ycube_circuit import (
-                YHalfCubeBlock,
-                make_y_cap_layers,
-                make_y_init_layers,
-            )
-
             # The Y-basis measurement cap is sliced into per-round raw layers
             # (transition + boundary0 + RepeatedLayer(boundary, k-1) + final) so
             # the compile tree and the parallel-block merge treat it like any

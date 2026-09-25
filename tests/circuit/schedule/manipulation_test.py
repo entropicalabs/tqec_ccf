@@ -190,9 +190,12 @@ def test_emit_moment_with_ceo_weaves_ifblock_for_divergent_branch() -> None:
 
 
 def test_emit_moment_with_ceo_does_not_batch_across_gate_signatures() -> None:
-    """Divergent slots with different per-branch (name, args) signatures used to
+    """Merge divergent same-condition slots into a single IfBlock.
+
+    Divergent slots with different per-branch (name, args) signatures used to
     stay in separate IfBlocks; the same-condition merge post-pass collapses them
-    into a single IfBlock whose then/else bodies preserve per-slot ordering."""
+    into a single IfBlock whose then/else bodies preserve per-slot ordering.
+    """
     q0, q1 = GridQubit(0, 0), GridQubit(1, 0)
     qubit_to_block = {q0: BlockPosition2D(0, 0), q1: BlockPosition2D(0, 0)}
     global_i2q = {0: q0, 1: q1}
@@ -267,12 +270,8 @@ def test_merge_scheduled_circuits_per_branch_identical_branches() -> None:
 
 
 def test_merge_scheduled_circuits_per_branch_divergent_slot_emits_ifblock() -> None:
-    zero_circuits, qmap = relabel_circuits_qubit_indices(
-        [_scheduled("QUBIT_COORDS(0, 0) 0\nR 0")]
-    )
-    one_circuits, _ = relabel_circuits_qubit_indices(
-        [_scheduled("QUBIT_COORDS(0, 0) 0\nRX 0")]
-    )
+    zero_circuits, qmap = relabel_circuits_qubit_indices([_scheduled("QUBIT_COORDS(0, 0) 0\nR 0")])
+    one_circuits, _ = relabel_circuits_qubit_indices([_scheduled("QUBIT_COORDS(0, 0) 0\nRX 0")])
     qubit_to_block = {GridQubit(0, 0): BlockPosition2D(0, 0)}
     moments_entries, schedule = merge_scheduled_circuits_per_branch(
         zero_circuits,

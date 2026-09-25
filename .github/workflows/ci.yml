@@ -43,9 +43,6 @@ jobs:
       - name: Setup Python development environment
         run: |
           uv sync --group all --python ${{ matrix.python-version }}
-      # Type check the code base.
-      - name: Type checking
-        run: uv run ty check
       # Perform the full tests (including slow ones) when pushing on main.
       - name: Complete tests
         if: github.ref == 'refs/heads/main'

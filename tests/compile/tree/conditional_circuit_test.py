@@ -1,4 +1,6 @@
-"""Stage 3d: LayerTree.generate_conditional_circuit assembles a single
+"""Stage 3d: LayerTree.generate_conditional_circuit.
+
+Stage 3d: LayerTree.generate_conditional_circuit assembles a single
 ConditionalCircuit from per-leaf branch annotations.
 """
 
@@ -21,9 +23,7 @@ def _two_cube_graph(pair_name: str = "XZX_XZZ") -> BlockGraph:
     init_kind = ConditionalLeafCubeKind[pair_name].value[0]
     g = BlockGraph(f"e2e {pair_name}")
     g.add_cube(p0, init_kind)
-    cond = CorrelationSurface(
-        span=frozenset([ZXEdge(ZXNode(p0, Basis.Z), ZXNode(p0, Basis.Z))])
-    )
+    cond = CorrelationSurface(span=frozenset([ZXEdge(ZXNode(p0, Basis.Z), ZXNode(p0, Basis.Z))]))
     g.add_cube(p1, ConditionalLeafCubeKind[pair_name], condition=cond)
     g.add_pipe(p0, p1)
     return g
@@ -45,18 +45,22 @@ def test_generate_conditional_circuit_returns_conditional_circuit_with_ifblocks(
     assert all(ib.condition_recs == [-1] for ib in if_blocks)
 
     # QUBIT_COORDS preamble present, only once per qubit.
-    qubit_coord_indices: list[int] = []
-    for entry in cc.entries:
-        if isinstance(entry, stim.CircuitInstruction) and entry.name == "QUBIT_COORDS":
-            qubit_coord_indices.append(entry.targets_copy()[0].qubit_value)
+    qubit_coord_indices: list[int] = [
+        entry.targets_copy()[0].qubit_value
+        for entry in cc.entries
+        if isinstance(entry, stim.CircuitInstruction) and entry.name == "QUBIT_COORDS"
+    ]
     assert len(qubit_coord_indices) == len(set(qubit_coord_indices)), (
         "QUBIT_COORDS duplicated in preamble"
     )
 
 
 def test_generate_conditional_circuit_emits_detector_ifblock() -> None:
-    """Stage A commit 4a: per-branch detector annotation surfaces at least one
-    IfBlock whose body consists of DETECTOR instructions."""
+    """Surface DETECTOR instructions inside an IfBlock.
+
+    Stage A commit 4a: per-branch detector annotation surfaces at least one
+    IfBlock whose body consists of DETECTOR instructions.
+    """
     g = _two_cube_graph("XZX_XZZ")
     cg = compile_block_graph(g, FIXED_BULK_CONVENTION, observables=None)
     tree = cg.to_layer_tree()

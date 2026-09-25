@@ -6,6 +6,8 @@ from typing import Final, TypeGuard
 
 from typing_extensions import override
 
+from tqec.circuit.qubit import GridQubit
+from tqec.circuit.qubit_map import QubitMap
 from tqec.circuit.schedule.circuit import ScheduledCircuit
 from tqec.circuit.schedule.manipulation import (
     merge_scheduled_circuits,
@@ -21,7 +23,6 @@ from tqec.compile.blocks.positioning import (
     LayoutPosition2D,
 )
 from tqec.compile.conditional.circuit import (
-    CircuitEntry,
     ConditionalCircuit,
     IfBlock,
 )
@@ -102,7 +103,9 @@ class LayoutLayer(BaseLayer):
 
     @property
     def conditional_layers(self) -> dict[LayoutPosition2D, BaseLayer]:
-        """Branch-``one`` alternate layers for positions that originated from
+        """Branch-``one`` alternate layers, keyed by position.
+
+        Branch-``one`` alternate layers for positions that originated from
         a :class:`~tqec.compile.blocks.block.ConditionalBlock` cube.
 
         Co-indexed with ``self.layers`` (which holds the zero branch).
@@ -236,13 +239,12 @@ class LayoutLayer(BaseLayer):
         return self._compute_template_and_plaquettes({pos: self.layers[pos] for pos in positions})
 
     def _branch_one_layers(self) -> dict[LayoutPosition2D, BaseLayer]:
-        """Build branch-``one`` layer map. Falls back to ``self.layers`` at positions
+        """Build the branch-``one`` layer map.
+
+        Falls back to ``self.layers`` at positions
         with no conditional alternate.
         """
-        return {
-            pos: self._conditional_layers.get(pos, layer)
-            for pos, layer in self.layers.items()
-        }
+        return {pos: self._conditional_layers.get(pos, layer) for pos, layer in self.layers.items()}
 
     def _compute_template_and_plaquettes(
         self, layers: dict[LayoutPosition2D, BaseLayer]
@@ -370,18 +372,13 @@ class LayoutLayer(BaseLayer):
             condition_recs=condition_recs,
         )
         # Shift entries into the layer's qubit coordinate frame.
-        from tqec.circuit.qubit import GridQubit
-        from tqec.circuit.qubit_map import QubitMap
 
         mincube, _ = self.bounds
         eshape = self.element_shape.to_shape_2d(k)
         shift_x = mincube.x * (eshape.x - 1)
         shift_y = mincube.y * (eshape.y - 1)
         shifted_qubit_map = QubitMap(
-            {
-                idx: GridQubit(q.x + shift_x, q.y + shift_y)
-                for idx, q in qubit_map.i2q.items()
-            }
+            {idx: GridQubit(q.x + shift_x, q.y + shift_y) for idx, q in qubit_map.i2q.items()}
         )
         out = ConditionalCircuit(qubit_map=shifted_qubit_map)
         for idx in sorted(shifted_qubit_map.i2q.keys()):
@@ -398,8 +395,10 @@ class LayoutLayer(BaseLayer):
         return out
 
     def _reschedule_per_branch_measurements(self) -> None:
-        """Sync both branches' plaquette schedules to the same max-schedule,
-        the conditional analogue of :meth:`reschedule_measurements`."""
+        """Sync both branches' plaquette schedules to the same max-schedule.
+
+        The conditional analogue of :meth:`reschedule_measurements`.
+        """
         all_plaquettes = []
         for layer in self.layers.values():
             if isinstance(layer, PlaquetteLayer):

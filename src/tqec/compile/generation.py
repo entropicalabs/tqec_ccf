@@ -35,6 +35,7 @@ from tqec.compile.conditional.circuit import CircuitEntry
 from tqec.plaquette.plaquette import Plaquettes
 from tqec.templates.base import Template
 from tqec.utils.array import to2dlist
+from tqec.utils.exceptions import TQECError
 from tqec.utils.position import BlockPosition2D, Shift2D
 
 
@@ -158,7 +159,9 @@ def _build_scheduled_circuits_for_plaquette_array(
     increments: Shift2D,
     plaquette_to_block: Mapping[int, BlockPosition2D] | None,
 ) -> tuple[list[ScheduledCircuit], dict[GridQubit, BlockPosition2D] | None, set[str]]:
-    """Walk ``plaquette_array`` row-major and produce one mapped ``ScheduledCircuit``
+    """Produce one mapped ``ScheduledCircuit`` per non-zero plaquette entry.
+
+    Walk ``plaquette_array`` row-major and produce one mapped ``ScheduledCircuit``
     per non-zero entry. Returns the per-plaquette list together with the accumulated
     ``GridQubit -> BlockPosition2D`` ownership map (when requested) and the union of
     plaquette-declared mergeable instruction names.
@@ -243,8 +246,6 @@ def generate_per_branch_circuit_from_instantiation(
     )
     assert qubit_to_block_z is not None and qubit_to_block_o is not None
     if qubit_to_block_z != qubit_to_block_o:
-        from tqec.utils.exceptions import TQECError
-
         raise TQECError(
             "generate_per_branch_circuit_from_instantiation: per-branch qubit "
             "ownership maps differ; Equal Measurement Count + CEO assumption violated."

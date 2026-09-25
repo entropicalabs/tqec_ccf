@@ -67,6 +67,7 @@ from tqec.compile.blocks.positioning import (
     LayoutPosition3D,
 )
 from tqec.compile.conditional.circuit import ConditionalCircuit
+from tqec.compile.conditional.condition_recs import resolve_condition_recs
 from tqec.compile.detectors.database import DetectorDatabase
 from tqec.compile.observables.abstract_observable import (
     AbstractObservable,
@@ -778,8 +779,6 @@ class TopologicalComputationGraph:
             ``IF``/``ELSE`` blocks.
 
         """
-        from tqec.compile.conditional.condition_recs import resolve_condition_recs
-
         missing = set(self._conditional_blocks) - set(self._conditional_observables)
         extra = set(self._conditional_observables) - set(self._conditional_blocks)
         if missing or extra:

@@ -71,7 +71,7 @@ class LayerTree:
         observable_builder: ObservableBuilder,
         abstract_observables: list[AbstractObservable] | None = None,
         annotations: Mapping[int, LayerTreeAnnotations] | None = None,
-        conditional_blocks: Mapping["LayoutPosition3D", "ConditionalBlock"] | None = None,
+        conditional_blocks: Mapping[LayoutPosition3D, ConditionalBlock] | None = None,
         conditional_abstract_observables: list[ConditionalAbstractObservable] | None = None,
     ):
         """Represent a computation as a tree.
@@ -96,23 +96,27 @@ class LayerTree:
                 IF/ELSE emission stages to recover both branches and the
                 ``CorrelationSurface`` condition associated with each
                 conditional cube.  Optional; defaults to an empty mapping.
+            conditional_abstract_observables: observables whose support
+                depends on the outcome of one or more conditional cubes. Each is
+                compiled into an unconditional ``OBSERVABLE_INCLUDE`` plus one
+                ``IF``-wrapped correction per condition, and only by
+                :meth:`generate_conditional_circuit`. Optional; defaults to an
+                empty list.
 
         """
         self._root = LayerNode(root)
         self._abstract_observables = abstract_observables or []
         self._annotations = dict(annotations) if annotations is not None else {}
         self._observable_builder = observable_builder
-        self._conditional_blocks: dict["LayoutPosition3D", "ConditionalBlock"] = (
+        self._conditional_blocks: dict[LayoutPosition3D, ConditionalBlock] = (
             dict(conditional_blocks) if conditional_blocks is not None else {}
         )
         self._conditional_abstract_observables: list[ConditionalAbstractObservable] = (
-            list(conditional_abstract_observables)
-            if conditional_abstract_observables
-            else []
+            list(conditional_abstract_observables) if conditional_abstract_observables else []
         )
 
     @property
-    def conditional_blocks(self) -> Mapping["LayoutPosition3D", "ConditionalBlock"]:
+    def conditional_blocks(self) -> Mapping[LayoutPosition3D, ConditionalBlock]:
         """Return the conditional-cube blocks indexed by ``LayoutPosition3D``."""
         return self._conditional_blocks
 
@@ -480,9 +484,11 @@ class LayerTree:
                 map their walk position back to a z-layer key.
             include_qubit_coords: whether to prepend ``QUBIT_COORDS``
                 annotations.
-            manhattan_radius, detector_database, database_path,
-            lookback,
-            reschedule_measurements: as on :meth:`generate_circuit`.
+            manhattan_radius: as in :meth:`generate_circuit`.
+            detector_database: as in :meth:`generate_circuit`.
+            database_path: as in :meth:`generate_circuit`.
+            lookback: as in :meth:`generate_circuit`.
+            reschedule_measurements: as in :meth:`generate_circuit`.
 
         Returns:
             A :class:`ConditionalCircuit` representing the full computation.

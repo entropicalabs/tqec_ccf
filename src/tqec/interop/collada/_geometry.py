@@ -130,8 +130,11 @@ class BlockGeometries:
             self.geometries[kind] = faces
 
     def _load_conditional_cube_geometries(self) -> None:
-        """Geometries for ConditionalLeafCubeKind. Faces whose basis differs between
-        the two branches are painted gray; matching faces keep the basis color."""
+        """Geometries for a ConditionalLeafCubeKind.
+
+        Faces whose basis differs between
+        the two branches are painted gray; matching faces keep the basis color.
+        """
         width, height = 1.0, 1.0
         for kind in ConditionalLeafCubeKind:
             false_k, true_k = kind.value
@@ -139,11 +142,7 @@ class BlockGeometries:
             for direction in Direction3D.all_directions():
                 b_false = false_k.get_basis_along(direction)
                 b_true = true_k.get_basis_along(direction)
-                color = (
-                    TQECColor.CONDITIONAL
-                    if b_false != b_true
-                    else TQECColor(b_false.value)
-                )
+                color = TQECColor.CONDITIONAL if b_false != b_true else TQECColor(b_false.value)
                 face = Face(color, width, height, SignedDirection3D(direction, False))
                 faces.append(face)
                 translation = [0.0, 0.0, 0.0]

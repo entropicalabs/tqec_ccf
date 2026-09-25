@@ -238,7 +238,9 @@ class LookbackStack:
         list[Plaquettes],
         MeasurementRecordsMap,
     ]:
-        """Get the last ``n`` QEC rounds with parallel branch-zero and branch-one
+        """Get the last ``n`` QEC rounds with parallel per-branch plaquette lists.
+
+        Get the last ``n`` QEC rounds with parallel branch-zero and branch-one
         plaquette lists. Rounds with no branch-one alternate fall back to the
         branch-zero entry (both branches share that round's content).
         """
@@ -303,6 +305,14 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
                 1 for sequential processing, >1 for parallel processing using
                 ``parallel_process_count`` processes, and -1 for using all available
                 CPU cores. Default to 1.
+            condition_recs: for a computation with conditional cubes, the
+                measurement records selecting the branch, keyed by the absolute
+                ``z`` of the conditional leaf. A leaf found here gets its
+                branch-dependent detectors wrapped in an ``IF`` block on those
+                records. ``None`` for a computation with no conditional cube.
+            min_z: the minimum ``z`` of the computation, added to the walker's
+                leaf index to recover the absolute ``z`` that keys
+                ``condition_recs``. Default to 0.
 
         """
         if lookback < 1:
@@ -414,7 +424,7 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
         # Per-branch detector computation. The lookback gives parallel
         # branch-zero / branch-one plaquette lists; everything else (templates,
         # measurement records) is shared by EMC + CEO.
-        templates_pb, plaquettes_zero_lb, plaquettes_one_lb, measurement_records_pb = (
+        templates_pb, _, plaquettes_one_lb, measurement_records_pb = (
             self._lookback_stack.lookback_per_branch(self._lookback_size)
         )
         detectors_one = compute_detectors_for_fixed_radius(

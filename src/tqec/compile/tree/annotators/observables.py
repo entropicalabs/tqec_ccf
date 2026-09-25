@@ -1,5 +1,7 @@
 import dataclasses
 
+import stim
+
 from tqec.circuit.measurement_map import MeasurementRecordsMap
 from tqec.circuit.qubit import GridQubit
 from tqec.compile.blocks.layers.atomic.layout import LayoutLayer
@@ -168,7 +170,7 @@ def annotate_conditional_observable(
     cond_observable: ConditionalAbstractObservable,
     observable_index: int,
     observable_builder: ObservableBuilder,
-    condition_recs_by_z: dict[int, list[int]],  # noqa: ARG001 — back-compat; per-bit recs now read off cond_observable.condition_recs
+    condition_recs_by_z: dict[int, list[int]],
     min_z: int,
 ) -> None:
     """Annotate a truth-table-indexed logical observable on the tree.
@@ -202,8 +204,6 @@ def annotate_conditional_observable(
             bindings' absolute anchor z into ``root.children`` offsets.
 
     """
-    import stim  # local: avoid module-level dep when unused
-
     from tqec.compile.conditional.condition_recs import (  # noqa: PLC0415
         _collect_pre_cond_entries,
         _compute_tail_shifts,
@@ -212,17 +212,12 @@ def annotate_conditional_observable(
     bindings = cond_observable.condition_bindings
     n_bits = len(bindings)
     if n_bits == 0:
-        raise TQECError(
-            "ConditionalAbstractObservable has no condition_bindings."
-        )
+        raise TQECError("ConditionalAbstractObservable has no condition_bindings.")
     branches = cond_observable.branches
-    expected_keys = {
-        tuple(bool((i >> j) & 1) for j in range(n_bits)) for i in range(2**n_bits)
-    }
+    expected_keys = {tuple(bool((i >> j) & 1) for j in range(n_bits)) for i in range(2**n_bits)}
     if set(branches.keys()) != expected_keys:
         raise TQECError(
-            "ConditionalAbstractObservable.branches must cover all "
-            f"2^{n_bits} truth-table keys."
+            f"ConditionalAbstractObservable.branches must cover all 2^{n_bits} truth-table keys."
         )
 
     # anchor_z_by_bit: z-index (relative to min_z) where the i-th condition's
@@ -255,8 +250,6 @@ def annotate_conditional_observable(
     recs_per_bit: list[list[int]] = [list(r) for r in cond_observable.condition_recs]
 
     max_idx = sorted_cube_z_indices[-1]
-    # Cap max_idx so we don't try to collect entries beyond the tree.
-    max_walk_z = min(max_idx, n_layers - 1)
     entries, subtree_leaves = _collect_pre_cond_entries(root, k, max_idx + 1)
     tail_shifts_max = _compute_tail_shifts(entries)
     entry_by_leaf_id = {id(e.leaf): (e, i) for i, e in enumerate(entries)}
@@ -320,9 +313,9 @@ def annotate_conditional_observable(
                 for key, sl in slice_by_key.items()
             }
             shared = qubits_by_key[zero_key]
-            deltas: list[frozenset] = []
-            for i in range(n_bits):
-                deltas.append(frozenset(qubits_by_key[flip_keys[i]] ^ shared))
+            deltas: list[frozenset] = [
+                frozenset(qubits_by_key[flip_keys[i]] ^ shared) for i in range(n_bits)
+            ]
             # Validate flat-XOR decomposability for every key.
             for key, qubits in qubits_by_key.items():
                 predicted = shared
@@ -342,9 +335,7 @@ def annotate_conditional_observable(
                 assert circuit is not None
                 meas = MeasurementRecordsMap.from_scheduled_circuit(circuit)
                 anchor_leaf.get_annotations(k).observables.append(
-                    get_observable_with_measurement_records(
-                        shared, meas, observable_index
-                    )
+                    get_observable_with_measurement_records(shared, meas, observable_index)
                 )
             for bit, delta in enumerate(deltas):
                 _collect_recs(anchor_leaf, delta, delta_per_bit[bit], bit)

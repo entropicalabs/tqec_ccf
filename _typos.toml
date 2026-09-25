@@ -7,3 +7,7 @@ extend-ignore-words-re = [
   # Corrected to "IS" but just Pauli string "IZ"
   "IZ",
 ]
+
+[default.extend-words]
+# Short for "ancilla" (e.g. ``x_anc``), never a misspelling of "and".
+anc = "anc"

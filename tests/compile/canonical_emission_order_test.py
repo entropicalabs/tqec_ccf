@@ -27,7 +27,6 @@ from tqec.computation.block_graph import BlockGraph
 from tqec.computation.cube import ConditionalLeafCubeKind
 from tqec.utils.position import Position3D
 
-
 _MEAS_INSTRUCTIONS = {"M", "MX", "MY", "MZ", "MR", "MRX", "MRY", "MRZ"}
 
 
@@ -39,9 +38,7 @@ def _single_cube_graph(kind_str: str) -> BlockGraph:
 
 def _compile(g: BlockGraph, convention: Convention = FIXED_BULK_CONVENTION) -> stim.Circuit:
     cg = compile_block_graph(g, convention, observables=None)
-    return cg.to_layer_tree().generate_circuit(
-        k=1, detector_database=None, database_path=None
-    )
+    return cg.to_layer_tree().generate_circuit(k=1, detector_database=None, database_path=None)
 
 
 def _basis_of(name: str) -> str:
@@ -106,17 +103,14 @@ def test_ceo_qubit_order_identical(pair_name: str) -> None:
     sched_o = _measurement_schedule(co)
 
     assert len(sched_z) == len(sched_o), (
-        f"{pair_name}: number of measurement timesteps differs — "
-        f"{len(sched_z)} vs {len(sched_o)}"
+        f"{pair_name}: number of measurement timesteps differs — {len(sched_z)} vs {len(sched_o)}"
     )
 
     diff = _format_diff(sched_z, sched_o)
     for t, (ts0, ts1) in enumerate(zip(sched_z, sched_o)):
         q0 = [q for q, _ in ts0]
         q1 = [q for q, _ in ts1]
-        assert q0 == q1, (
-            f"{pair_name}: qubit emission order differs at timestep {t}\n{diff}"
-        )
+        assert q0 == q1, f"{pair_name}: qubit emission order differs at timestep {t}\n{diff}"
 
 
 @pytest.mark.parametrize("pair_name", _CEO_PAIRS)

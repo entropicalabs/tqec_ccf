@@ -1,4 +1,6 @@
-"""Stage 3c: AnnotateCircuitOnLayerNode propagates ConditionalCircuit when
+"""Stage 3c: the circuit annotator propagates a ConditionalCircuit.
+
+Stage 3c: AnnotateCircuitOnLayerNode propagates ConditionalCircuit when
 ``condition_recs`` is supplied and the leaf carries a non-empty
 ``conditional_layers`` map.
 """
@@ -23,9 +25,7 @@ def _build_conditional_tree():
     g = BlockGraph("annot-cond")
     init_kind = ConditionalLeafCubeKind.XZX_XZZ.value[0]
     g.add_cube(p0, init_kind)
-    cond = CorrelationSurface(
-        span=frozenset([ZXEdge(ZXNode(p0, Basis.Z), ZXNode(p0, Basis.Z))])
-    )
+    cond = CorrelationSurface(span=frozenset([ZXEdge(ZXNode(p0, Basis.Z), ZXNode(p0, Basis.Z))]))
     g.add_cube(p1, ConditionalLeafCubeKind.XZX_XZZ, condition=cond)
     g.add_pipe(p0, p1)
     cg = compile_block_graph(g, FIXED_BULK_CONVENTION, observables=None)
@@ -61,12 +61,8 @@ def test_annotator_populates_conditional_circuit_when_condition_recs_given() -> 
     collector = _CollectLayoutNodes()
     tree._root.walk(collector)
 
-    conditional_nodes = [
-        n for n in collector.nodes if n._layer.conditional_layers
-    ]
-    non_conditional_nodes = [
-        n for n in collector.nodes if not n._layer.conditional_layers
-    ]
+    conditional_nodes = [n for n in collector.nodes if n._layer.conditional_layers]
+    non_conditional_nodes = [n for n in collector.nodes if not n._layer.conditional_layers]
     assert conditional_nodes, "expected at least one LayoutLayer with conditional_layers"
 
     for node in conditional_nodes:

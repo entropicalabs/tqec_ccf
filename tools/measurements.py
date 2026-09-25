@@ -110,9 +110,7 @@ def locate_record(
     return measurement_map[idx]
 
 
-def observable_records(
-    circuit: stim.Circuit, observable_index: int = 0
-) -> list[MeasurementInfo]:
+def observable_records(circuit: stim.Circuit, observable_index: int = 0) -> list[MeasurementInfo]:
     """Return the net measurements of an observable in a vanilla circuit.
 
     Accumulates every ``OBSERVABLE_INCLUDE(observable_index)`` in the circuit and
