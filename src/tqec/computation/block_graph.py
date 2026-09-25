@@ -538,9 +538,7 @@ class BlockGraph:
         new_graph = BlockGraph()
         for cube in self.cubes:
             shifted_condition = (
-                cube.condition.shift_by(dx=dx, dy=dy, dz=dz)
-                if cube.condition is not None
-                else None
+                cube.condition.shift_by(dx=dx, dy=dy, dz=dz) if cube.condition is not None else None
             )
             new_graph.add_cube(
                 cube.position.shift_by(dx=dx, dy=dy, dz=dz),
@@ -807,8 +805,12 @@ class BlockGraph:
                 rotated_condition = CorrelationSurface(
                     span=frozenset(
                         ZXEdge(
-                            ZXNode(rotate_position_by_matrix(e.u.position, rotation_matrix), e.u.basis),
-                            ZXNode(rotate_position_by_matrix(e.v.position, rotation_matrix), e.v.basis),
+                            ZXNode(
+                                rotate_position_by_matrix(e.u.position, rotation_matrix), e.u.basis
+                            ),
+                            ZXNode(
+                                rotate_position_by_matrix(e.v.position, rotation_matrix), e.v.basis
+                            ),
                         )
                         for e in cube.condition.span
                     )

@@ -9,34 +9,32 @@ import stim
 from tqec.circuit.qubit_map import QubitMap
 from tqec.circuit.schedule.circuit import ScheduledCircuit
 from tqec.compile.blocks.layers.atomic.base import BaseLayer
-from tqec.compile.conditional.circuit import (
-    ConditionalCircuit,
-    IfBlock,
-    remap_entry_qubit_indices,
-)
 from tqec.compile.blocks.layers.atomic.layout import LayoutLayer
 from tqec.compile.blocks.layers.atomic.plaquettes import PlaquetteLayer
 from tqec.compile.blocks.layers.atomic.raw import RawCircuitLayer
 from tqec.compile.blocks.layers.composed.base import BaseComposedLayer
 from tqec.compile.blocks.layers.composed.repeated import RepeatedLayer
 from tqec.compile.blocks.layers.composed.sequenced import SequencedLayers
+from tqec.compile.conditional.circuit import (
+    ConditionalCircuit,
+    IfBlock,
+    remap_entry_qubit_indices,
+)
 from tqec.compile.tree.annotations import LayerNodeAnnotations, Polygon
 from tqec.utils.coordinates import StimCoordinates
 from tqec.utils.exceptions import TQECError
 from tqec.utils.scale import LinearFunction
 
 
-def _extend_conditional_circuit(
-    target: ConditionalCircuit, source: ConditionalCircuit
-) -> None:
+def _extend_conditional_circuit(target: ConditionalCircuit, source: ConditionalCircuit) -> None:
     """Append every entry of ``source`` to ``target``."""
     target.extend(source.entries)
 
 
-def _append_stim_circuit_to_conditional(
-    circuit: stim.Circuit, target: ConditionalCircuit
-) -> None:
-    """Flatten a ``stim.Circuit`` (no nested blocks) into plain entries on
+def _append_stim_circuit_to_conditional(circuit: stim.Circuit, target: ConditionalCircuit) -> None:
+    """Flatten a ``stim.Circuit`` into plain entries on ``target``.
+
+    Flatten a ``stim.Circuit`` (no nested blocks) into plain entries on
     ``target``. ``stim.CircuitRepeatBlock`` is rendered as a flat repetition —
     ``ConditionalCircuit`` has no native REPEAT primitive at this stage.
     """
@@ -167,7 +165,9 @@ class LayerNode:
     def set_conditional_circuit_annotation(
         self, k: int, conditional_circuit: ConditionalCircuit
     ) -> None:
-        """Set the branch-aware circuit annotation. Only populated for leaves whose
+        """Set the branch-aware circuit annotation.
+
+        Only populated for leaves whose
         ``LayoutLayer`` carries a non-empty ``conditional_layers``; ``circuit`` (the
         branch-zero :class:`ScheduledCircuit`) is set independently and unchanged.
         """
@@ -260,7 +260,9 @@ class LayerNode:
         raise TQECError(f"Unknown layer type found: {type(self._layer).__name__}.")
 
     def has_conditional_descendant(self, k: int) -> bool:
-        """Return ``True`` iff this node (or any descendant) holds a
+        """Return ``True`` iff this subtree surfaces an :class:`IfBlock`.
+
+        Return ``True`` iff this node (or any descendant) holds a
         :class:`ConditionalCircuit` annotation that actually surfaces an
         :class:`IfBlock`. Stabiliser-round leaves that happen to be
         byte-identical across branches are reported as non-conditional so the

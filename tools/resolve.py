@@ -141,9 +141,7 @@ def resolve_if_else(text: str, conditions: dict[int, int]) -> stim.Circuit:
     def get_outcome(node: _IfNode, index: int) -> int:
         outcome = conditions.get(node.condition_rec)
         if outcome is None:
-            raise ValueError(
-                f"No outcome supplied for IF(rec[{node.condition_rec}])."
-            )
+            raise ValueError(f"No outcome supplied for IF(rec[{node.condition_rec}]).")
         return outcome
 
     raw_lines = text.splitlines()

@@ -2,10 +2,28 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 import stim
 
 from tools.resolve import resolve_if_else
+from tqec.compile.blocks.block import ConditionalBlock
+from tqec.compile.compile import _resolve_conditional_cubes, compile_block_graph
+from tqec.compile.convention import FIXED_BULK_CONVENTION
+from tqec.compile.observables.abstract_observable import (
+    compile_correlation_surface_to_abstract_observable,
+)
+from tqec.computation.block_graph import BlockGraph
+from tqec.computation.correlation import (
+    ConditionalCorrelationSurface,
+    CorrelationSurface,
+    ZXEdge,
+    ZXNode,
+)
+from tqec.computation.cube import ConditionalLeafCubeKind
+from tqec.utils.enums import Basis
+from tqec.utils.position import Position3D
 
 
 def test_no_if_else_passthrough() -> None:
@@ -113,7 +131,9 @@ def test_invalid_outcome_raises() -> None:
 
 
 def test_resolve_matches_inplace_branch_compile() -> None:
-    """End-to-end: resolving the IF/ELSE text must reproduce the per-branch
+    """Reproduce the per-branch compiled circuit by resolving the IF/ELSE text.
+
+    End-to-end: resolving the IF/ELSE text must reproduce the per-branch
     compiled stim circuit instruction-for-instruction.
 
     The reference is the in-place swap (replace the ConditionalBlock in the
@@ -121,14 +141,6 @@ def test_resolve_matches_inplace_branch_compile() -> None:
     from-scratch rebuild, because the detector-annotation pass can pick
     different detector subsets for two topologically distinct graphs.
     """
-    from tqec.compile.compile import compile_block_graph
-    from tqec.compile.convention import FIXED_BULK_CONVENTION
-    from tqec.computation.block_graph import BlockGraph
-    from tqec.computation.correlation import CorrelationSurface, ZXEdge, ZXNode
-    from tqec.computation.cube import ConditionalLeafCubeKind
-    from tqec.utils.enums import Basis
-    from tqec.utils.position import Position3D
-
     p_cond = Position3D(0, 0, 1)
     p_init = Position3D(0, 0, 0)
     # Causal surface (z=0, below cond cube at z=1) — Cube.__post_init__
@@ -145,16 +157,12 @@ def test_resolve_matches_inplace_branch_compile() -> None:
     cg = compile_block_graph(g, FIXED_BULK_CONVENTION, observables=None)
     text = cg.generate_conditional_stim_text(k=1)
     # Extract the rec the resolver chose for branch-fixing below.
-    import re as _re
-
-    _m = _re.search(r"IF\(([^)]+)\)", text)
+    _m = re.search(r"IF\(([^)]+)\)", text)
     assert _m is not None
     _rec = int(_m.group(1).split("^")[0].strip().lstrip("rec[").rstrip("]"))
 
     # In-place: temporarily replace the ConditionalBlock with one of its
     # sub-blocks and call the normal generate_stim_circuit; restore after.
-    from tqec.compile.blocks.block import ConditionalBlock
-
     ((cond_pos, cblock),) = cg._conditional_blocks.items()
     assert isinstance(cblock, ConditionalBlock)
 
@@ -163,9 +171,7 @@ def test_resolve_matches_inplace_branch_compile() -> None:
         original_cond = cg._conditional_blocks
         try:
             cg._conditional_blocks = {}
-            cg._blocks[cond_pos] = (
-                cblock.block_if_zero if branch == 0 else cblock.block_if_one
-            )
+            cg._blocks[cond_pos] = cblock.block_if_zero if branch == 0 else cblock.block_if_one
             return cg.generate_stim_circuit(k=1)
         finally:
             cg._blocks[cond_pos] = original_block
@@ -183,7 +189,9 @@ def test_resolve_matches_inplace_branch_compile() -> None:
 def _assert_circuits_equivalent_modulo_detector_order(
     actual: stim.Circuit, expected: stim.Circuit
 ) -> None:
-    """The single-pass conditional compiler emits DETECTORs in a different order
+    """Check the single-pass and in-place compiles agree up to detector order.
+
+    The single-pass conditional compiler emits DETECTORs in a different order
     than the in-place per-branch compile (single-pass groups shared detectors
     first then divergent; in-place emits them in radius-2 lookback order).
     Both circuits define the same detector set; we assert per-measurement-block
@@ -216,10 +224,13 @@ def _assert_circuits_equivalent_modulo_detector_order(
 def _absolute_meas_index_sets(
     circuit: stim.Circuit,
 ) -> tuple[frozenset[frozenset[int]], dict[int, frozenset[int]], int]:
-    """Walk flattened circuit. Return (detector_set, obs_parity_by_index,
+    """Walk a flattened circuit and collect its absolute measurement indices.
+
+    Walk flattened circuit. Return (detector_set, obs_parity_by_index,
     num_measurements). Detector set = frozenset of per-detector frozensets of
     absolute measurement indices. obs_parity_by_index = XOR'd absolute indices
-    per OBSERVABLE_INCLUDE index."""
+    per OBSERVABLE_INCLUDE index.
+    """
     m_count = 0
     detectors: set[frozenset[int]] = set()
     obs: dict[int, set[int]] = {}
@@ -227,9 +238,7 @@ def _absolute_meas_index_sets(
         name = inst.name
         if name == "DETECTOR":
             ms = frozenset(
-                m_count + t.value
-                for t in inst.targets_copy()
-                if t.is_measurement_record_target
+                m_count + t.value for t in inst.targets_copy() if t.is_measurement_record_target
             )
             detectors.add(ms)
         elif name == "OBSERVABLE_INCLUDE":
@@ -247,10 +256,10 @@ def _absolute_meas_index_sets(
     )
 
 
-def _assert_circuits_semantically_equivalent(
-    actual: stim.Circuit, expected: stim.Circuit
-) -> None:
-    """Compare two circuits via:
+def _assert_circuits_semantically_equivalent(actual: stim.Circuit, expected: stim.Circuit) -> None:
+    """Assert two circuits are semantically equivalent.
+
+    Compare two circuits via:
     - identical sequential measurement record (gate name + qubit per measurement),
     - identical detector parity-set collection (ignoring annotation order),
     - identical per-index observable measurement parity sets,
@@ -268,25 +277,13 @@ def _assert_circuits_semantically_equivalent(
 
 
 def test_resolve_matches_inplace_branch_compile_with_conditional_observable() -> None:
-    """End-to-end with ConditionalCorrelationSurface: resolving the IF/ELSE
+    """Reproduce a per-branch circuit with a conditional observable.
+
+    End-to-end with ConditionalCorrelationSurface: resolving the IF/ELSE
     text per branch must reproduce the per-branch in-place compiled circuit
     semantically (same detector parity sets, same OBSERVABLE_INCLUDE measurement
     parity, same measurement count).
     """
-    from tqec.compile.blocks.block import ConditionalBlock
-    from tqec.compile.compile import compile_block_graph
-    from tqec.compile.convention import FIXED_BULK_CONVENTION
-    from tqec.computation.block_graph import BlockGraph
-    from tqec.computation.correlation import (
-        ConditionalCorrelationSurface,
-        CorrelationSurface,
-        ZXEdge,
-        ZXNode,
-    )
-    from tqec.computation.cube import ConditionalLeafCubeKind
-    from tqec.utils.enums import Basis
-    from tqec.utils.position import Position3D
-
     b1 = Position3D(0, 0, 0)
     c1 = Position3D(0, 0, 1)
     c2 = Position3D(1, 0, 1)
@@ -302,9 +299,7 @@ def test_resolve_matches_inplace_branch_compile_with_conditional_observable() ->
         t2,
         ConditionalLeafCubeKind.ZXX_ZXZ,
         condition=CorrelationSurface(
-            span=frozenset(
-                {ZXEdge(u=ZXNode(c1, Basis.Z), v=ZXNode(c2, Basis.Z))}
-            )
+            span=frozenset({ZXEdge(u=ZXNode(c1, Basis.Z), v=ZXNode(c2, Basis.Z))})
         ),
     )
     g.add_pipe(b1, c1)
@@ -343,9 +338,7 @@ def test_resolve_matches_inplace_branch_compile_with_conditional_observable() ->
     text = cg.generate_conditional_stim_text(k=1)
     # Mock condition resolves to rec[-1] placeholder; map every IF guard rec
     # to the chosen outcome.
-    import re as _re
-
-    rec_ids = {int(m) for m in _re.findall(r"IF\(rec\[(-?\d+)\]", text)}
+    rec_ids = {int(m) for m in re.findall(r"IF\(rec\[(-?\d+)\]", text)}
 
     ((cond_pos, cblock),) = cg._conditional_blocks.items()
     assert isinstance(cblock, ConditionalBlock)
@@ -360,17 +353,10 @@ def test_resolve_matches_inplace_branch_compile_with_conditional_observable() ->
         original_cond_obs = cg._conditional_abstract_observables
         try:
             cg._conditional_blocks = {}
-            cg._blocks[cond_pos] = (
-                cblock.block_if_zero if branch == 0 else cblock.block_if_one
-            )
+            cg._blocks[cond_pos] = cblock.block_if_zero if branch == 0 else cblock.block_if_one
             # Re-compile the matching plain surface into an AbstractObservable
             # against a branch-resolved BlockGraph so we have a non-conditional
             # observable to annotate.
-            from tqec.compile.compile import _resolve_conditional_cubes  # noqa: PLC0415
-            from tqec.compile.observables.abstract_observable import (  # noqa: PLC0415
-                compile_correlation_surface_to_abstract_observable,
-            )
-
             resolved_bg = _resolve_conditional_cubes(g, branch)
             surface = branch_zero_surface if branch == 0 else branch_one_surface
             cg._observables = [

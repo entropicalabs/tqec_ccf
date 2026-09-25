@@ -13,14 +13,11 @@ from tqec.utils.enums import Basis
 from tqec.utils.exceptions import TQECError
 from tqec.utils.position import Position3D
 
-
 _INIT_KIND = ConditionalLeafCubeKind.XZX_XZZ.value[0]  # XZX
 
 
 def _placeholder_condition(pos: Position3D) -> CorrelationSurface:
-    return CorrelationSurface(
-        span=frozenset([ZXEdge(ZXNode(pos, Basis.Z), ZXNode(pos, Basis.Z))])
-    )
+    return CorrelationSurface(span=frozenset([ZXEdge(ZXNode(pos, Basis.Z), ZXNode(pos, Basis.Z))]))
 
 
 def test_two_conditional_cubes_distinct_z_emits_separate_ifblocks() -> None:
@@ -29,9 +26,7 @@ def test_two_conditional_cubes_distinct_z_emits_separate_ifblocks() -> None:
     a0 = Position3D(0, 0, 0)
     a1 = Position3D(0, 0, 1)
     g.add_cube(a0, _INIT_KIND)
-    g.add_cube(
-        a1, ConditionalLeafCubeKind.XZX_XZZ, condition=_placeholder_condition(a0)
-    )
+    g.add_cube(a1, ConditionalLeafCubeKind.XZX_XZZ, condition=_placeholder_condition(a0))
     g.add_pipe(a0, a1)
     # Column B: z=0 init -> z=1 mid -> z=2 mid -> z=3 conditional (leaf).
     b0 = Position3D(2, 0, 0)
@@ -41,9 +36,7 @@ def test_two_conditional_cubes_distinct_z_emits_separate_ifblocks() -> None:
     g.add_cube(b0, _INIT_KIND)
     g.add_cube(b1, _INIT_KIND)
     g.add_cube(b2, _INIT_KIND)
-    g.add_cube(
-        b3, ConditionalLeafCubeKind.XZX_XZZ, condition=_placeholder_condition(b2)
-    )
+    g.add_cube(b3, ConditionalLeafCubeKind.XZX_XZZ, condition=_placeholder_condition(b2))
     g.add_pipe(b0, b1)
     g.add_pipe(b1, b2)
     g.add_pipe(b2, b3)
@@ -62,9 +55,7 @@ def test_two_conditional_cubes_distinct_z_emits_separate_ifblocks() -> None:
             z_index += 1
         if line.startswith("IF("):
             if_z_indices.append(z_index)
-    assert len(set(if_z_indices)) >= 2, (
-        f"expected IfBlocks across >=2 z-layers, got {if_z_indices}"
-    )
+    assert len(set(if_z_indices)) >= 2, f"expected IfBlocks across >=2 z-layers, got {if_z_indices}"
 
 
 def test_two_conditional_cubes_same_z_raises() -> None:
@@ -74,14 +65,10 @@ def test_two_conditional_cubes_same_z_raises() -> None:
     b0 = Position3D(2, 0, 0)
     b1 = Position3D(2, 0, 1)
     g.add_cube(a0, _INIT_KIND)
-    g.add_cube(
-        a1, ConditionalLeafCubeKind.XZX_XZZ, condition=_placeholder_condition(a0)
-    )
+    g.add_cube(a1, ConditionalLeafCubeKind.XZX_XZZ, condition=_placeholder_condition(a0))
     g.add_pipe(a0, a1)
     g.add_cube(b0, _INIT_KIND)
-    g.add_cube(
-        b1, ConditionalLeafCubeKind.XZX_XZZ, condition=_placeholder_condition(b0)
-    )
+    g.add_cube(b1, ConditionalLeafCubeKind.XZX_XZZ, condition=_placeholder_condition(b0))
     g.add_pipe(b0, b1)
     cg = compile_block_graph(g, FIXED_BULK_CONVENTION, observables=None)
     with pytest.raises(TQECError, match="z=1"):

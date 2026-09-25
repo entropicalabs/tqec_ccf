@@ -2,20 +2,21 @@
 
 from __future__ import annotations
 
+import pytest
+
 from tqec.compile.compile import compile_block_graph
 from tqec.compile.convention import FIXED_BULK_CONVENTION
 from tqec.computation.block_graph import BlockGraph
 from tqec.computation.correlation import CorrelationSurface, ZXEdge, ZXNode
-from tqec.computation.cube import ConditionalLeafCubeKind
+from tqec.computation.cube import ConditionalLeafCubeKind, ZXCube
 from tqec.utils.enums import Basis
+from tqec.utils.exceptions import TQECError
 from tqec.utils.position import Position3D
 
 
 def _condition() -> CorrelationSurface:
     p = Position3D(0, 0, 0)
-    return CorrelationSurface(
-        span=frozenset([ZXEdge(ZXNode(p, Basis.Z), ZXNode(p, Basis.Z))])
-    )
+    return CorrelationSurface(span=frozenset([ZXEdge(ZXNode(p, Basis.Z), ZXNode(p, Basis.Z))]))
 
 
 def _single_conditional_graph(pair_name: str) -> BlockGraph:
@@ -46,8 +47,6 @@ def test_single_conditional_cube_emits_if_else_block() -> None:
 def test_no_conditional_block_passthrough() -> None:
     # Non-conditional graph: generate_conditional_stim_text should return the
     # same text as the regular generate_stim_circuit path.
-    from tqec.computation.cube import ZXCube
-
     g = BlockGraph("Memory")
     g.add_cube(Position3D(0, 0, 0), ZXCube.XZX)
     cg = compile_block_graph(g, FIXED_BULK_CONVENTION, observables=None)
@@ -57,9 +56,6 @@ def test_no_conditional_block_passthrough() -> None:
 
 
 def test_multi_conditional_same_z_layer_raises() -> None:
-    import pytest
-
-    from tqec.utils.exceptions import TQECError
 
     g = BlockGraph("MultiCondSameZTest")
     init0 = Position3D(0, 0, 0)
