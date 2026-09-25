@@ -150,6 +150,9 @@ def merge_repeated_layers(
         layers: the different repeated layers that should be merged.
         scalable_qubit_shape: scalable shape of a scalable qubit. Considered
             valid across the whole domain.
+        conditional_layers: optional branch-``one`` alternates for positions
+            that originated from a conditional cube, keyed like ``layers``.
+            ``None`` for a merge with no conditional position.
 
     Raises:
         TQECError: if the provided repeated layers do not all have the same
@@ -280,6 +283,9 @@ def merge_sequenced_layers(
         layers: the different sequenced layers that should be merged.
         scalable_qubit_shape: scalable shape of a scalable qubit. Considered
             valid across the whole domain.
+        conditional_layers: optional branch-``one`` alternates for positions
+            that originated from a conditional cube, keyed like ``layers``.
+            ``None`` for a merge with no conditional position.
 
     Raises:
         NotImplementedError: if any of the provided sequenced layer contains a different sub-layer

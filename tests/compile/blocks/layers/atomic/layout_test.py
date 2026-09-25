@@ -173,7 +173,6 @@ def test_to_conditional_circuit_weaves_ifblock_for_divergent_plaquette() -> None
     compile pipeline for a single-cube conditional graph. Asserts at least one
     IfBlock surfaces with the requested condition_recs.
     """
-    from tqec.compile.blocks.layers.atomic.layout import LayoutLayer as _LL
     from tqec.compile.compile import compile_block_graph
     from tqec.compile.conditional.circuit import ConditionalCircuit, IfBlock
     from tqec.compile.convention import FIXED_BULK_CONVENTION
@@ -194,11 +193,11 @@ def test_to_conditional_circuit_weaves_ifblock_for_divergent_plaquette() -> None
     cg = compile_block_graph(g, FIXED_BULK_CONVENTION, observables=None)
     tree = cg.to_layer_tree()
 
-    found_layers: list[_LL] = []
+    found_layers: list[LayoutLayer] = []
 
     class _CollectConditionalLayoutLayers(NodeWalker):
         def visit_node(self, node: LayerNode) -> None:
-            if isinstance(node._layer, _LL) and node._layer.conditional_layers:
+            if isinstance(node._layer, LayoutLayer) and node._layer.conditional_layers:
                 found_layers.append(node._layer)
 
     tree._root.walk(_CollectConditionalLayoutLayers())

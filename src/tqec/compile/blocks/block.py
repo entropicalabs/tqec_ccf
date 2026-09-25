@@ -190,6 +190,18 @@ class ConditionalBlock(Block):
         block_if_one: Block,
         condition: CorrelationSurface,
     ) -> None:
+        """Create a conditional block from its two branches.
+
+        Args:
+            block_if_zero: the block executed when the condition evaluates to 0.
+            block_if_one: the block executed when the condition evaluates to 1.
+            condition: the correlation surface whose Z outcome selects the branch.
+
+        Raises:
+            TQECError: if the two branches differ in their number of layers or
+                in their per-layer measurement signature.
+
+        """
         if len(block_if_zero.layer_sequence) != len(block_if_one.layer_sequence):
             raise TQECError(
                 f"{type(self).__name__} requires both branches to have the "

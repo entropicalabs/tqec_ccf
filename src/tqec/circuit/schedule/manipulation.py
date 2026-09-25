@@ -257,7 +257,8 @@ def _emit_moment_with_ceo(
     if len(ceo_z) != len(ceo_o):
         raise TQECError(
             "_emit_moment_with_ceo: CEO slot count differs between branches "
-            f"(branch-zero={len(ceo_z)}, branch-one={len(ceo_o)}); Equal Measurement Count + CEO violated."
+            f"(branch-zero={len(ceo_z)}, branch-one={len(ceo_o)}); "
+            "Equal Measurement Count + CEO violated."
         )
 
     result = list(passthrough_z)

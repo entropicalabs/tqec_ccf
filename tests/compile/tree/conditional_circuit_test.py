@@ -43,10 +43,11 @@ def test_generate_conditional_circuit_returns_conditional_circuit_with_ifblocks(
     assert all(ib.condition_recs == [-1] for ib in if_blocks)
 
     # QUBIT_COORDS preamble present, only once per qubit.
-    qubit_coord_indices: list[int] = []
-    for entry in cc.entries:
-        if isinstance(entry, stim.CircuitInstruction) and entry.name == "QUBIT_COORDS":
-            qubit_coord_indices.append(entry.targets_copy()[0].qubit_value)
+    qubit_coord_indices: list[int] = [
+        entry.targets_copy()[0].qubit_value
+        for entry in cc.entries
+        if isinstance(entry, stim.CircuitInstruction) and entry.name == "QUBIT_COORDS"
+    ]
     assert len(qubit_coord_indices) == len(set(qubit_coord_indices)), (
         "QUBIT_COORDS duplicated in preamble"
     )

@@ -181,7 +181,9 @@ def test_resolve_matches_inplace_branch_compile() -> None:
 def _assert_circuits_equivalent_modulo_detector_order(
     actual: stim.Circuit, expected: stim.Circuit
 ) -> None:
-    """The single-pass conditional compiler emits DETECTORs in a different order
+    """Check the single-pass and in-place compiles agree up to detector order.
+
+    The single-pass conditional compiler emits DETECTORs in a different order
     than the in-place per-branch compile (single-pass groups shared detectors
     first then divergent; in-place emits them in radius-2 lookback order).
     Both circuits define the same detector set; we assert per-measurement-block

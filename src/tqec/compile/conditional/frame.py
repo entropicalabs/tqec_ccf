@@ -40,6 +40,7 @@ class PauliFrameTracker:
     """
 
     def __init__(self) -> None:
+        """Create a tracker with no registered measurements."""
         self._frames: dict[tuple[GridQubit, int], frozenset[ConditionId]] = {}
 
     def register_measurement(

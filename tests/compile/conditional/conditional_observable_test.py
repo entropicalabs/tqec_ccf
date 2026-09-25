@@ -235,7 +235,8 @@ def test_conditional_observable_flat_form_has_no_else() -> None:
     text = cg.generate_conditional_stim_text(k=1)
     # No paired IF { OBSERVABLE_INCLUDE(0) ... } ELSE { ... OBSERVABLE_INCLUDE(0) ... }
     paired = re.findall(
-        r"IF\(.*?\) \{\n((?:.|\n)*?OBSERVABLE_INCLUDE\(0\)[^\n]*)\n\} ELSE \{\n((?:.|\n)*?OBSERVABLE_INCLUDE\(0\)[^\n]*)\n\}",
+        r"IF\(.*?\) \{\n((?:.|\n)*?OBSERVABLE_INCLUDE\(0\)[^\n]*)\n\} "
+        r"ELSE \{\n((?:.|\n)*?OBSERVABLE_INCLUDE\(0\)[^\n]*)\n\}",
         text,
     )
     assert not paired, "flat-XOR emission must not produce IF/ELSE pairs for observables"

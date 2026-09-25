@@ -67,6 +67,13 @@ class ConditionalCircuit:
         entries: list[CircuitEntry] | None = None,
         qubit_map: QubitMap | None = None,
     ) -> None:
+        """Create a conditional circuit.
+
+        Args:
+            entries: the initial entries, copied. Defaults to no entries.
+            qubit_map: the qubit map the entries' targets refer to, if any.
+
+        """
         self._entries: list[CircuitEntry] = list(entries) if entries else []
         self._qubit_map = qubit_map
 
@@ -191,5 +198,4 @@ def _render(entries: list[CircuitEntry], lines: list[str], indent: int) -> None:
             lines.append(f"{pad}}}")
         else:
             text = str(entry).strip()
-            for line in text.splitlines():
-                lines.append(f"{pad}{line}")
+            lines.extend(f"{pad}{line}" for line in text.splitlines())

@@ -68,20 +68,7 @@ class TQECColor(Enum):
     @property
     def rgba(self) -> RGBA:
         """Return the RGBA representation of the color."""
-        if self == TQECColor.X:
-            return RGBA(255, 127, 127, 1.0)
-        if self == TQECColor.Y:
-            return RGBA(99, 198, 118, 1.0)
-        if self == TQECColor.Z:
-            return RGBA(115, 150, 255, 1.0)
-        if self == TQECColor.H:
-            return RGBA(255, 255, 101, 1.0)
-        if self == TQECColor.X_CORRELATION:
-            return RGBA(255, 0, 0, 0.8)
-        if self == TQECColor.CONDITIONAL:
-            return RGBA(128, 128, 128, 1.0)
-        else:  # if self == TQECColor.Z_CORRELATION:
-            return RGBA(0, 0, 255, 0.8)
+        return _RGBA_BY_COLOR[self]
 
     def with_zx_flipped(self) -> TQECColor:
         """Return a ``X`` or ``Z`` color from a ``Z`` or ``X`` color and vice versa."""
@@ -94,3 +81,14 @@ class TQECColor(Enum):
         if self == TQECColor.Z_CORRELATION:
             return TQECColor.X_CORRELATION
         return self
+
+
+_RGBA_BY_COLOR: dict[TQECColor, RGBA] = {
+    TQECColor.X: RGBA(255, 127, 127, 1.0),
+    TQECColor.Y: RGBA(99, 198, 118, 1.0),
+    TQECColor.Z: RGBA(115, 150, 255, 1.0),
+    TQECColor.H: RGBA(255, 255, 101, 1.0),
+    TQECColor.X_CORRELATION: RGBA(255, 0, 0, 0.8),
+    TQECColor.Z_CORRELATION: RGBA(0, 0, 255, 0.8),
+    TQECColor.CONDITIONAL: RGBA(128, 128, 128, 1.0),
+}

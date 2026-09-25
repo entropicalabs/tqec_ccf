@@ -162,8 +162,6 @@ def annotate_conditional_observable(
     recs_per_bit: list[list[int]] = [list(r) for r in cond_observable.condition_recs]
 
     max_idx = sorted_cube_z_indices[-1]
-    # Cap max_idx so we don't try to collect entries beyond the tree.
-    max_walk_z = min(max_idx, n_layers - 1)
     entries, subtree_leaves = _collect_pre_cond_entries(root, k, max_idx + 1)
     tail_shifts_max = _compute_tail_shifts(entries)
     entry_by_leaf_id = {id(e.leaf): (e, i) for i, e in enumerate(entries)}
@@ -227,9 +225,9 @@ def annotate_conditional_observable(
                 for key, sl in slice_by_key.items()
             }
             shared = qubits_by_key[zero_key]
-            deltas: list[frozenset] = []
-            for i in range(n_bits):
-                deltas.append(frozenset(qubits_by_key[flip_keys[i]] ^ shared))
+            deltas: list[frozenset] = [
+                frozenset(qubits_by_key[flip_keys[i]] ^ shared) for i in range(n_bits)
+            ]
             # Validate flat-XOR decomposability for every key.
             for key, qubits in qubits_by_key.items():
                 predicted = shared
