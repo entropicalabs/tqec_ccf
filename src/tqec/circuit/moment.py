@@ -336,7 +336,9 @@ class Moment:
                 targets.extend(target_group)
                 used_qubits.update(qubit_targets)
             if targets:
-                new_circuit.append(instruction.name, targets, instruction.gate_args_copy())
+                new_circuit.append(
+                    instruction.name, targets, instruction.gate_args_copy(), tag=instruction.tag
+                )
         return Moment(new_circuit, used_qubits=used_qubits, _avoid_checks=True)
 
     @property

@@ -67,6 +67,11 @@ def cube_kind_to_zx(kind: CubeKind) -> tuple[VertexType, FractionLike]:
         return VertexType.BOUNDARY, 0
     if kind is LeafCubeKind.Y_HALF_CUBE:
         return VertexType.Z, Fraction(1, 2)
+    if kind is LeafCubeKind.INJECTION:
+        # The injected state is not a stabilizer state, so it is not a spider of
+        # any phase. It enters the ZX diagram as an open boundary, the same way a
+        # Port does, and the state it carries is tracked outside the diagram.
+        return VertexType.BOUNDARY, 0
     if isinstance(kind, ConditionalLeafCubeKind):
         raise NotImplementedError(
             "Conversion of conditional cube to PyZX vertex type and phase is not implemented."

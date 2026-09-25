@@ -364,8 +364,9 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
         # the previous round has no template to compute against. That happens
         # above a Y-basis *initialisation*, whose last round hands its
         # ``end_spec`` forward exactly as the measurement cap's transition round
-        # does -- so the seam is closed from that spec instead, and the template
-        # path is skipped for this one round.
+        # does, and above the state-injection encoder, which prepares the
+        # stabilizers rather than measuring them -- so the seam is closed from
+        # that spec instead, and the template path is skipped for this one round.
         if self._pending_end_spec is not None:
             # The seam always comes from the spec. Whether the *rest* of this
             # round can still use the template path depends on the previous
@@ -496,6 +497,14 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
             annotations, raw_layer, raw_records, raw_total, self._raw_shift(layout, pos)
         )
 
+        if raw_total == 0:
+            # A raw round that measures nothing -- the state-injection encoder --
+            # contributes no measurement records, so leaving it off the lookback
+            # stack shifts no offsets and keeps the window unbroken. Pushing it
+            # would instead blind ``lookback`` to the round that follows, which
+            # is the round carrying the encoder's detectors (see
+            # ``_emit_seam_against_raw_round``).
+            return
         # Push this slice's own records so later rounds can look back through it.
         # A raw round has neither template nor plaquettes, hence the ``None``s:
         # the fixed-radius detector computation cannot see through such a round
@@ -625,6 +634,17 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
         prepare it; this round measures each of those stabilizers once, by
         ancilla. Pairing the two gives the seam detectors, and consumes the
         pending spec.
+
+        Two raw rounds hand a spec forward: the last round of a Y-basis
+        initialisation, and the state-injection encoder. The encoder measures
+        nothing, so its spec lists no preparing coordinates and each detector is
+        this round's single ancilla measurement.
+
+        Raises:
+            TQECError: if this round does not measure a stabilizer the raw round
+                reported as prepared, i.e. the raw round does not match the
+                patch above it.
+
         """
         assert annotations.circuit is not None
         pending = self._pending_end_spec
@@ -638,9 +658,11 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
         for ancilla, prepared_by in pending.items():
             gq = GridQubit(*ancilla)
             if gq not in records:
-                # The round above does not measure this stabilizer: nothing to
-                # close the flow against here.
-                continue
+                raise TQECError(
+                    f"A preceding raw round reported the stabilizer at {ancilla} as "
+                    "prepared, but this round did not measure it; the raw round "
+                    "does not match the patch above it."
+                )
             offsets = [records[gq][-1]] + [
                 previous[GridQubit(*coord)][-1] - total for coord in prepared_by
             ]

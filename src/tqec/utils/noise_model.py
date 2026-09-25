@@ -176,7 +176,7 @@ class NoiseRule:
             assert len(args) == 0
             args = [self.flip_result]
 
-        out_during_moment.append(split_op.name, targets, args)
+        out_during_moment.append(split_op.name, targets, args, tag=split_op.tag)
         raw_targets = [t.value for t in targets if not t.is_combiner]
         for op_name, arg in self.after.items():
             after_moments[(op_name, arg)].append(op_name, raw_targets, arg)
@@ -373,6 +373,7 @@ class NoiseModel:
         *,
         system_qubits: set[int] | None = None,
         immune_qubits: set[int] | None = None,
+        noiseless_moments: Set[int] | None = None,
     ) -> stim.Circuit:
         """Return a noisy version of the given circuit, by applying the receiving noise model.
 
@@ -381,6 +382,15 @@ class NoiseModel:
             system_qubits: All qubits used by the circuit. These are the qubits eligible for idling
                 noise.
             immune_qubits: Qubits to not apply noise to, even if they are operated on.
+            noiseless_moments: indices of moments to leave untouched --- no gate
+                noise and no idling noise. Indices count the top-level entries of
+                ``circuit``, where a ``REPEAT`` block counts as one entry; naming
+                such an entry leaves the whole block noiseless. Use this for a
+                part of the circuit that is idealised by assumption rather than
+                modelled, such as a non-fault-tolerant state-injection encoder.
+
+                Note this is per *moment*, not per qubit: a qubit idling through a
+                noiseless moment for reasons of its own also escapes noise.
 
         Returns:
             The noisy version of the circuit.
@@ -390,9 +400,12 @@ class NoiseModel:
             system_qubits = set(range(circuit.num_qubits))
         if immune_qubits is None:
             immune_qubits = set()
+        noiseless = noiseless_moments if noiseless_moments is not None else frozenset()
 
         result = stim.Circuit()
-        for moment_split_ops in _iter_split_op_moments(circuit, immune_qubits=immune_qubits):
+        for index, moment_split_ops in enumerate(
+            _iter_split_op_moments(circuit, immune_qubits=immune_qubits)
+        ):
             if not result:
                 pass
             elif isinstance(moment_split_ops, stim.CircuitRepeatBlock):
@@ -412,6 +425,9 @@ class NoiseModel:
                         repeat_count=moment_split_ops.repeat_count, body=noisy_body
                     )
                 )
+            elif index in noiseless:
+                for op in moment_split_ops:
+                    result.append(op)
             else:
                 self._append_noisy_moment(
                     moment_split_ops=moment_split_ops,
@@ -467,7 +483,7 @@ def _split_targets_if_needed_clifford_1q(
     if immune_qubits:
         args = op.gate_args_copy()
         for t in op.targets_copy():
-            yield stim.CircuitInstruction(op.name, [t], args)
+            yield stim.CircuitInstruction(op.name, [t], args, tag=op.tag)
     else:
         yield op
 
@@ -481,7 +497,7 @@ def _split_targets_if_needed_clifford_2q(
     if immune_qubits or any(t.is_measurement_record_target for t in targets):
         args = op.gate_args_copy()
         for k in range(0, len(targets), 2):
-            yield stim.CircuitInstruction(op.name, targets[k : k + 2], args)
+            yield stim.CircuitInstruction(op.name, targets[k : k + 2], args, tag=op.tag)
     else:
         yield op
 
@@ -496,7 +512,7 @@ def _split_targets_if_needed_m_basis(
     start = k
     while k < len(targets):
         if k + 1 == len(targets) or not targets[k + 1].is_combiner:
-            yield stim.CircuitInstruction(op.name, targets[start : k + 1], args)
+            yield stim.CircuitInstruction(op.name, targets[start : k + 1], args, tag=op.tag)
             k += 1
             start = k
         else:

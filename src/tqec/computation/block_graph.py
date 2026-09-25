@@ -7,6 +7,7 @@ import math
 import pathlib
 from collections.abc import Iterable, Mapping
 from copy import deepcopy
+from dataclasses import replace
 from io import BytesIO
 from typing import TYPE_CHECKING, Any, cast
 
@@ -25,6 +26,7 @@ from tqec.computation.cube import (
 from tqec.computation.pipe import Pipe, PipeKind
 from tqec.utils.enums import Basis
 from tqec.utils.exceptions import TQECError
+from tqec.utils.injection_state import DEFAULT_INJECTION_STATE
 from tqec.utils.position import Direction3D, Position3D, SignedDirection3D
 
 if TYPE_CHECKING:
@@ -194,6 +196,7 @@ class BlockGraph:
         kind: CubeKind | str,
         label: str = "",
         condition: CorrelationSurface | None = None,
+        state: str = DEFAULT_INJECTION_STATE,
     ) -> Position3D:
         """Add a cube to the graph.
 
@@ -205,6 +208,8 @@ class BlockGraph:
             condition: The condition for when the cube kind is conditional, specified as a partial
                 correlation surface. The full correlation surface will be constructed at run-time
                 from this and other conditional cubes decided before this cube. Default is None.
+            state: For an ``INJECTION`` cube only, which single-qubit state to inject.
+                See :py:attr:`~tqec.computation.cube.Cube.state`.
 
         Returns:
             The position of the cube added to the graph.
@@ -215,19 +220,42 @@ class BlockGraph:
                 there is already a port with the same label in the graph.
 
         """
-        if position in self:
-            raise TQECError(f"Cube already exists at position {position}.")
         if isinstance(kind, str):
             kind = cube_kind_from_string(kind)
-        if kind is LeafCubeKind.PORT and label in self._ports:
-            raise TQECError(f"There is already a port with the same label {label} in the graph.")
+        # Keyword, so a future field reorder cannot land silently in this slot.
+        return self.insert_cube(Cube(position, kind, label, condition, state=state))
 
-        self._graph.add_node(
-            position, **{self._NODE_DATA_KEY: Cube(position, kind, label, condition)}
-        )
-        if kind is LeafCubeKind.PORT:
-            self._ports[label] = position
-        return position
+    def insert_cube(self, cube: Cube) -> Position3D:
+        """Add an already-built cube to the graph, keeping every one of its attributes.
+
+        Prefer this over :py:meth:`add_cube` whenever a cube is being *copied*
+        from another graph --- shifting, rotating, composing, deserialising. Those
+        callers used to re-list the fields they wanted to carry over, which
+        silently dropped any attribute they had not been updated for.
+
+        Args:
+            cube: the cube to add. Use :py:func:`dataclasses.replace` to derive it
+                from an existing cube when only its position or kind changes.
+
+        Returns:
+            The position of the cube added to the graph.
+
+        Raises:
+            TQECError: If there is already a cube at the same position, or if the
+                cube is a port and there is already a port with the same label in
+                the graph.
+
+        """
+        if cube.position in self:
+            raise TQECError(f"Cube already exists at position {cube.position}.")
+        if cube.is_port and cube.label in self._ports:
+            raise TQECError(
+                f"There is already a port with the same label {cube.label} in the graph."
+            )
+        self._graph.add_node(cube.position, **{self._NODE_DATA_KEY: cube})
+        if cube.is_port:
+            self._ports[cube.label] = cube.position
+        return cube.position
 
     def add_pipe(
         self, pos1: Position3D, pos2: Position3D, kind: PipeKind | str | None = None
@@ -386,6 +414,37 @@ class BlockGraph:
                 )
             return
 
+        # State injection hands its state upward, so it caps a temporal pipe from
+        # below and does nothing else. Unlike a Y cube --- which is general (Y-basis
+        # initialisation as well as measurement, and may attach to a Port) --- an
+        # injection cube has no time-reversed counterpart, so the direction is a
+        # property of the kind and belongs here rather than in the lowering.
+        if cube.is_injection_cube:
+            if len(pipes) != 1:
+                raise TQECError(
+                    f"{cube.kind} at {cube.position} does not have exactly one pipe connected."
+                )
+            if pipes[0].direction != Direction3D.Z:
+                raise TQECError(
+                    f"{cube.kind} at {cube.position} has a non-timelike pipe connected. "
+                    "An injection cube can only be connected by a temporal pipe."
+                )
+            if pipes[0].u.position != cube.position:
+                raise TQECError(
+                    f"{cube.kind} at {cube.position} has its pipe below it. An injection "
+                    "cube prepares a state and hands it upward, so its pipe must go up."
+                )
+            # Which cube receives the state is a fact about the graph, so it is
+            # checked here rather than left to the lowering, where it used to
+            # surface as a NotImplementedError only at compile time.
+            if not isinstance(pipes[0].v.kind, ZXCube):
+                raise TQECError(
+                    f"{cube.kind} at {cube.position} hands its state to a "
+                    f"{pipes[0].v.kind} cube at {pipes[0].v.position}. An injection cube "
+                    "must sit directly below a regular cube."
+                )
+            return
+
         # time-like Y and conditional
         if cube.is_y_cube or cube.is_conditional:
             if len(pipes) != 1:
@@ -538,15 +597,14 @@ class BlockGraph:
         new_graph = BlockGraph()
         for cube in self.cubes:
             shifted_condition = (
-                cube.condition.shift_by(dx=dx, dy=dy, dz=dz)
-                if cube.condition is not None
-                else None
+                cube.condition.shift_by(dx=dx, dy=dy, dz=dz) if cube.condition is not None else None
             )
-            new_graph.add_cube(
-                cube.position.shift_by(dx=dx, dy=dy, dz=dz),
-                cube.kind,
-                cube.label,
-                condition=shifted_condition,
+            new_graph.insert_cube(
+                replace(
+                    cube,
+                    position=cube.position.shift_by(dx=dx, dy=dy, dz=dz),
+                    condition=shifted_condition,
+                )
             )
         for pipe in self.pipes:
             u, v = pipe.u, pipe.v
@@ -748,7 +806,7 @@ class BlockGraph:
             # Connecting ports have been filled
             if cube.position in composed_g:
                 continue
-            composed_g.add_cube(cube.position, cube.kind, cube.label)
+            composed_g.insert_cube(cube)
         for pipe in shifted_g.pipes:
             u, v = pipe.u.position, pipe.v.position
             composed_g.add_pipe(u, v, pipe.kind)
@@ -807,17 +865,23 @@ class BlockGraph:
                 rotated_condition = CorrelationSurface(
                     span=frozenset(
                         ZXEdge(
-                            ZXNode(rotate_position_by_matrix(e.u.position, rotation_matrix), e.u.basis),
-                            ZXNode(rotate_position_by_matrix(e.v.position, rotation_matrix), e.v.basis),
+                            ZXNode(
+                                rotate_position_by_matrix(e.u.position, rotation_matrix), e.u.basis
+                            ),
+                            ZXNode(
+                                rotate_position_by_matrix(e.v.position, rotation_matrix), e.v.basis
+                            ),
                         )
                         for e in cube.condition.span
                     )
                 )
-            rotated.add_cube(
-                rotated_pos,
-                cast(CubeKind, rotated_kind),
-                cube.label,
-                condition=rotated_condition,
+            rotated.insert_cube(
+                replace(
+                    cube,
+                    position=rotated_pos,
+                    kind=cast(CubeKind, rotated_kind),
+                    condition=rotated_condition,
+                )
             )
             pos_map[cube.position] = rotated_pos
 
@@ -906,7 +970,7 @@ class BlockGraph:
         new_graph = BlockGraph(self.name)
         for cube in self.cubes:
             new_cube = fixed_cubes.get(cube, cube)
-            new_graph.add_cube(cube.position, new_cube.kind, new_cube.label, cube.condition)
+            new_graph.insert_cube(replace(cube, kind=new_cube.kind))
         for pipe in self.pipes:
             new_graph.add_pipe(pipe.u.position, pipe.v.position, pipe.kind)
         return new_graph
@@ -937,14 +1001,7 @@ class BlockGraph:
         """Construct a block graph from a dictionary representation."""
         graph = BlockGraph(data["name"])
         for cube in data["cubes"]:
-            graph.add_cube(
-                position=Position3D(*cube["position"]),
-                kind=cube["kind"],
-                label=cube["label"],
-                condition=None
-                if (condition := cube.get("condition", None)) is None
-                else CorrelationSurface(**condition),
-            )
+            graph.insert_cube(Cube.from_dict(cube))
         for pipe in data["pipes"]:
             graph.add_pipe(
                 pos1=Position3D(*pipe["u"]),
@@ -1079,8 +1136,12 @@ class BlockGraph:
                 )
 
             for cube in matching_cubes:
-                updated_cube = Cube(position=cube.position, kind=cube.kind, label=new_label)
-                self._graph.add_node(cube.position, **{self._NODE_DATA_KEY: updated_cube})
+                # ``replace`` rather than a field-by-field rebuild: the latter
+                # already dropped ``condition`` and would now drop ``state`` too.
+                self._graph.add_node(
+                    cube.position,
+                    **{self._NODE_DATA_KEY: replace(cube, label=new_label)},
+                )
 
 
 def block_kind_from_str(string: str) -> BlockKind:

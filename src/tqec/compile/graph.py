@@ -48,6 +48,10 @@ from typing import Final
 
 import stim
 
+from tqec.circuit.non_clifford import (
+    render_with_non_clifford_gates,
+    rewrite_non_clifford_tags,
+)
 from tqec.compile.blocks.block import Block, ConditionalBlock, merge_parallel_block_layers
 from tqec.compile.blocks.enums import (
     SpatialBlockBorder,
@@ -62,12 +66,17 @@ from tqec.compile.blocks.positioning import (
     LayoutPosition2D,
     LayoutPosition3D,
 )
+from tqec.compile.conditional.circuit import ConditionalCircuit
 from tqec.compile.detectors.database import DetectorDatabase
 from tqec.compile.observables.abstract_observable import (
     AbstractObservable,
     ConditionalAbstractObservable,
 )
 from tqec.compile.observables.builder import ObservableBuilder
+from tqec.compile.specs.library.generators._injection_layer import (
+    InjectionMomentFinder,
+    InjectionRawLayer,
+)
 from tqec.compile.tree.tree import LayerTree
 from tqec.templates.enums import TemplateBorder
 from tqec.utils.exceptions import TQECError
@@ -116,10 +125,8 @@ class TopologicalComputationGraph:
         scalable_qubit_shape: PhysicalQubitScalable2D,
         observable_builder: ObservableBuilder,
         observables: list[AbstractObservable] | None = None,
-        conditional_observables: dict[LayoutPosition3D, AbstractObservable]
-        | None = None,
-        conditional_abstract_observables: list[ConditionalAbstractObservable]
-        | None = None,
+        conditional_observables: dict[LayoutPosition3D, AbstractObservable] | None = None,
+        conditional_abstract_observables: list[ConditionalAbstractObservable] | None = None,
     ) -> None:
         """Represent a topological computation with :class:`.Block` instances."""
         self._blocks: dict[LayoutPosition3D, Block] = {}
@@ -140,17 +147,15 @@ class TopologicalComputationGraph:
         # Pre-compiled per-conditional-cube AbstractObservable, computed
         # by compile_block_graph (where BlockGraph context exists). The
         # resolver reads from here without needing the BlockGraph.
-        self._conditional_observables: dict[
-            LayoutPosition3D, AbstractObservable
-        ] = dict(conditional_observables) if conditional_observables else {}
+        self._conditional_observables: dict[LayoutPosition3D, AbstractObservable] = (
+            dict(conditional_observables) if conditional_observables else {}
+        )
         # Branch-aware logical observables. Compiled by compile_block_graph
         # from ConditionalCorrelationSurface entries in the ``observables``
         # argument; emitted per-branch inside the IF/ELSE generated for the
         # named conditional cube(s).
         self._conditional_abstract_observables: list[ConditionalAbstractObservable] = (
-            list(conditional_abstract_observables)
-            if conditional_abstract_observables
-            else []
+            list(conditional_abstract_observables) if conditional_abstract_observables else []
         )
 
     def add_cube(self, position: BlockPosition3D, block: Block) -> None:
@@ -313,9 +318,7 @@ class TopologicalComputationGraph:
         self._set_cube_block(
             psource, self._blocks[psource].with_spatial_borders_trimmed([source_border])
         )
-        self._set_cube_block(
-            psink, self._blocks[psink].with_spatial_borders_trimmed([sink_border])
-        )
+        self._set_cube_block(psink, self._blocks[psink].with_spatial_borders_trimmed([sink_border]))
 
     def _substitute_part_of_spatial_pipe(
         self,
@@ -535,7 +538,7 @@ class TopologicalComputationGraph:
             conditional_abstract_observables=self._conditional_abstract_observables,
         )
 
-    def generate_stim_circuit(
+    def _build_stim_circuit(
         self,
         k: int,
         noise_model: NoiseModel | None = None,
@@ -543,8 +546,15 @@ class TopologicalComputationGraph:
         detector_database: DetectorDatabase | None = None,
         database_path: str | Path | None = DEFAULT_DETECTOR_DATABASE_PATH,
         reschedule_measurements: bool = True,
+        noiseless_injection: bool = False,
     ) -> stim.Circuit:
-        """Generate the ``stim.Circuit`` from the compiled graph.
+        """Build the circuit, without refusing a state stim cannot represent.
+
+        The public entry points wrap this: :meth:`generate_stim_circuit` refuses
+        such a state, and :meth:`generate_stim_text` renders it. Keeping the build
+        itself unguarded is what lets the text path compile a non-Clifford
+        injection at all.
+
 
         Args:
             k: scale factor of the templates.
@@ -564,12 +574,23 @@ class TopologicalComputationGraph:
                 to be in the same moment. Since each plaquette may have its own measurement
                 schedule, setting this may be necessary for hardware that requires
                 measurements to be synchronous.
+            noiseless_injection: whether to exempt a state-injection encoder from
+                ``noise_model``. State injection is not fault tolerant, so a fault
+                in the encoder corrupts the injected state outright and dominates
+                the logical error rate; leaving the encoder noiseless isolates the
+                error rate of everything downstream. Has no effect without a
+                ``noise_model``, or on a graph with no injection cube.
 
         Returns:
             A compiled stim circuit.
 
+        Raises:
+            NotImplementedError: if ``noiseless_injection`` is set and an
+                injection encoder is not the first round of the circuit.
+
         """
-        circuit = self.to_layer_tree(k).generate_circuit(
+        tree = self.to_layer_tree(k)
+        circuit = tree.generate_circuit(
             k,
             manhattan_radius=manhattan_radius,
             detector_database=detector_database,
@@ -578,18 +599,148 @@ class TopologicalComputationGraph:
         )
         # If provided, apply the noise model.
         if noise_model is not None:
-            circuit = noise_model.noisy_circuit(circuit)
+            noiseless_moments: frozenset[int] = frozenset()
+            if noiseless_injection:
+                finder = InjectionMomentFinder(k)
+                tree.walk(finder)
+                noiseless_moments = finder.indices
+            circuit = noise_model.noisy_circuit(circuit, noiseless_moments=noiseless_moments)
         return circuit
 
-    def generate_conditional_stim_text(
+    def _non_clifford_injection_states(self) -> frozenset[str]:
+        """Return the states of every injection cube stim cannot represent.
+
+        Read off the blocks rather than the built circuit, so the answer is
+        available before the detector computation and cannot be fooled by a tag
+        lost somewhere in the compile.
+        """
+        return frozenset(
+            layer.state
+            for block in self._blocks.values()
+            for layer in block.layer_sequence
+            if isinstance(layer, InjectionRawLayer) and not layer.is_clifford
+        )
+
+    def _require_representable_states(self, alternative: str) -> None:
+        """Raise if any injection cube prepares a state stim cannot represent.
+
+        Raises:
+            TQECError: if the computation injects a non-Clifford state.
+
+        """
+        states = self._non_clifford_injection_states()
+        if states:
+            raise TQECError(
+                f"This computation injects the state(s) {sorted(states)}, which "
+                "cannot be represented as a stim.Circuit: stim has no T gate. Use "
+                f"{alternative} instead, which emits the injected gate as text for "
+                "a simulator that supports it."
+            )
+
+    def generate_stim_circuit(
+        self,
+        k: int,
+        noise_model: NoiseModel | None = None,
+        manhattan_radius: int = 2,
+        detector_database: DetectorDatabase | None = None,
+        database_path: str | Path = DEFAULT_DETECTOR_DATABASE_PATH,
+        reschedule_measurements: bool = True,
+        noiseless_injection: bool = False,
+    ) -> stim.Circuit:
+        """Generate the ``stim.Circuit`` from the compiled graph.
+
+        See :meth:`_build_stim_circuit` for the arguments.
+
+        Returns:
+            A compiled stim circuit.
+
+        Raises:
+            TQECError: if the computation injects a state stim cannot represent.
+                Use :meth:`generate_stim_text` for those.
+
+        """
+        self._require_representable_states("generate_stim_text")
+        return self._build_stim_circuit(
+            k,
+            noise_model,
+            manhattan_radius,
+            detector_database,
+            database_path,
+            reschedule_measurements,
+            noiseless_injection,
+        )
+
+    def generate_stim_text(
+        self,
+        k: int,
+        noise_model: NoiseModel | None = None,
+        manhattan_radius: int = 2,
+        detector_database: DetectorDatabase | None = None,
+        database_path: str | Path = DEFAULT_DETECTOR_DATABASE_PATH,
+        reschedule_measurements: bool = True,
+        noiseless_injection: bool = False,
+    ) -> str:
+        """Generate the compiled graph as Stim text.
+
+        Text rather than a :class:`stim.Circuit`, because it covers the two things
+        stim's data model cannot hold:
+
+        * ``IF``/``ELSE`` blocks, when the graph has conditional cubes --- see
+          :mod:`tqec.compile.conditional.circuit`;
+        * non-Clifford gates, when an injection cube prepares a magic state ---
+          see :mod:`tqec.circuit.non_clifford`.
+
+        With neither present the result is exactly
+        ``str(self.generate_stim_circuit(...))``.
+
+        See :meth:`_build_stim_circuit` for the arguments.
+
+        Returns:
+            the computation as Stim text.
+
+        Raises:
+            TQECError: if ``noise_model`` is given for a graph with conditional
+                cubes. Noise is applied to a ``stim.Circuit``, and the conditional
+                path never builds one.
+
+        """
+        if self._conditional_blocks or self._conditional_abstract_observables:
+            if noise_model is not None:
+                raise TQECError(
+                    "generate_stim_text: a noise model cannot be applied to a "
+                    "graph with conditional cubes. Noise is applied to a "
+                    "stim.Circuit, and the IF/ELSE path never builds one."
+                )
+            return rewrite_non_clifford_tags(
+                self._generate_conditional_circuit(
+                    k,
+                    manhattan_radius=manhattan_radius,
+                    detector_database=detector_database,
+                    database_path=database_path,
+                    reschedule_measurements=reschedule_measurements,
+                ).to_stim_text()
+            )
+        return render_with_non_clifford_gates(
+            self._build_stim_circuit(
+                k,
+                noise_model,
+                manhattan_radius,
+                detector_database,
+                database_path,
+                reschedule_measurements,
+                noiseless_injection,
+            )
+        )
+
+    def _generate_conditional_circuit(
         self,
         k: int,
         manhattan_radius: int = 2,
         detector_database: DetectorDatabase | None = None,
         database_path: str | Path = DEFAULT_DETECTOR_DATABASE_PATH,
         reschedule_measurements: bool = True,
-    ) -> str:
-        """Compile a graph with conditional cubes into IF/ELSE-annotated Stim text.
+    ) -> "ConditionalCircuit":
+        """Compile a graph with conditional cubes into an ``IF``/``ELSE`` circuit.
 
         Each conditional cube's :class:`CorrelationSurface` ``condition``
         (attached at :class:`Cube` construction time, see
@@ -599,8 +750,9 @@ class TopologicalComputationGraph:
         ``self._conditional_observables``; the resolver reads from there.
 
         Single-pass implementation: delegates to
-        :meth:`LayerTree.generate_conditional_circuit`. The non-conditional
-        path falls through to :meth:`generate_stim_circuit`.
+        :meth:`LayerTree.generate_conditional_circuit`. Only called when the graph
+        actually has conditional content; :meth:`generate_stim_text` owns that
+        branch and handles the plain case itself.
 
         Args:
             k: scale factor of the templates.
@@ -622,30 +774,17 @@ class TopologicalComputationGraph:
                 measurements to be synchronous.
 
         Returns:
-            The compiled Stim circuit rendered as text, with the conditional
-            cubes' branches emitted as ``IF``/``ELSE``-annotated blocks.
+            the computation as a :class:`ConditionalCircuit`, whose branches are
+            ``IF``/``ELSE`` blocks.
 
         """
         from tqec.compile.conditional.condition_recs import resolve_condition_recs
 
-        # Fall back to the plain (non-conditional) path only if there are
-        # neither conditional cubes nor surface-anchored conditional
-        # observables. Surface-anchored ConditionalCorrelationSurface gates
-        # OBSERVABLE_INCLUDE lines without requiring a conditional cube.
-        if not self._conditional_blocks and not self._conditional_abstract_observables:
-            circuit = self.generate_stim_circuit(
-                k,
-                manhattan_radius=manhattan_radius,
-                detector_database=detector_database,
-                database_path=database_path,
-                reschedule_measurements=reschedule_measurements,
-            )
-            return str(circuit)
         missing = set(self._conditional_blocks) - set(self._conditional_observables)
         extra = set(self._conditional_observables) - set(self._conditional_blocks)
         if missing or extra:
             raise TQECError(
-                "generate_conditional_stim_text: pre-compiled "
+                "generate_stim_text: pre-compiled "
                 "conditional_observables do not match the graph's conditional "
                 f"cubes. Missing: {sorted(missing)}. Extra: {sorted(extra)}. "
                 "compile_block_graph normally populates this dict; check that "
@@ -658,8 +797,7 @@ class TopologicalComputationGraph:
         clashes = {z: poss for z, poss in by_z.items() if len(poss) > 1}
         if clashes:
             details = "; ".join(
-                f"z={z}: " + ", ".join(repr(p) for p in poss)
-                for z, poss in sorted(clashes.items())
+                f"z={z}: " + ", ".join(repr(p) for p in poss) for z, poss in sorted(clashes.items())
             )
             raise TQECError(
                 "Multi-conditional emission requires at most one conditional "
@@ -670,9 +808,7 @@ class TopologicalComputationGraph:
             )
         layer_tree = self.to_layer_tree(k)
         # Pre-annotate circuits so resolver can read MeasurementRecordsMap.
-        layer_tree._annotate_circuits(
-            k, reschedule_measurements=reschedule_measurements
-        )
+        layer_tree._annotate_circuits(k, reschedule_measurements=reschedule_measurements)
         resolved_condition_recs = resolve_condition_recs(
             layer_tree,
             k,
@@ -691,9 +827,7 @@ class TopologicalComputationGraph:
 
         for cao in self._conditional_abstract_observables:
             per_bit: list[tuple[int, ...]] = []
-            for binding, obs in zip(
-                cao.condition_bindings, cao.resolved_conditions, strict=True
-            ):
+            for binding, obs in zip(cao.condition_bindings, cao.resolved_conditions, strict=True):
                 if binding.cube_position is not None:
                     recs = condition_recs_by_z[binding.cube_position.z]
                 else:
@@ -713,7 +847,7 @@ class TopologicalComputationGraph:
             cao.condition_recs = tuple(per_bit)
 
         min_z = min(pos.z for pos in self._blocks.keys())
-        cc = layer_tree.generate_conditional_circuit(
+        return layer_tree.generate_conditional_circuit(
             k,
             condition_recs=condition_recs_by_z,
             min_z=min_z,
@@ -722,7 +856,31 @@ class TopologicalComputationGraph:
             database_path=database_path,
             reschedule_measurements=reschedule_measurements,
         )
-        return cc.to_stim_text()
+
+    def generate_conditional_stim_text(
+        self,
+        k: int,
+        manhattan_radius: int = 2,
+        detector_database: DetectorDatabase | None = None,
+        database_path: str | Path = DEFAULT_DETECTOR_DATABASE_PATH,
+        reschedule_measurements: bool = True,
+    ) -> str:
+        """Compile the graph into ``IF``/``ELSE``-annotated Stim text.
+
+        .. deprecated::
+            Use :meth:`generate_stim_text`, which covers ``IF``/``ELSE`` blocks
+            and non-Clifford gates alike. This is a thin alias kept so existing
+            callers keep working.
+
+        See :meth:`generate_stim_text` for the arguments and the return value.
+        """
+        return self.generate_stim_text(
+            k,
+            manhattan_radius=manhattan_radius,
+            detector_database=detector_database,
+            database_path=database_path,
+            reschedule_measurements=reschedule_measurements,
+        )
 
     def generate_crumble_url(
         self,
@@ -754,11 +912,16 @@ class TopologicalComputationGraph:
         Returns:
             a string representing the Crumble URL of the quantum circuit.
 
+        Raises:
+            TQECError: if the computation injects a state stim cannot represent.
+                Crumble reads a stim circuit, so there is nothing to show it.
+
         """
+        self._require_representable_states("generate_stim_text")
         # ``k`` is needed here, not only by the tree: a z-slice whose blocks have
-        # mismatched temporal schedules (a Y cap beside an ordinary column) can
-        # only be merged by flattening it at a concrete scaling factor, and
-        # ``to_layer_tree`` refuses to guess one.
+        # mismatched temporal schedules (a Y cap or an injection cube beside an
+        # ordinary column) can only be merged by flattening it at a concrete
+        # scaling factor, and ``to_layer_tree`` refuses to guess one.
         return self.to_layer_tree(k).generate_crumble_url(
             k, manhattan_radius, detector_database, add_polygons=add_polygons
         )

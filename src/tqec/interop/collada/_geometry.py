@@ -94,6 +94,8 @@ class BlockGeometries:
         self._load_y_cube_geometry()
         # conditional leaf cubes (gray on flipping walls)
         self._load_conditional_cube_geometries()
+        # the injection cube
+        self._load_injection_cube_geometry()
         # 6 pipe blocks without H
         self._load_pipe_without_hadamard_geometries()
         # 6 pipe blocks with H
@@ -165,6 +167,23 @@ class BlockGeometries:
             translation[direction.value] = 1.0 if direction != Direction3D.Z else 0.5
             faces.append(face.shift_by(*translation).with_negated_normal_direction())
         self.geometries[LeafCubeKind.Y_HALF_CUBE] = faces
+
+    def _load_injection_cube_geometry(self) -> None:
+        """Geometry for the injection cube: a full cube, every face magenta.
+
+        Unlike a Y half cube, an injection cube occupies a whole spacetime block,
+        and its faces carry no basis --- the injected state is not a stabilizer
+        state --- so they are all painted the same distinctive colour.
+        """
+        width, height = 1.0, 1.0
+        faces: list[Face] = []
+        for direction in Direction3D.all_directions():
+            face = Face(TQECColor.INJECTION, width, height, SignedDirection3D(direction, False))
+            faces.append(face)
+            translation = [0.0, 0.0, 0.0]
+            translation[direction.value] = 1.0
+            faces.append(face.shift_by(*translation).with_negated_normal_direction())
+        self.geometries[LeafCubeKind.INJECTION] = faces
 
     def _load_pipe_without_hadamard_geometries(self) -> None:
         """Geometries for ozx, oxz, xoz, zox, xzo, zxo pipes."""

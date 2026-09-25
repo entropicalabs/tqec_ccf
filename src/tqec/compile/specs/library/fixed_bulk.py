@@ -16,6 +16,9 @@ from tqec.compile.specs.base import (
     PipeSpec,
 )
 from tqec.compile.specs.enums import SpatialArms
+from tqec.compile.specs.library.generators._injection_layer import (
+    make_injection_block,
+)
 from tqec.compile.specs.library.generators.fixed_bulk import (
     FixedBulkConventionGenerator,
 )
@@ -104,6 +107,16 @@ class FixedBulkCubeBuilder(CubeBuilder):
                 make_layers(spec.y_cap_transposed),
                 template=self._generator.get_memory_qubit_raw_template(),
                 initialises=spec.y_cube_initialises,
+            )
+        elif kind is LeafCubeKind.INJECTION:
+            # The injection cube is the encoder and nothing else: the memory
+            # round above it is the temporal pipe's junction layer, which
+            # ``InjectionCubeBlock`` appends instead of letting it overwrite the
+            # encoder.
+            return make_injection_block(
+                template=self._generator.get_memory_qubit_raw_template(),
+                transposed=spec.injection_transposed,
+                state=spec.state,
             )
         elif isinstance(kind, ConditionalLeafCubeKind):
             kind_zero, kind_one = kind.value

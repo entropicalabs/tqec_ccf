@@ -1,5 +1,12 @@
 # Vendored code notice (test oracle only)
 
+This directory holds code kept **verbatim** from elsewhere and used **only as a
+verification oracle for tests**. Nothing here is imported by `src/tqec/`, and
+nothing here ships on the compile path. It is excluded from linting, formatting
+and type checking (see `pyproject.toml`).
+
+## `tests/_vendor/midout/`
+
 The contents of `tests/_vendor/midout/` are vendored from Craig Gidney's
 `midout` package, published alongside:
 
@@ -9,7 +16,7 @@ The contents of `tests/_vendor/midout/` are vendored from Craig Gidney's
 Source obtained from the author-provided artifact archive
 (`Gidney-Y-meas-code`, `src/midout/`), licensed Apache License 2.0.
 
-## Purpose in this repository
+### Purpose in this repository
 
 This code is used **only as a verification oracle for tests** — it is the
 ground-truth generator for the surface-code Y-basis measurement circuits and
@@ -18,7 +25,7 @@ implementation (`src/tqec/compile/specs/library/generators/ycube.py` and
 `_ycube_circuit.py`) is cross-checked. **It is never imported by `src/tqec/`
 and never ships on the compile path.** It lives under `tests/` for this reason.
 
-## Modifications
+### Modifications
 
 Vendored verbatim from Gidney's `src/midout/`, with only these mechanical,
 behavior-preserving changes:
@@ -47,3 +54,22 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ```
+
+## `tests/_vendor/noncliff/`
+
+`injection.py` is vendored from the sibling Entropica project `noncliff`
+(`noncliff/injection.py`), which generates non-fault-tolerant state-injection
+circuits for a rotated surface-code patch.
+
+### Purpose in this repository
+
+Ground-truth generator for the injection encoder, against which tqec's native
+injection cube (`src/tqec/compile/specs/library/generators/injection.py`) is
+cross-checked gate for gate. The two happen to share a qubit-coordinate frame
+(data qubits on odd-odd grid points, ancillas on even-even), so the comparison is
+direct.
+
+### Modifications
+
+Vendored verbatim. The `__main__` block is retained but never executed by the
+test suite.

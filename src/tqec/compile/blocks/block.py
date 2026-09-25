@@ -64,6 +64,43 @@ class Block(SequencedLayers):
         return False
 
     @property
+    def acquires_its_qubits(self) -> bool:
+        """Whether the block's first layer resets every data qubit it ever touches.
+
+        The time-reverse of :attr:`releases_its_qubits`. A block that does owns no
+        live state *before* its own rounds, so in a merged slice whose duration is
+        set by a longer neighbour its position can simply be **absent** from the
+        leading layers: the block is end-aligned, its last round staying flush
+        with the end of the slice.
+
+        Two kinds of block want this. A state-injection cube prepares a state
+        that is not fault-tolerantly encoded, so every extra round it is held for
+        is extra exposure --- injecting as late as possible is strictly better.
+        A Y-basis *initialisation* cap would need it outright: its last round is
+        the transition to the full patch, which has to be the slice's last round
+        or the pipe above receives a degenerate patch.
+
+        The condition is stronger than it looks and is what an implementer has to
+        check: the first round must reset **every** data qubit the block touches
+        in *any* later round, the union and not just the first round's footprint.
+        A block whose patch grows (a Y cap's degenerate patch, magic-state
+        cultivation) has different footprints per round; if a later round touches
+        a qubit the first round did not reset, absence is wrong, because that
+        qubit was never initialised. Exactly the mirror of
+        :attr:`releases_its_qubits` needing to measure out *every* qubit.
+
+        Note absence means those physical qubits carry **no idling noise** during
+        the leading rounds. That is right for a block satisfying the condition
+        above --- the qubits hold no state, and the block's own first round resets
+        them --- and it is what a released block already does at the trailing end.
+        A hardware-faithful idling model would need a real idle layer instead.
+
+        Defaults to ``False``, i.e. start-aligned and padded, the safe answer.
+
+        """
+        return False
+
+    @property
     def declared_template(self) -> RectangularTemplate | None:
         """The block's spatial footprint, when the block states it itself.
 
@@ -335,36 +372,59 @@ def _merge_mismatched_block_layers(
 ) -> list[LayoutLayer | BaseComposedLayer]:
     """Merge parallel blocks whose temporal schedules do not match.
 
-    Each block is flattened at the concrete ``k`` and start-aligned. The merged
-    slice runs for ``max`` rounds over the parallel blocks. A block shorter than
-    the slice is handled one of two ways, according to
-    :attr:`Block.releases_its_qubits`:
+    Each block is flattened at the concrete ``k``. The merged slice runs for
+    ``max`` rounds over the parallel blocks, and a block shorter than the slice is
+    handled one of three ways:
 
-    - a block that measures out its data qubits (a Y-basis measurement cap) is
-      finished when its layers run out, and is simply **absent** from the
-      trailing merged layers;
-    - a block that carries a logical state onwards (an ordinary memory cube) must
-      stay present, and is **padded** with extra bulk rounds inserted just before
-      its final border round so that round stays last.
+    - a block that resets every data qubit it touches
+      (:attr:`Block.acquires_its_qubits` --- a state-injection cube) owns no live
+      state before its own rounds, so it is **end-aligned**: absent from the
+      leading merged layers, with its last round flush with the end of the slice;
+    - a block that measures out its data qubits
+      (:attr:`Block.releases_its_qubits` --- a Y-basis measurement cap) is
+      finished when its layers run out, so it is start-aligned and simply
+      **absent** from the trailing merged layers;
+    - a block that does neither (an ordinary memory cube, carrying a logical
+      state onwards to the next z-layer) must stay present for the whole slice,
+      so it is start-aligned and **padded** with extra bulk rounds inserted just
+      before its final border round, so that round stays last.
 
     This lets a Y cap coexist with a continuing memory cube whatever their
     relative lengths: at small ``k`` the cap outlasts the column and the column is
     padded; at larger ``k`` the column outlasts the cap, which drops out and
-    leaves the column to finish the slice alone.
+    leaves the column to finish the slice alone. It also lets an injection cube,
+    whose height is a constant two rounds, sit beside a ``2k+1`` column.
+
+    A block claiming both properties has no live state on either side, so either
+    alignment is sound; ``acquires_its_qubits`` wins, so the choice is a stated
+    rule rather than whichever branch happens to be tested first.
     """
     flats = {pos: _flatten_block_layers(block, k) for pos, block in blocks_in_parallel.items()}
     duration = max(len(flat) for flat in flats.values())
+    # Round index at which each block's first layer is played.
+    offsets: dict[LayoutPosition2D, int] = dict.fromkeys(flats, 0)
     for pos, flat in flats.items():
+        block = blocks_in_parallel[pos]
         extra = duration - len(flat)
-        if not extra or blocks_in_parallel[pos].releases_its_qubits:
+        if not extra:
+            continue
+        if block.acquires_its_qubits:
+            # End-aligned: the block does not exist yet during the leading rounds.
+            offsets[pos] = extra
+        elif block.releases_its_qubits:
             # A block that measures out its data qubits is done when its layers
             # run out; it is simply absent from the trailing merged layers.
             continue
-        body = _block_pad_body(blocks_in_parallel[pos])
-        flats[pos] = flat[:-1] + [body] * extra + flat[-1:]
+        else:
+            body = _block_pad_body(block)
+            flats[pos] = flat[:-1] + [body] * extra + flat[-1:]
     merged: list[LayoutLayer | BaseComposedLayer] = []
     for i in range(duration):
-        layers = {pos: flat[i] for pos, flat in flats.items() if i < len(flat)}
+        layers: dict[LayoutPosition2D, BaseLayer] = {}
+        for pos, flat in flats.items():
+            index = i - offsets[pos]
+            if 0 <= index < len(flat):
+                layers[pos] = flat[index]
         merged.append(merge_base_layers(layers, scalable_qubit_shape))
     return merged
 

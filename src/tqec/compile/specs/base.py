@@ -11,6 +11,7 @@ from tqec.computation.pipe import PipeKind
 from tqec.templates.base import RectangularTemplate
 from tqec.utils.enums import Basis
 from tqec.utils.exceptions import TQECError
+from tqec.utils.injection_state import DEFAULT_INJECTION_STATE
 from tqec.utils.position import Direction3D, Position3D
 from tqec.utils.scale import LinearFunction
 
@@ -82,6 +83,41 @@ def _y_cap_is_transposed(cube: Cube, graph: BlockGraph) -> bool:
     return _y_capped_cube_kind(cube, graph).x == Basis.X
 
 
+def _injection_capped_cube_kind(cube: Cube, graph: BlockGraph) -> ZXCube:
+    """Return the kind of the cube an ``INJECTION`` cube hands its state to.
+
+    Raises:
+        NotImplementedError: if the injection cube does not sit directly below a
+            regular cube. ``BlockGraph._validate_locally_at_cube`` already rejects
+            every such graph --- no upward temporal pipe, or one leading somewhere
+            other than a ``ZXCube`` --- so reaching this means a spec was built
+            from a graph that was never validated.
+
+    """
+    above = Position3D(cube.position.x, cube.position.y, cube.position.z + 1)
+    above_kind = graph[above].kind if graph.has_pipe_between(cube.position, above) else None
+    if not isinstance(above_kind, ZXCube):
+        raise NotImplementedError(
+            f"The injection cube at {cube.position} does not hand its state to a "
+            "regular cube. Only injection into a ZX cube directly above is "
+            "implemented; an injection cube connected to a Port is not."
+        )
+    return above_kind
+
+
+def _injection_is_transposed(cube: Cube, graph: BlockGraph) -> bool:
+    """Whether an ``INJECTION`` cube's patch must be reflected across its main diagonal.
+
+    An injection cube prepares the patch of the cube above it, so it inherits
+    that cube's spatial orientation. The encoder is written for a ``ZX*`` cube
+    (spatial boundaries normal to ``x`` in ``Z``); an ``XZ*`` cube needs the
+    reflection. Returns ``False`` for any cube that is not an injection cube.
+    """
+    if not cube.is_injection_cube:
+        return False
+    return _injection_capped_cube_kind(cube, graph).x == Basis.X
+
+
 @dataclass(frozen=True)
 class CubeSpec:
     """Specification of a cube in a block graph.
@@ -111,6 +147,12 @@ class CubeSpec:
             *initialisation* (the regular cube it attaches to sits above it)
             rather than a measurement cap (the regular cube sits below).
             ``False`` for every other cube kind.
+        injection_transposed: For an ``INJECTION`` cube only: whether the encoder's
+            patch is reflected across its main diagonal, for the same reason as
+            ``y_cap_transposed``, read off the cube *above* instead of below.
+            ``False`` for every other cube kind.
+        state: For an ``INJECTION`` cube only: which single-qubit state to inject.
+            See :py:attr:`~tqec.computation.cube.Cube.state`.
 
     """
 
@@ -120,6 +162,8 @@ class CubeSpec:
     condition: CorrelationSurface | None = None
     y_cap_transposed: bool = False
     y_cube_initialises: bool = False
+    injection_transposed: bool = False
+    state: str = DEFAULT_INJECTION_STATE
 
     def __post_init__(self) -> None:
         if self.spatial_arms != SpatialArms.NONE:
@@ -151,6 +195,8 @@ class CubeSpec:
                 condition=cube.condition,
                 y_cap_transposed=_y_cap_is_transposed(cube, graph),
                 y_cube_initialises=_y_cube_is_initialisation(cube, graph),
+                injection_transposed=_injection_is_transposed(cube, graph),
+                state=cube.state,
             )
         spatial_arms = SpatialArms.from_cube_in_graph(cube, graph)
         return CubeSpec(

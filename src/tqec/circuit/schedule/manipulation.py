@@ -143,8 +143,14 @@ def _sort_target_groups(
 
 
 _CEOStaged = tuple[
-    BlockPosition2D, tuple[int, ...], str, tuple[float, ...], list[stim.GateTarget]
+    BlockPosition2D, tuple[int, ...], str, tuple[float, ...], list[stim.GateTarget], str
 ]
+"""A CEO-sorted target group: ``(block, qubit ids, name, args, targets, tag)``.
+
+The trailing tag keeps a stand-in gate distinguishable from the real thing --- the
+state-injection encoder emits ``S`` tagged ``T`` --- so a merge run never fuses
+two instructions that only look alike.
+"""
 
 
 def _stage_ceo_entries(
@@ -178,7 +184,7 @@ def _stage_ceo_entries(
             if block_pos is None:
                 eligible = False
                 break
-            staged.append((block_pos, qids, inst.name, args, list(grp)))
+            staged.append((block_pos, qids, inst.name, args, list(grp), inst.tag))
         if eligible:
             ceo_entries.extend(staged)
         else:
@@ -188,14 +194,16 @@ def _stage_ceo_entries(
 
 
 def _ceo_entry_signature(entry: _CEOStaged) -> tuple:
-    return (entry[0], entry[1], entry[2], entry[3], tuple(t.value for t in entry[4]))
+    return (entry[0], entry[1], entry[2], entry[3], tuple(t.value for t in entry[4]), entry[5])
 
 
 def _instruction_signature(inst: stim.CircuitInstruction) -> tuple:
-    return (inst.name, tuple(inst.gate_args_copy()), [
-        (t.value, t.is_qubit_target, t.is_measurement_record_target)
-        for t in inst.targets_copy()
-    ])
+    return (
+        inst.name,
+        inst.tag,
+        tuple(inst.gate_args_copy()),
+        [(t.value, t.is_qubit_target, t.is_measurement_record_target) for t in inst.targets_copy()],
+    )
 
 
 def _emit_moment_with_ceo(
@@ -234,11 +242,17 @@ def _emit_moment_with_ceo(
         while i < len(ceo_z):
             name = ceo_z[i][2]
             args = ceo_z[i][3]
+            tag = ceo_z[i][5]
             flat: list[stim.GateTarget] = []
-            while i < len(ceo_z) and ceo_z[i][2] == name and ceo_z[i][3] == args:
+            while (
+                i < len(ceo_z)
+                and ceo_z[i][2] == name
+                and ceo_z[i][3] == args
+                and ceo_z[i][5] == tag
+            ):
                 flat.extend(ceo_z[i][4])
                 i += 1
-            result.append(stim.CircuitInstruction(name, flat, list(args)))
+            result.append(stim.CircuitInstruction(name, flat, list(args), tag=tag))
         return result
 
     if condition_recs is None:
@@ -267,16 +281,18 @@ def _emit_moment_with_ceo(
         if _ceo_entry_signature(ceo_z[i]) == _ceo_entry_signature(ceo_o[i]):
             name = ceo_z[i][2]
             args = ceo_z[i][3]
+            tag = ceo_z[i][5]
             flat = []
             while (
                 i < len(ceo_z)
                 and ceo_z[i][2] == name
                 and ceo_z[i][3] == args
+                and ceo_z[i][5] == tag
                 and _ceo_entry_signature(ceo_z[i]) == _ceo_entry_signature(ceo_o[i])
             ):
                 flat.extend(ceo_z[i][4])
                 i += 1
-            result.append(stim.CircuitInstruction(name, flat, list(args)))
+            result.append(stim.CircuitInstruction(name, flat, list(args), tag=tag))
         else:
             # Batch consecutive divergent slots sharing per-branch
             # (name, args) signatures into a single IfBlock with merged
@@ -285,8 +301,10 @@ def _emit_moment_with_ceo(
             # so per-slot IF/ELSE wraps collapse to one IF/ELSE per run.
             z_name = ceo_z[i][2]
             z_args = ceo_z[i][3]
+            z_tag = ceo_z[i][5]
             o_name = ceo_o[i][2]
             o_args = ceo_o[i][3]
+            o_tag = ceo_o[i][5]
             z_targets: list[stim.GateTarget] = []
             o_targets: list[stim.GateTarget] = []
             while (
@@ -294,14 +312,16 @@ def _emit_moment_with_ceo(
                 and _ceo_entry_signature(ceo_z[i]) != _ceo_entry_signature(ceo_o[i])
                 and ceo_z[i][2] == z_name
                 and ceo_z[i][3] == z_args
+                and ceo_z[i][5] == z_tag
                 and ceo_o[i][2] == o_name
                 and ceo_o[i][3] == o_args
+                and ceo_o[i][5] == o_tag
             ):
                 z_targets.extend(ceo_z[i][4])
                 o_targets.extend(ceo_o[i][4])
                 i += 1
-            zero_inst = stim.CircuitInstruction(z_name, z_targets, list(z_args))
-            one_inst = stim.CircuitInstruction(o_name, o_targets, list(o_args))
+            zero_inst = stim.CircuitInstruction(z_name, z_targets, list(z_args), tag=z_tag)
+            one_inst = stim.CircuitInstruction(o_name, o_targets, list(o_args), tag=o_tag)
             result.append(
                 IfBlock(
                     condition_recs=list(condition_recs),
@@ -411,14 +431,18 @@ def remove_duplicate_instructions(
 
     """
     # Separate mergeable operations from non-mergeable ones.
-    mergeable_operations: dict[tuple[str, tuple[float, ...]], set[tuple[stim.GateTarget, ...]]] = {}
+    # Keyed by tag as well as name and args: a stand-in gate must never be
+    # deduplicated against the real one it shadows.
+    mergeable_operations: dict[
+        tuple[str, tuple[float, ...], str], set[tuple[stim.GateTarget, ...]]
+    ] = {}
     final_operations: list[stim.CircuitInstruction] = list()
     for inst in instructions:
         if inst.name in mergeable_instruction_names:
             # Mergeable operations are automatically merged thanks to
             # the use of a set here.
             mergeable_operations.setdefault(
-                (inst.name, tuple(inst.gate_args_copy())), set()
+                (inst.name, tuple(inst.gate_args_copy()), inst.tag), set()
             ).update(tuple(group) for group in inst.target_groups())
         else:
             final_operations.append(inst)
@@ -428,8 +452,9 @@ def remove_duplicate_instructions(
             name,
             functools.reduce(operator.iadd, _sort_target_groups([list(t) for t in targets]), []),
             args,
+            tag=tag,
         )
-        for (name, args), targets in mergeable_operations.items()
+        for (name, args, tag), targets in mergeable_operations.items()
     )
     # Warn if the output instructions do not form a valid moment, as this is
     # likely a misuse of this function.
@@ -460,15 +485,17 @@ def merge_instructions(
         from the given instructions but merged.
 
     """
-    instructions_merger: dict[tuple[str, tuple[float, ...]], list[list[stim.GateTarget]]] = {}
+    # Keyed by tag as well: merging `S[T] 0` with `S 1` would erase the tag from
+    # both and silently turn a stand-in gate into the gate it stands in for.
+    instructions_merger: dict[tuple[str, tuple[float, ...], str], list[list[stim.GateTarget]]] = {}
     for instruction in instructions:
         args = tuple(instruction.gate_args_copy())
-        instructions_merger.setdefault((instruction.name, args), []).extend(
+        instructions_merger.setdefault((instruction.name, args, instruction.tag), []).extend(
             instruction.target_groups()
         )
     return [
-        stim.CircuitInstruction(name, functools.reduce(operator.iadd, targets, []), args)
-        for (name, args), targets in instructions_merger.items()
+        stim.CircuitInstruction(name, functools.reduce(operator.iadd, targets, []), args, tag=tag)
+        for (name, args, tag), targets in instructions_merger.items()
     ]
 
 
@@ -519,9 +546,10 @@ def merge_scheduled_circuits(
         instructions: list[stim.CircuitInstruction] = functools.reduce(
             operator.iadd, (list(moment.instructions) for moment in moments), []
         )
-        # Avoid duplicated operations. Any operation that have the Plaquette.get_mergeable_tag() tag
-        # is considered mergeable, and can be removed if another operation in the list
-        # is considered equal (and has the mergeable tag).
+        # Avoid duplicated operations. An operation whose name is in
+        # ``Plaquette.mergeable_instructions`` is considered mergeable, and can be
+        # removed if another operation in the list is considered equal. Note this
+        # is keyed on the instruction *name*, unrelated to stim's own tags.
         deduplicated_instructions = remove_duplicate_instructions(
             instructions,
             mergeable_instruction_names=frozenset(mergeable_instructions),
@@ -534,11 +562,10 @@ def merge_scheduled_circuits(
                     inst.name,
                     functools.reduce(operator.iadd, _sort_target_groups(inst.target_groups()), []),
                     inst.gate_args_copy(),
+                    tag=inst.tag,
                 )
         else:
-            entries = _emit_moment_with_ceo(
-                merged_instructions, qubit_to_block, global_i2q.i2q
-            )
+            entries = _emit_moment_with_ceo(merged_instructions, qubit_to_block, global_i2q.i2q)
             for entry in entries:
                 if isinstance(entry, IfBlock):
                     raise NotImplementedError(
@@ -623,12 +650,8 @@ def merge_scheduled_circuits_per_branch(
         instructions_o = functools.reduce(
             operator.iadd, (list(m.instructions) for m in moments_o), []
         )
-        merged_z = merge_instructions(
-            remove_duplicate_instructions(instructions_z, mergeable)
-        )
-        merged_o = merge_instructions(
-            remove_duplicate_instructions(instructions_o, mergeable)
-        )
+        merged_z = merge_instructions(remove_duplicate_instructions(instructions_z, mergeable))
+        merged_o = merge_instructions(remove_duplicate_instructions(instructions_o, mergeable))
         entries = _emit_moment_with_ceo(
             merged_z,
             qubit_to_block,
