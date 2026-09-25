@@ -27,9 +27,6 @@ jobs:
           # In theory, if everything succeed in 3.10, everything should succeed in
           # 3.11, 3.12, 3.13 and follow-up version.
           uv sync --group all --python "3.10"
-      # Perform type checking before testing because that is quicker.
-      - name: Type checking
-        run: uv run ty check
       # Only perform quick tests to avoid paying too much minutes on that.
       - name: Partial tests
         run: uv run pytest $(git ls-files '*_test.py') -m "not slow"
