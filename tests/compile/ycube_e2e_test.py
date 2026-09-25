@@ -375,7 +375,7 @@ def test_y_cap_junction_plaquettes_change_only_the_interaction_order(transposed:
 
 
 def _two_y_inits_with_main_column(kind: str = "ZXZ") -> BlockGraph:
-    """The two-cap graph run backwards: Y cubes below, feeding up into the branch."""
+    """Build the two-cap graph run backwards: Y cubes below, feeding the branch."""
     g = BlockGraph("two_y_inits")
     b = [Position3D(0, 0, i) for i in range(5)]
 
