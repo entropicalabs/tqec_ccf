@@ -20,7 +20,6 @@ from typing import NewType
 
 from tqec.circuit.qubit import GridQubit
 
-
 ConditionId = NewType("ConditionId", int)
 """Stable identifier for a branch condition.
 
@@ -100,6 +99,7 @@ class PauliFrameTracker:
         Returns:
             ordered list of ``rec[-K]`` offsets; deterministic across runs
             because conditions are sorted before lookup.
+
         """
         conds = sorted(self.frame_at(qubit, timestep))
         return [condition_to_rec[c] for c in conds if c in condition_to_rec]

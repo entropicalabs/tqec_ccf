@@ -5,7 +5,6 @@ from __future__ import annotations
 from tqec.circuit.qubit import GridQubit
 from tqec.compile.conditional.frame import ConditionId, PauliFrameTracker
 
-
 _C0 = ConditionId(0)
 _C1 = ConditionId(1)
 

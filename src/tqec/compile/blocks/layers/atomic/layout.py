@@ -16,7 +16,6 @@ from tqec.compile.blocks.positioning import (
     LayoutPosition2D,
 )
 from tqec.compile.conditional.circuit import (
-    CircuitEntry,
     ConditionalCircuit,
     IfBlock,
 )
@@ -375,7 +374,8 @@ class LayoutLayer(BaseLayer):
 
     def _reschedule_per_branch_measurements(self) -> None:
         """Sync both branches' plaquette schedules to the same max-schedule,
-        the conditional analogue of :meth:`reschedule_measurements`."""
+        the conditional analogue of :meth:`reschedule_measurements`.
+        """
         all_plaquettes = []
         for layer in self.layers.values():
             if isinstance(layer, PlaquetteLayer):

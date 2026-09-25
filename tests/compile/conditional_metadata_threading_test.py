@@ -25,7 +25,6 @@ def test_conditional_block_registered_on_graph() -> None:
         FIXED_BULK_OBSERVABLE_BUILDER as DEFAULT_OBSERVABLE_BUILDER,
     )
     from tqec.utils.position import BlockPosition3D
-    from tqec.utils.scale import PhysicalQubitScalable2D
 
     builder = FixedBulkCubeBuilder(IdentityPlaquetteCompiler)
     cond = _condition()

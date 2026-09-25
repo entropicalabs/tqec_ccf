@@ -16,8 +16,9 @@ global qubit map.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Iterator, Union
+from typing import TYPE_CHECKING, Union
 
 import stim
 
@@ -64,13 +65,13 @@ class ConditionalCircuit:
     def __init__(
         self,
         entries: list[CircuitEntry] | None = None,
-        qubit_map: "QubitMap | None" = None,
+        qubit_map: QubitMap | None = None,
     ) -> None:
         self._entries: list[CircuitEntry] = list(entries) if entries else []
         self._qubit_map = qubit_map
 
     @property
-    def qubit_map(self) -> "QubitMap | None":
+    def qubit_map(self) -> QubitMap | None:
         """Local qubit map of the circuit, when known. Set by
         :meth:`LayoutLayer.to_conditional_circuit`; ``None`` for hand-built
         instances. Tree-level assembly uses this to remap local qubit indices to
@@ -78,7 +79,7 @@ class ConditionalCircuit:
         """
         return self._qubit_map
 
-    def set_qubit_map(self, qubit_map: "QubitMap") -> None:
+    def set_qubit_map(self, qubit_map: QubitMap) -> None:
         """Set the local qubit map used for tree-level index remapping."""
         self._qubit_map = qubit_map
 
@@ -115,7 +116,8 @@ class ConditionalCircuit:
     def append_instruction_or_if(self, entry: CircuitEntry) -> None:
         """Append either a plain :class:`stim.CircuitInstruction` or an
         :class:`IfBlock`, dispatching on type. Convenience for callers iterating
-        a mixed sequence."""
+        a mixed sequence.
+        """
         self._entries.append(entry)
 
     def extend(self, entries: list[CircuitEntry]) -> None:

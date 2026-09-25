@@ -80,7 +80,7 @@ def annotate_conditional_observable(
     cond_observable: ConditionalAbstractObservable,
     observable_index: int,
     observable_builder: ObservableBuilder,
-    condition_recs_by_z: dict[int, list[int]],  # noqa: ARG001 — back-compat; per-bit recs now read off cond_observable.condition_recs
+    condition_recs_by_z: dict[int, list[int]],
     min_z: int,
 ) -> None:
     """Annotate a truth-table-indexed logical observable on the tree.

@@ -111,8 +111,8 @@ class ConditionalCorrelationSurface:
 
     """
 
-    conditions: tuple["CorrelationSurface", ...]
-    resolutions: dict[tuple[bool, ...], "CorrelationSurface"]
+    conditions: tuple[CorrelationSurface, ...]
+    resolutions: dict[tuple[bool, ...], CorrelationSurface]
 
     def __post_init__(self) -> None:
         n = len(self.conditions)
@@ -129,7 +129,7 @@ class ConditionalCorrelationSurface:
                 f"missing={sorted(missing)}, extra={sorted(extra)}."
             )
 
-    def shift_by(self, dx: int = 0, dy: int = 0, dz: int = 0) -> "ConditionalCorrelationSurface":
+    def shift_by(self, dx: int = 0, dy: int = 0, dz: int = 0) -> ConditionalCorrelationSurface:
         """Shift a copy of ``self`` by the given offset in the x, y, z directions and return it.
 
         Args:

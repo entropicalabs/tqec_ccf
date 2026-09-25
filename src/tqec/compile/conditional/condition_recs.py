@@ -47,7 +47,7 @@ if TYPE_CHECKING:
 class _LeafEntry:
     """Per-leaf bookkeeping for tail-shift accounting."""
 
-    leaf: "LayerNode"
+    leaf: LayerNode
     z: int
     position_in_subtree: int
     leaves_in_subtree: int
@@ -55,7 +55,7 @@ class _LeafEntry:
     num_measurements: int
 
 
-def _get_ordered_leaves(root: "LayerNode") -> list["LayerNode"]:
+def _get_ordered_leaves(root: LayerNode) -> list[LayerNode]:
     """Return the leaves of the subtree in time order."""
     if root.is_leaf:
         return [root]
@@ -63,13 +63,14 @@ def _get_ordered_leaves(root: "LayerNode") -> list["LayerNode"]:
 
 
 def _collect_pre_cond_entries(
-    tree_root: "LayerNode", k: int, cond_z: int
-) -> tuple[list[_LeafEntry], list[list["LayerNode"]]]:
+    tree_root: LayerNode, k: int, cond_z: int
+) -> tuple[list[_LeafEntry], list[list[LayerNode]]]:
     """Walk subtrees at ``z < cond_z`` in time order, returning per-leaf
     entries plus the per-z list of ordered leaves (needed by the
-    component dispatch)."""
+    component dispatch).
+    """
     entries: list[_LeafEntry] = []
-    subtree_leaves: list[list["LayerNode"]] = []
+    subtree_leaves: list[list[LayerNode]] = []
     for z, subtree in enumerate(tree_root.children):
         if z >= cond_z:
             break
@@ -103,7 +104,8 @@ def _compute_tail_shifts(entries: list[_LeafEntry]) -> list[int]:
     that happen *after* ``entries[i]`` and up to the IfBlock emission
     point (which is the moment immediately after the last entry). A
     qubit measured at ``entries[i]`` with local offset ``-r`` translates
-    to IfBlock-frame offset ``-r - shifts[i]``."""
+    to IfBlock-frame offset ``-r - shifts[i]``.
+    """
     shifts: list[int] = [0] * len(entries)
     running = 0
     for i in range(len(entries) - 1, -1, -1):
@@ -114,21 +116,21 @@ def _compute_tail_shifts(entries: list[_LeafEntry]) -> list[int]:
 
 def _qubits_for_component(
     k: int,
-    leaf: "LayerNode",
+    leaf: LayerNode,
     obs_slice: AbstractObservable,
     component: ObservableComponent,
     observable_builder: ObservableBuilder,
-) -> set["GridQubit"]:
+) -> set[GridQubit]:
     assert isinstance(leaf._layer, LayoutLayer)
     template, _ = leaf._layer.to_template_and_plaquettes()
     return observable_builder.build(k, template, obs_slice, component)
 
 
 def _resolve_one(
-    cond_pos: "LayoutPosition3D",
+    cond_pos: LayoutPosition3D,
     obs: AbstractObservable,
     entries: list[_LeafEntry],
-    subtree_leaves: list[list["LayerNode"]],
+    subtree_leaves: list[list[LayerNode]],
     tail_shifts: list[int],
     k: int,
     observable_builder: ObservableBuilder,
@@ -138,7 +140,7 @@ def _resolve_one(
     }
     recs: list[int] = []
 
-    def collect(leaf: "LayerNode", qubits: set["GridQubit"]) -> None:
+    def collect(leaf: LayerNode, qubits: set[GridQubit]) -> None:
         entry, idx = entry_by_leaf_id[id(leaf)]
         shift = tail_shifts[idx]
         for q in qubits:
@@ -179,7 +181,7 @@ def _resolve_one(
 
 
 def resolve_surface_condition_recs(
-    tree: "LayerTree",
+    tree: LayerTree,
     k: int,
     obs: AbstractObservable,
     anchor_z: int,
@@ -221,11 +223,11 @@ def resolve_surface_condition_recs(
 
 
 def resolve_condition_recs(
-    tree: "LayerTree",
+    tree: LayerTree,
     k: int,
-    conditional_observables: dict["LayoutPosition3D", AbstractObservable],
+    conditional_observables: dict[LayoutPosition3D, AbstractObservable],
     observable_builder: ObservableBuilder,
-) -> dict["LayoutPosition3D", list[int]]:
+) -> dict[LayoutPosition3D, list[int]]:
     """Resolve each pre-compiled :class:`AbstractObservable` to a list of
     ``rec`` offsets in the IfBlock emission frame.
 
@@ -246,8 +248,9 @@ def resolve_condition_recs(
     Returns:
         ``dict`` mapping each ``cond_pos`` to a sorted list of negative
         ``rec`` offsets (the IF/ELSE condition is their XOR).
+
     """
-    result: dict["LayoutPosition3D", list[int]] = {}
+    result: dict[LayoutPosition3D, list[int]] = {}
     for cond_pos, obs in conditional_observables.items():
         entries, subtree_leaves = _collect_pre_cond_entries(tree._root, k, cond_pos.z)
         tail_shifts = _compute_tail_shifts(entries)

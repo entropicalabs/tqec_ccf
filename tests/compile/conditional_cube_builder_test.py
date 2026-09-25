@@ -22,7 +22,6 @@ from tqec.utils.frozendefaultdict import FrozenDefaultDict
 from tqec.utils.position import Position3D
 from tqec.utils.scale import LinearFunction
 
-
 _BLOCK_TEMPORAL_HEIGHT = LinearFunction(2, -1)
 _TRANSLATOR = DefaultRPNGTranslator()
 

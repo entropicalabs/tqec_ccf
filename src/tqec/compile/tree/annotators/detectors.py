@@ -189,7 +189,8 @@ class LookbackStack:
     ]:
         """Get the last ``n`` QEC rounds with parallel branch-zero and branch-one
         plaquette lists. Rounds with no branch-one alternate fall back to the
-        branch-zero entry (both branches share that round's content)."""
+        branch-zero entry (both branches share that round's content).
+        """
         templates, plaquettes_zero, measurement_records, plaquettes_one = self._get_last_n(n)
         plaquettes_one_filled: list[Plaquettes] = [
             (po if po is not None else pz) for po, pz in zip(plaquettes_one, plaquettes_zero)

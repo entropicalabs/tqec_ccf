@@ -84,6 +84,7 @@ def _classify_conditions(
         TQECError: if a condition matches more than one conditional cube
             (ambiguous binding), or if a surface-anchored condition spans an
             empty position range.
+
     """
     bindings: list[_ConditionBinding] = []
     for i, cond in enumerate(surface.conditions):

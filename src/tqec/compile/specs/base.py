@@ -42,7 +42,7 @@ class CubeSpec:
     kind: CubeKind
     spatial_arms: SpatialArms = SpatialArms.NONE
     has_spatial_up_or_down_pipe_in_timeslice: bool = False
-    condition: "CorrelationSurface | None" = None
+    condition: CorrelationSurface | None = None
 
     def __post_init__(self) -> None:
         if self.spatial_arms != SpatialArms.NONE:

@@ -29,7 +29,6 @@ from tqec.computation.cube import ConditionalLeafCubeKind
 from tqec.utils.enums import Basis
 from tqec.utils.position import Position3D
 
-
 _TEMPORAL_PAIRS = ["XZZ_XZX", "ZXX_ZXZ", "XZX_XZZ"]
 _MEAS_RE = re.compile(r"^\s*(M[XYZ]?R?|MR[XYZ]?)\s+([0-9 ]+)", re.MULTILINE)
 

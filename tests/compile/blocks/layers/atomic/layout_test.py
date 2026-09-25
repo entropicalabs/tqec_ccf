@@ -175,8 +175,8 @@ def test_to_conditional_circuit_weaves_ifblock_for_divergent_plaquette() -> None
     """
     from tqec.compile.blocks.layers.atomic.layout import LayoutLayer as _LL
     from tqec.compile.compile import compile_block_graph
-    from tqec.compile.convention import FIXED_BULK_CONVENTION
     from tqec.compile.conditional.circuit import ConditionalCircuit, IfBlock
+    from tqec.compile.convention import FIXED_BULK_CONVENTION
     from tqec.compile.tree.node import LayerNode, NodeWalker
     from tqec.computation.block_graph import BlockGraph
     from tqec.computation.correlation import CorrelationSurface, ZXEdge, ZXNode

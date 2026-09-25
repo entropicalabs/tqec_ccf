@@ -13,7 +13,6 @@ from tqec.utils.enums import Basis
 from tqec.utils.exceptions import TQECError
 from tqec.utils.position import Position3D
 
-
 _INIT_KIND = ConditionalLeafCubeKind.XZX_XZZ.value[0]  # XZX
 
 

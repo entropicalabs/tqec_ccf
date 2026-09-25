@@ -217,7 +217,8 @@ def _absolute_meas_index_sets(
     """Walk flattened circuit. Return (detector_set, obs_parity_by_index,
     num_measurements). Detector set = frozenset of per-detector frozensets of
     absolute measurement indices. obs_parity_by_index = XOR'd absolute indices
-    per OBSERVABLE_INCLUDE index."""
+    per OBSERVABLE_INCLUDE index.
+    """
     m_count = 0
     detectors: set[frozenset[int]] = set()
     obs: dict[int, set[int]] = {}

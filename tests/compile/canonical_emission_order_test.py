@@ -27,7 +27,6 @@ from tqec.computation.block_graph import BlockGraph
 from tqec.computation.cube import ConditionalLeafCubeKind
 from tqec.utils.position import Position3D
 
-
 _MEAS_INSTRUCTIONS = {"M", "MX", "MY", "MZ", "MR", "MRX", "MRY", "MRZ"}
 
 

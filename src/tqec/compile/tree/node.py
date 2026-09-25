@@ -9,17 +9,17 @@ import stim
 from tqec.circuit.qubit_map import QubitMap
 from tqec.circuit.schedule.circuit import ScheduledCircuit
 from tqec.compile.blocks.layers.atomic.base import BaseLayer
-from tqec.compile.conditional.circuit import (
-    ConditionalCircuit,
-    IfBlock,
-    remap_entry_qubit_indices,
-)
 from tqec.compile.blocks.layers.atomic.layout import LayoutLayer
 from tqec.compile.blocks.layers.atomic.plaquettes import PlaquetteLayer
 from tqec.compile.blocks.layers.atomic.raw import RawCircuitLayer
 from tqec.compile.blocks.layers.composed.base import BaseComposedLayer
 from tqec.compile.blocks.layers.composed.repeated import RepeatedLayer
 from tqec.compile.blocks.layers.composed.sequenced import SequencedLayers
+from tqec.compile.conditional.circuit import (
+    ConditionalCircuit,
+    IfBlock,
+    remap_entry_qubit_indices,
+)
 from tqec.compile.tree.annotations import LayerNodeAnnotations, Polygon
 from tqec.utils.coordinates import StimCoordinates
 from tqec.utils.exceptions import TQECError

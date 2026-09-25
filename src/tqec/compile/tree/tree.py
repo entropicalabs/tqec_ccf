@@ -71,7 +71,7 @@ class LayerTree:
         observable_builder: ObservableBuilder,
         abstract_observables: list[AbstractObservable] | None = None,
         annotations: Mapping[int, LayerTreeAnnotations] | None = None,
-        conditional_blocks: Mapping["LayoutPosition3D", "ConditionalBlock"] | None = None,
+        conditional_blocks: Mapping[LayoutPosition3D, ConditionalBlock] | None = None,
         conditional_abstract_observables: list[ConditionalAbstractObservable] | None = None,
     ):
         """Represent a computation as a tree.
@@ -102,7 +102,7 @@ class LayerTree:
         self._abstract_observables = abstract_observables or []
         self._annotations = dict(annotations) if annotations is not None else {}
         self._observable_builder = observable_builder
-        self._conditional_blocks: dict["LayoutPosition3D", "ConditionalBlock"] = (
+        self._conditional_blocks: dict[LayoutPosition3D, ConditionalBlock] = (
             dict(conditional_blocks) if conditional_blocks is not None else {}
         )
         self._conditional_abstract_observables: list[ConditionalAbstractObservable] = (
@@ -110,7 +110,7 @@ class LayerTree:
         )
 
     @property
-    def conditional_blocks(self) -> Mapping["LayoutPosition3D", "ConditionalBlock"]:
+    def conditional_blocks(self) -> Mapping[LayoutPosition3D, ConditionalBlock]:
         """Return the conditional-cube blocks indexed by ``LayoutPosition3D``."""
         return self._conditional_blocks
 
