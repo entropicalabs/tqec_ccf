@@ -221,10 +221,7 @@ class LayoutLayer(BaseLayer):
         """Build branch-``one`` layer map. Falls back to ``self.layers`` at positions
         with no conditional alternate.
         """
-        return {
-            pos: self._conditional_layers.get(pos, layer)
-            for pos, layer in self.layers.items()
-        }
+        return {pos: self._conditional_layers.get(pos, layer) for pos, layer in self.layers.items()}
 
     def _compute_template_and_plaquettes(
         self, layers: dict[LayoutPosition2D, BaseLayer]
@@ -360,10 +357,7 @@ class LayoutLayer(BaseLayer):
         shift_x = mincube.x * (eshape.x - 1)
         shift_y = mincube.y * (eshape.y - 1)
         shifted_qubit_map = QubitMap(
-            {
-                idx: GridQubit(q.x + shift_x, q.y + shift_y)
-                for idx, q in qubit_map.i2q.items()
-            }
+            {idx: GridQubit(q.x + shift_x, q.y + shift_y) for idx, q in qubit_map.i2q.items()}
         )
         out = ConditionalCircuit(qubit_map=shifted_qubit_map)
         for idx in sorted(shifted_qubit_map.i2q.keys()):

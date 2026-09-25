@@ -249,9 +249,7 @@ def resolve_condition_recs(
     """
     result: dict["LayoutPosition3D", list[int]] = {}
     for cond_pos, obs in conditional_observables.items():
-        entries, subtree_leaves = _collect_pre_cond_entries(
-            tree._root, k, cond_pos.z
-        )
+        entries, subtree_leaves = _collect_pre_cond_entries(tree._root, k, cond_pos.z)
         tail_shifts = _compute_tail_shifts(entries)
         recs = _resolve_one(
             cond_pos, obs, entries, subtree_leaves, tail_shifts, k, observable_builder

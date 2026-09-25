@@ -13,9 +13,7 @@ from tqec.utils.position import Position3D
 
 def _condition() -> CorrelationSurface:
     p = Position3D(0, 0, 0)
-    return CorrelationSurface(
-        span=frozenset([ZXEdge(ZXNode(p, Basis.Z), ZXNode(p, Basis.Z))])
-    )
+    return CorrelationSurface(span=frozenset([ZXEdge(ZXNode(p, Basis.Z), ZXNode(p, Basis.Z))]))
 
 
 def _single_conditional_graph(pair_name: str) -> BlockGraph:

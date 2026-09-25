@@ -34,9 +34,7 @@ def _build_graph() -> tuple[BlockGraph, ConditionalCorrelationSurface]:
         t2,
         ConditionalLeafCubeKind.ZXX_ZXZ,
         condition=CorrelationSurface(
-            span=frozenset(
-                {ZXEdge(u=ZXNode(b1, Basis.Z), v=ZXNode(c1, Basis.Z))}
-            )
+            span=frozenset({ZXEdge(u=ZXNode(b1, Basis.Z), v=ZXNode(c1, Basis.Z))})
         ),
     )
     g.add_pipe(b1, c1)
@@ -84,9 +82,7 @@ def test_conditional_observable_emits_observable_include() -> None:
     # New flat-XOR canonical form: shared baseline OBSERVABLE_INCLUDE on the
     # trunk PLUS at least one IF(rec[...]) { OBSERVABLE_INCLUDE(0) ... }
     # (no ELSE) carrying the flip-delta for the single condition.
-    if_then_only = re.findall(
-        r"IF\(.*?\) \{\n(.*?)\n\}(?!\s*ELSE)", text, re.DOTALL
-    )
+    if_then_only = re.findall(r"IF\(.*?\) \{\n(.*?)\n\}(?!\s*ELSE)", text, re.DOTALL)
     observable_ifs = [body for body in if_then_only if "OBSERVABLE_INCLUDE(0)" in body]
     assert observable_ifs, (
         "expected at least one IF { ... OBSERVABLE_INCLUDE(0) ... } block "
@@ -239,6 +235,4 @@ def test_conditional_observable_flat_form_has_no_else() -> None:
         r"IF\(.*?\) \{\n((?:.|\n)*?OBSERVABLE_INCLUDE\(0\)[^\n]*)\n\} ELSE \{\n((?:.|\n)*?OBSERVABLE_INCLUDE\(0\)[^\n]*)\n\}",
         text,
     )
-    assert not paired, (
-        "flat-XOR emission must not produce IF/ELSE pairs for observables"
-    )
+    assert not paired, "flat-XOR emission must not produce IF/ELSE pairs for observables"

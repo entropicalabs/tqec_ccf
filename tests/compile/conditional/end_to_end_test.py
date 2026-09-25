@@ -36,9 +36,7 @@ _MEAS_RE = re.compile(r"^\s*(M[XYZ]?R?|MR[XYZ]?)\s+([0-9 ]+)", re.MULTILINE)
 
 def _condition() -> CorrelationSurface:
     p = Position3D(0, 0, 0)
-    return CorrelationSurface(
-        span=frozenset([ZXEdge(ZXNode(p, Basis.Z), ZXNode(p, Basis.Z))])
-    )
+    return CorrelationSurface(span=frozenset([ZXEdge(ZXNode(p, Basis.Z), ZXNode(p, Basis.Z))]))
 
 
 def _graph(pair_name: str) -> BlockGraph:

@@ -142,9 +142,7 @@ def _sort_target_groups(
     return sorted(targets, key=_sort_key)
 
 
-_CEOStaged = tuple[
-    BlockPosition2D, tuple[int, ...], str, tuple[float, ...], list[stim.GateTarget]
-]
+_CEOStaged = tuple[BlockPosition2D, tuple[int, ...], str, tuple[float, ...], list[stim.GateTarget]]
 
 
 def _stage_ceo_entries(
@@ -192,10 +190,11 @@ def _ceo_entry_signature(entry: _CEOStaged) -> tuple:
 
 
 def _instruction_signature(inst: stim.CircuitInstruction) -> tuple:
-    return (inst.name, tuple(inst.gate_args_copy()), [
-        (t.value, t.is_qubit_target, t.is_measurement_record_target)
-        for t in inst.targets_copy()
-    ])
+    return (
+        inst.name,
+        tuple(inst.gate_args_copy()),
+        [(t.value, t.is_qubit_target, t.is_measurement_record_target) for t in inst.targets_copy()],
+    )
 
 
 def _emit_moment_with_ceo(
@@ -536,9 +535,7 @@ def merge_scheduled_circuits(
                     inst.gate_args_copy(),
                 )
         else:
-            entries = _emit_moment_with_ceo(
-                merged_instructions, qubit_to_block, global_i2q.i2q
-            )
+            entries = _emit_moment_with_ceo(merged_instructions, qubit_to_block, global_i2q.i2q)
             for entry in entries:
                 if isinstance(entry, IfBlock):
                     raise NotImplementedError(
@@ -623,12 +620,8 @@ def merge_scheduled_circuits_per_branch(
         instructions_o = functools.reduce(
             operator.iadd, (list(m.instructions) for m in moments_o), []
         )
-        merged_z = merge_instructions(
-            remove_duplicate_instructions(instructions_z, mergeable)
-        )
-        merged_o = merge_instructions(
-            remove_duplicate_instructions(instructions_o, mergeable)
-        )
+        merged_z = merge_instructions(remove_duplicate_instructions(instructions_z, mergeable))
+        merged_o = merge_instructions(remove_duplicate_instructions(instructions_o, mergeable))
         entries = _emit_moment_with_ceo(
             merged_z,
             qubit_to_block,

@@ -15,9 +15,7 @@ from tqec.utils.scale import LinearFunction
 
 def _condition() -> CorrelationSurface:
     p = Position3D(0, 0, 0)
-    return CorrelationSurface(
-        span=frozenset([ZXEdge(ZXNode(p, Basis.Z), ZXNode(p, Basis.Z))])
-    )
+    return CorrelationSurface(span=frozenset([ZXEdge(ZXNode(p, Basis.Z), ZXNode(p, Basis.Z))]))
 
 
 def test_conditional_block_registered_on_graph() -> None:

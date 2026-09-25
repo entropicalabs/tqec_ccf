@@ -163,9 +163,7 @@ def test_resolve_matches_inplace_branch_compile() -> None:
         original_cond = cg._conditional_blocks
         try:
             cg._conditional_blocks = {}
-            cg._blocks[cond_pos] = (
-                cblock.block_if_zero if branch == 0 else cblock.block_if_one
-            )
+            cg._blocks[cond_pos] = cblock.block_if_zero if branch == 0 else cblock.block_if_one
             return cg.generate_stim_circuit(k=1)
         finally:
             cg._blocks[cond_pos] = original_block
@@ -227,9 +225,7 @@ def _absolute_meas_index_sets(
         name = inst.name
         if name == "DETECTOR":
             ms = frozenset(
-                m_count + t.value
-                for t in inst.targets_copy()
-                if t.is_measurement_record_target
+                m_count + t.value for t in inst.targets_copy() if t.is_measurement_record_target
             )
             detectors.add(ms)
         elif name == "OBSERVABLE_INCLUDE":
@@ -247,9 +243,7 @@ def _absolute_meas_index_sets(
     )
 
 
-def _assert_circuits_semantically_equivalent(
-    actual: stim.Circuit, expected: stim.Circuit
-) -> None:
+def _assert_circuits_semantically_equivalent(actual: stim.Circuit, expected: stim.Circuit) -> None:
     """Compare two circuits via:
     - identical sequential measurement record (gate name + qubit per measurement),
     - identical detector parity-set collection (ignoring annotation order),
@@ -302,9 +296,7 @@ def test_resolve_matches_inplace_branch_compile_with_conditional_observable() ->
         t2,
         ConditionalLeafCubeKind.ZXX_ZXZ,
         condition=CorrelationSurface(
-            span=frozenset(
-                {ZXEdge(u=ZXNode(c1, Basis.Z), v=ZXNode(c2, Basis.Z))}
-            )
+            span=frozenset({ZXEdge(u=ZXNode(c1, Basis.Z), v=ZXNode(c2, Basis.Z))})
         ),
     )
     g.add_pipe(b1, c1)
@@ -360,9 +352,7 @@ def test_resolve_matches_inplace_branch_compile_with_conditional_observable() ->
         original_cond_obs = cg._conditional_abstract_observables
         try:
             cg._conditional_blocks = {}
-            cg._blocks[cond_pos] = (
-                cblock.block_if_zero if branch == 0 else cblock.block_if_one
-            )
+            cg._blocks[cond_pos] = cblock.block_if_zero if branch == 0 else cblock.block_if_one
             # Re-compile the matching plain surface into an AbstractObservable
             # against a branch-resolved BlockGraph so we have a non-conditional
             # observable to annotate.

@@ -191,4 +191,3 @@ def _render(entries: list[CircuitEntry], lines: list[str], indent: int) -> None:
             text = str(entry).strip()
             for line in text.splitlines():
                 lines.append(f"{pad}{line}")
-

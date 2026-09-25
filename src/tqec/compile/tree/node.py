@@ -26,16 +26,12 @@ from tqec.utils.exceptions import TQECError
 from tqec.utils.scale import LinearFunction
 
 
-def _extend_conditional_circuit(
-    target: ConditionalCircuit, source: ConditionalCircuit
-) -> None:
+def _extend_conditional_circuit(target: ConditionalCircuit, source: ConditionalCircuit) -> None:
     """Append every entry of ``source`` to ``target``."""
     target.extend(source.entries)
 
 
-def _append_stim_circuit_to_conditional(
-    circuit: stim.Circuit, target: ConditionalCircuit
-) -> None:
+def _append_stim_circuit_to_conditional(circuit: stim.Circuit, target: ConditionalCircuit) -> None:
     """Flatten a ``stim.Circuit`` (no nested blocks) into plain entries on
     ``target``. ``stim.CircuitRepeatBlock`` is rendered as a flat repetition —
     ``ConditionalCircuit`` has no native REPEAT primitive at this stage.

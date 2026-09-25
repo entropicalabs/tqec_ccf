@@ -87,11 +87,7 @@ def _classify_conditions(
     """
     bindings: list[_ConditionBinding] = []
     for i, cond in enumerate(surface.conditions):
-        matches = [
-            c.position
-            for c in bg.cubes
-            if c.is_conditional and c.condition == cond
-        ]
+        matches = [c.position for c in bg.cubes if c.is_conditional and c.condition == cond]
         if len(matches) > 1:
             raise TQECError(
                 f"ConditionalCorrelationSurface.conditions[{i}] matches "
@@ -112,11 +108,7 @@ def _classify_conditions(
             # corresponding conditional cube. anchor_z = max-z reached by
             # any node in the condition's surface, +1 so the rec offset is
             # strictly in the past at the emission leaf.
-            zs = [
-                node.position.z
-                for edge in cond.span
-                for node in (edge.u, edge.v)
-            ]
+            zs = [node.position.z for edge in cond.span for node in (edge.u, edge.v)]
             if not zs:
                 raise TQECError(
                     f"ConditionalCorrelationSurface.conditions[{i}] has an "
@@ -178,9 +170,7 @@ def compile_block_graph(
     block_graph: BlockGraph,
     convention: Convention = FIXED_BULK_CONVENTION,
     observables: (
-        list[CorrelationSurface | ConditionalCorrelationSurface]
-        | Literal["auto"]
-        | None
+        list[CorrelationSurface | ConditionalCorrelationSurface] | Literal["auto"] | None
     ) = "auto",
     block_temporal_height: LinearFunction = _DEFAULT_BLOCK_REPETITIONS,
 ) -> TopologicalComputationGraph:
@@ -276,9 +266,7 @@ def compile_block_graph(
                 # follows surface.conditions; it defines the bit order of
                 # resolution keys.
                 bindings = _classify_conditions(block_graph, surface)
-                cube_bits = [
-                    i for i, b in enumerate(bindings) if b.cube_position is not None
-                ]
+                cube_bits = [i for i, b in enumerate(bindings) if b.cube_position is not None]
                 # Compile every truth-table resolution against a graph that
                 # has cube-anchored bits resolved per the key (surface-anchored
                 # bits don't affect the BlockGraph topology).
@@ -289,9 +277,7 @@ def compile_block_graph(
                             bindings[i].cube_position: int(key[i])  # type: ignore[misc]
                             for i in cube_bits
                         }
-                        bg_for_compile = _resolve_conditional_cubes(
-                            block_graph, assignment
-                        )
+                        bg_for_compile = _resolve_conditional_cubes(block_graph, assignment)
                     else:
                         bg_for_compile = block_graph
                     branches[key] = compile_correlation_surface_to_abstract_observable(

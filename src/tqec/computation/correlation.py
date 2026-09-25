@@ -117,25 +117,19 @@ class ConditionalCorrelationSurface:
     def __post_init__(self) -> None:
         n = len(self.conditions)
         if n == 0:
-            raise TQECError(
-                "ConditionalCorrelationSurface requires at least one condition."
-            )
-        expected_keys = {
-            tuple(bool((i >> j) & 1) for j in range(n)) for i in range(2**n)
-        }
+            raise TQECError("ConditionalCorrelationSurface requires at least one condition.")
+        expected_keys = {tuple(bool((i >> j) & 1) for j in range(n)) for i in range(2**n)}
         actual_keys = set(self.resolutions.keys())
         if actual_keys != expected_keys:
             missing = expected_keys - actual_keys
             extra = actual_keys - expected_keys
             raise TQECError(
                 f"ConditionalCorrelationSurface.resolutions must cover all "
-                f"2^{n} = {2 ** n} outcome tuples over {n} conditions; "
+                f"2^{n} = {2**n} outcome tuples over {n} conditions; "
                 f"missing={sorted(missing)}, extra={sorted(extra)}."
             )
 
-    def shift_by(
-        self, dx: int = 0, dy: int = 0, dz: int = 0
-    ) -> "ConditionalCorrelationSurface":
+    def shift_by(self, dx: int = 0, dy: int = 0, dz: int = 0) -> "ConditionalCorrelationSurface":
         """Shift a copy of ``self`` by the given offset in the x, y, z directions and return it.
 
         Args:
@@ -152,8 +146,7 @@ class ConditionalCorrelationSurface:
         return ConditionalCorrelationSurface(
             conditions=tuple(c.shift_by(dx=dx, dy=dy, dz=dz) for c in self.conditions),
             resolutions={
-                key: r.shift_by(dx=dx, dy=dy, dz=dz)
-                for key, r in self.resolutions.items()
+                key: r.shift_by(dx=dx, dy=dy, dz=dz) for key, r in self.resolutions.items()
             },
         )
 

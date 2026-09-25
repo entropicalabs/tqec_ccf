@@ -21,9 +21,7 @@ def _two_cube_graph(pair_name: str = "XZX_XZZ") -> BlockGraph:
     init_kind = ConditionalLeafCubeKind[pair_name].value[0]
     g = BlockGraph(f"e2e {pair_name}")
     g.add_cube(p0, init_kind)
-    cond = CorrelationSurface(
-        span=frozenset([ZXEdge(ZXNode(p0, Basis.Z), ZXNode(p0, Basis.Z))])
-    )
+    cond = CorrelationSurface(span=frozenset([ZXEdge(ZXNode(p0, Basis.Z), ZXNode(p0, Basis.Z))]))
     g.add_cube(p1, ConditionalLeafCubeKind[pair_name], condition=cond)
     g.add_pipe(p0, p1)
     return g

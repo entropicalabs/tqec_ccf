@@ -137,11 +137,7 @@ class BlockGeometries:
             for direction in Direction3D.all_directions():
                 b_false = false_k.get_basis_along(direction)
                 b_true = true_k.get_basis_along(direction)
-                color = (
-                    TQECColor.CONDITIONAL
-                    if b_false != b_true
-                    else TQECColor(b_false.value)
-                )
+                color = TQECColor.CONDITIONAL if b_false != b_true else TQECColor(b_false.value)
                 face = Face(color, width, height, SignedDirection3D(direction, False))
                 faces.append(face)
                 translation = [0.0, 0.0, 0.0]

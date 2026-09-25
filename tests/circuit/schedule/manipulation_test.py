@@ -267,12 +267,8 @@ def test_merge_scheduled_circuits_per_branch_identical_branches() -> None:
 
 
 def test_merge_scheduled_circuits_per_branch_divergent_slot_emits_ifblock() -> None:
-    zero_circuits, qmap = relabel_circuits_qubit_indices(
-        [_scheduled("QUBIT_COORDS(0, 0) 0\nR 0")]
-    )
-    one_circuits, _ = relabel_circuits_qubit_indices(
-        [_scheduled("QUBIT_COORDS(0, 0) 0\nRX 0")]
-    )
+    zero_circuits, qmap = relabel_circuits_qubit_indices([_scheduled("QUBIT_COORDS(0, 0) 0\nR 0")])
+    one_circuits, _ = relabel_circuits_qubit_indices([_scheduled("QUBIT_COORDS(0, 0) 0\nRX 0")])
     qubit_to_block = {GridQubit(0, 0): BlockPosition2D(0, 0)}
     moments_entries, schedule = merge_scheduled_circuits_per_branch(
         zero_circuits,

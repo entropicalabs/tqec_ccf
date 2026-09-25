@@ -188,9 +188,7 @@ def test_to_conditional_circuit_weaves_ifblock_for_divergent_plaquette() -> None
     init_kind = ConditionalLeafCubeKind.XZX_XZZ.value[0]
     g = BlockGraph("ll-cond")
     g.add_cube(p0, init_kind)
-    cond = CorrelationSurface(
-        span=frozenset([ZXEdge(ZXNode(p0, Basis.Z), ZXNode(p0, Basis.Z))])
-    )
+    cond = CorrelationSurface(span=frozenset([ZXEdge(ZXNode(p0, Basis.Z), ZXNode(p0, Basis.Z))]))
     g.add_cube(p1, ConditionalLeafCubeKind.XZX_XZZ, condition=cond)
     g.add_pipe(p0, p1)
     cg = compile_block_graph(g, FIXED_BULK_CONVENTION, observables=None)

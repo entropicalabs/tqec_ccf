@@ -39,9 +39,7 @@ def _measuring_plaquette() -> Plaquette:
 
 def _trivial_condition() -> CorrelationSurface:
     pos = Position3D(0, 0, 0)
-    return CorrelationSurface(
-        span=frozenset([ZXEdge(ZXNode(pos, Basis.Z), ZXNode(pos, Basis.Z))])
-    )
+    return CorrelationSurface(span=frozenset([ZXEdge(ZXNode(pos, Basis.Z), ZXNode(pos, Basis.Z))]))
 
 
 # Every pair is a temporal-basis swap -- the spatial boundaries match between

@@ -116,10 +116,8 @@ class TopologicalComputationGraph:
         scalable_qubit_shape: PhysicalQubitScalable2D,
         observable_builder: ObservableBuilder,
         observables: list[AbstractObservable] | None = None,
-        conditional_observables: dict[LayoutPosition3D, AbstractObservable]
-        | None = None,
-        conditional_abstract_observables: list[ConditionalAbstractObservable]
-        | None = None,
+        conditional_observables: dict[LayoutPosition3D, AbstractObservable] | None = None,
+        conditional_abstract_observables: list[ConditionalAbstractObservable] | None = None,
     ) -> None:
         """Represent a topological computation with :class:`.Block` instances."""
         self._blocks: dict[LayoutPosition3D, Block] = {}
@@ -140,17 +138,15 @@ class TopologicalComputationGraph:
         # Pre-compiled per-conditional-cube AbstractObservable, computed
         # by compile_block_graph (where BlockGraph context exists). The
         # resolver reads from here without needing the BlockGraph.
-        self._conditional_observables: dict[
-            LayoutPosition3D, AbstractObservable
-        ] = dict(conditional_observables) if conditional_observables else {}
+        self._conditional_observables: dict[LayoutPosition3D, AbstractObservable] = (
+            dict(conditional_observables) if conditional_observables else {}
+        )
         # Branch-aware logical observables. Compiled by compile_block_graph
         # from ConditionalCorrelationSurface entries in the ``observables``
         # argument; emitted per-branch inside the IF/ELSE generated for the
         # named conditional cube(s).
         self._conditional_abstract_observables: list[ConditionalAbstractObservable] = (
-            list(conditional_abstract_observables)
-            if conditional_abstract_observables
-            else []
+            list(conditional_abstract_observables) if conditional_abstract_observables else []
         )
 
     def add_cube(self, position: BlockPosition3D, block: Block) -> None:
@@ -313,9 +309,7 @@ class TopologicalComputationGraph:
         self._set_cube_block(
             psource, self._blocks[psource].with_spatial_borders_trimmed([source_border])
         )
-        self._set_cube_block(
-            psink, self._blocks[psink].with_spatial_borders_trimmed([sink_border])
-        )
+        self._set_cube_block(psink, self._blocks[psink].with_spatial_borders_trimmed([sink_border]))
 
     def _substitute_part_of_spatial_pipe(
         self,
@@ -650,8 +644,7 @@ class TopologicalComputationGraph:
         clashes = {z: poss for z, poss in by_z.items() if len(poss) > 1}
         if clashes:
             details = "; ".join(
-                f"z={z}: " + ", ".join(repr(p) for p in poss)
-                for z, poss in sorted(clashes.items())
+                f"z={z}: " + ", ".join(repr(p) for p in poss) for z, poss in sorted(clashes.items())
             )
             raise TQECError(
                 "Multi-conditional emission requires at most one conditional "
@@ -662,9 +655,7 @@ class TopologicalComputationGraph:
             )
         layer_tree = self.to_layer_tree()
         # Pre-annotate circuits so resolver can read MeasurementRecordsMap.
-        layer_tree._annotate_circuits(
-            k, reschedule_measurements=reschedule_measurements
-        )
+        layer_tree._annotate_circuits(k, reschedule_measurements=reschedule_measurements)
         resolved_condition_recs = resolve_condition_recs(
             layer_tree,
             k,
@@ -683,9 +674,7 @@ class TopologicalComputationGraph:
 
         for cao in self._conditional_abstract_observables:
             per_bit: list[tuple[int, ...]] = []
-            for binding, obs in zip(
-                cao.condition_bindings, cao.resolved_conditions, strict=True
-            ):
+            for binding, obs in zip(cao.condition_bindings, cao.resolved_conditions, strict=True):
                 if binding.cube_position is not None:
                     recs = condition_recs_by_z[binding.cube_position.z]
                 else:

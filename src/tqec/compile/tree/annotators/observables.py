@@ -124,17 +124,12 @@ def annotate_conditional_observable(
     bindings = cond_observable.condition_bindings
     n_bits = len(bindings)
     if n_bits == 0:
-        raise TQECError(
-            "ConditionalAbstractObservable has no condition_bindings."
-        )
+        raise TQECError("ConditionalAbstractObservable has no condition_bindings.")
     branches = cond_observable.branches
-    expected_keys = {
-        tuple(bool((i >> j) & 1) for j in range(n_bits)) for i in range(2**n_bits)
-    }
+    expected_keys = {tuple(bool((i >> j) & 1) for j in range(n_bits)) for i in range(2**n_bits)}
     if set(branches.keys()) != expected_keys:
         raise TQECError(
-            "ConditionalAbstractObservable.branches must cover all "
-            f"2^{n_bits} truth-table keys."
+            f"ConditionalAbstractObservable.branches must cover all 2^{n_bits} truth-table keys."
         )
 
     # anchor_z_by_bit: z-index (relative to min_z) where the i-th condition's
@@ -254,9 +249,7 @@ def annotate_conditional_observable(
                 assert circuit is not None
                 meas = MeasurementRecordsMap.from_scheduled_circuit(circuit)
                 anchor_leaf.get_annotations(k).observables.append(
-                    get_observable_with_measurement_records(
-                        shared, meas, observable_index
-                    )
+                    get_observable_with_measurement_records(shared, meas, observable_index)
                 )
             for bit, delta in enumerate(deltas):
                 _collect_recs(anchor_leaf, delta, delta_per_bit[bit], bit)

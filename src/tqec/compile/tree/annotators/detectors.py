@@ -124,9 +124,7 @@ class LookbackStack:
         plaquettes_branch_one: Plaquettes | None = None,
     ) -> None:
         """Append a new QEC round in the data-structure."""
-        self._stack[-1].append(
-            template, plaquettes, measurement_records, plaquettes_branch_one
-        )
+        self._stack[-1].append(template, plaquettes, measurement_records, plaquettes_branch_one)
 
     def _get_last_n(
         self, n: int
@@ -192,12 +190,9 @@ class LookbackStack:
         """Get the last ``n`` QEC rounds with parallel branch-zero and branch-one
         plaquette lists. Rounds with no branch-one alternate fall back to the
         branch-zero entry (both branches share that round's content)."""
-        templates, plaquettes_zero, measurement_records, plaquettes_one = (
-            self._get_last_n(n)
-        )
+        templates, plaquettes_zero, measurement_records, plaquettes_one = self._get_last_n(n)
         plaquettes_one_filled: list[Plaquettes] = [
-            (po if po is not None else pz)
-            for po, pz in zip(plaquettes_one, plaquettes_zero)
+            (po if po is not None else pz) for po, pz in zip(plaquettes_one, plaquettes_zero)
         ]
         measurement_record = MeasurementRecordsMap()
         for mrec in measurement_records:
@@ -279,20 +274,15 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
         plaquettes_one_for_round: Plaquettes | None = None
         active_condition_recs: list[int] | None = None
         if self._condition_recs is not None and node._layer.conditional_layers:
-            active_condition_recs = self._condition_recs.get(
-                self._min_z + self._z_index
-            )
+            active_condition_recs = self._condition_recs.get(self._min_z + self._z_index)
         leaf_is_conditional = active_condition_recs is not None
         if leaf_is_conditional:
-            template_one, plaquettes_one_for_round = (
-                node._layer._compute_template_and_plaquettes(
-                    node._layer._branch_one_layers()
-                )
+            template_one, plaquettes_one_for_round = node._layer._compute_template_and_plaquettes(
+                node._layer._branch_one_layers()
             )
             if template_one != template_zero:
                 raise TQECError(
-                    "AnnotateDetectorsOnLayerNode: per-branch templates differ; "
-                    "EMC + CEO violated."
+                    "AnnotateDetectorsOnLayerNode: per-branch templates differ; EMC + CEO violated."
                 )
         self._lookback_stack.append(
             template_zero,

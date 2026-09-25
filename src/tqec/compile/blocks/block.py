@@ -204,9 +204,7 @@ class ConditionalBlock(Block):
                 "same per-layer measurement signature (Equal Measurement Count "
                 f"assumption).  zero={sig_zero}  one={sig_one}."
             )
-        super().__init__(
-            block_if_zero.layer_sequence, block_if_zero.trimmed_spatial_borders
-        )
+        super().__init__(block_if_zero.layer_sequence, block_if_zero.trimmed_spatial_borders)
         self._block_if_zero = block_if_zero
         self._block_if_one = block_if_one
         self._condition = condition

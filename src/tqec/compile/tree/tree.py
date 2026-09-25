@@ -106,9 +106,7 @@ class LayerTree:
             dict(conditional_blocks) if conditional_blocks is not None else {}
         )
         self._conditional_abstract_observables: list[ConditionalAbstractObservable] = (
-            list(conditional_abstract_observables)
-            if conditional_abstract_observables
-            else []
+            list(conditional_abstract_observables) if conditional_abstract_observables else []
         )
 
     @property
