@@ -6,6 +6,8 @@ from typing import Final, TypeGuard
 
 from typing_extensions import override
 
+from tqec.circuit.qubit import GridQubit
+from tqec.circuit.qubit_map import QubitMap
 from tqec.circuit.schedule.circuit import ScheduledCircuit
 from tqec.compile.blocks.enums import SpatialBlockBorder
 from tqec.compile.blocks.layers.atomic.base import BaseLayer
@@ -348,8 +350,6 @@ class LayoutLayer(BaseLayer):
             condition_recs=condition_recs,
         )
         # Shift entries into the layer's qubit coordinate frame.
-        from tqec.circuit.qubit import GridQubit
-        from tqec.circuit.qubit_map import QubitMap
 
         mincube, _ = self.bounds
         eshape = self.element_shape.to_shape_2d(k)

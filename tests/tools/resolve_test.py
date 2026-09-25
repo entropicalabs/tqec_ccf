@@ -2,10 +2,28 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 import stim
 
 from tools.resolve import resolve_if_else
+from tqec.compile.blocks.block import ConditionalBlock
+from tqec.compile.compile import _resolve_conditional_cubes, compile_block_graph
+from tqec.compile.convention import FIXED_BULK_CONVENTION
+from tqec.compile.observables.abstract_observable import (
+    compile_correlation_surface_to_abstract_observable,
+)
+from tqec.computation.block_graph import BlockGraph
+from tqec.computation.correlation import (
+    ConditionalCorrelationSurface,
+    CorrelationSurface,
+    ZXEdge,
+    ZXNode,
+)
+from tqec.computation.cube import ConditionalLeafCubeKind
+from tqec.utils.enums import Basis
+from tqec.utils.position import Position3D
 
 
 def test_no_if_else_passthrough() -> None:
@@ -121,14 +139,6 @@ def test_resolve_matches_inplace_branch_compile() -> None:
     from-scratch rebuild, because the detector-annotation pass can pick
     different detector subsets for two topologically distinct graphs.
     """
-    from tqec.compile.compile import compile_block_graph
-    from tqec.compile.convention import FIXED_BULK_CONVENTION
-    from tqec.computation.block_graph import BlockGraph
-    from tqec.computation.correlation import CorrelationSurface, ZXEdge, ZXNode
-    from tqec.computation.cube import ConditionalLeafCubeKind
-    from tqec.utils.enums import Basis
-    from tqec.utils.position import Position3D
-
     p_cond = Position3D(0, 0, 1)
     p_init = Position3D(0, 0, 0)
     # Causal surface (z=0, below cond cube at z=1) — Cube.__post_init__
@@ -145,16 +155,12 @@ def test_resolve_matches_inplace_branch_compile() -> None:
     cg = compile_block_graph(g, FIXED_BULK_CONVENTION, observables=None)
     text = cg.generate_conditional_stim_text(k=1)
     # Extract the rec the resolver chose for branch-fixing below.
-    import re as _re
-
-    _m = _re.search(r"IF\(([^)]+)\)", text)
+    _m = re.search(r"IF\(([^)]+)\)", text)
     assert _m is not None
     _rec = int(_m.group(1).split("^")[0].strip().lstrip("rec[").rstrip("]"))
 
     # In-place: temporarily replace the ConditionalBlock with one of its
     # sub-blocks and call the normal generate_stim_circuit; restore after.
-    from tqec.compile.blocks.block import ConditionalBlock
-
     ((cond_pos, cblock),) = cg._conditional_blocks.items()
     assert isinstance(cblock, ConditionalBlock)
 
@@ -270,20 +276,6 @@ def test_resolve_matches_inplace_branch_compile_with_conditional_observable() ->
     semantically (same detector parity sets, same OBSERVABLE_INCLUDE measurement
     parity, same measurement count).
     """
-    from tqec.compile.blocks.block import ConditionalBlock
-    from tqec.compile.compile import compile_block_graph
-    from tqec.compile.convention import FIXED_BULK_CONVENTION
-    from tqec.computation.block_graph import BlockGraph
-    from tqec.computation.correlation import (
-        ConditionalCorrelationSurface,
-        CorrelationSurface,
-        ZXEdge,
-        ZXNode,
-    )
-    from tqec.computation.cube import ConditionalLeafCubeKind
-    from tqec.utils.enums import Basis
-    from tqec.utils.position import Position3D
-
     b1 = Position3D(0, 0, 0)
     c1 = Position3D(0, 0, 1)
     c2 = Position3D(1, 0, 1)
@@ -338,9 +330,7 @@ def test_resolve_matches_inplace_branch_compile_with_conditional_observable() ->
     text = cg.generate_conditional_stim_text(k=1)
     # Mock condition resolves to rec[-1] placeholder; map every IF guard rec
     # to the chosen outcome.
-    import re as _re
-
-    rec_ids = {int(m) for m in _re.findall(r"IF\(rec\[(-?\d+)\]", text)}
+    rec_ids = {int(m) for m in re.findall(r"IF\(rec\[(-?\d+)\]", text)}
 
     ((cond_pos, cblock),) = cg._conditional_blocks.items()
     assert isinstance(cblock, ConditionalBlock)
@@ -359,11 +349,6 @@ def test_resolve_matches_inplace_branch_compile_with_conditional_observable() ->
             # Re-compile the matching plain surface into an AbstractObservable
             # against a branch-resolved BlockGraph so we have a non-conditional
             # observable to annotate.
-            from tqec.compile.compile import _resolve_conditional_cubes  # noqa: PLC0415
-            from tqec.compile.observables.abstract_observable import (  # noqa: PLC0415
-                compile_correlation_surface_to_abstract_observable,
-            )
-
             resolved_bg = _resolve_conditional_cubes(g, branch)
             surface = branch_zero_surface if branch == 0 else branch_one_surface
             cg._observables = [

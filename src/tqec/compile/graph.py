@@ -62,6 +62,7 @@ from tqec.compile.blocks.positioning import (
     LayoutPosition2D,
     LayoutPosition3D,
 )
+from tqec.compile.conditional.condition_recs import resolve_condition_recs
 from tqec.compile.detectors.database import DetectorDatabase
 from tqec.compile.observables.abstract_observable import (
     AbstractObservable,
@@ -612,8 +613,6 @@ class TopologicalComputationGraph:
             cubes' branches emitted as ``IF``/``ELSE``-annotated blocks.
 
         """
-        from tqec.compile.conditional.condition_recs import resolve_condition_recs
-
         # Fall back to the plain (non-conditional) path only if there are
         # neither conditional cubes nor surface-anchored conditional
         # observables. Surface-anchored ConditionalCorrelationSurface gates

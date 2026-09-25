@@ -5,15 +5,23 @@ import pytest
 from tqec.compile.blocks.layers.atomic.layout import LayoutLayer
 from tqec.compile.blocks.layers.atomic.plaquettes import PlaquetteLayer
 from tqec.compile.blocks.positioning import LayoutPosition2D
+from tqec.compile.compile import compile_block_graph
+from tqec.compile.conditional.circuit import ConditionalCircuit, IfBlock
+from tqec.compile.convention import FIXED_BULK_CONVENTION
+from tqec.compile.tree.node import LayerNode, NodeWalker
+from tqec.computation.block_graph import BlockGraph
+from tqec.computation.correlation import CorrelationSurface, ZXEdge, ZXNode
+from tqec.computation.cube import ConditionalLeafCubeKind
 from tqec.plaquette.plaquette import Plaquettes
 from tqec.plaquette.rpng.rpng import RPNGDescription
 from tqec.plaquette.rpng.translators.default import DefaultRPNGTranslator
 from tqec.templates._testing import FixedTemplate
 from tqec.templates.layout import LayoutTemplate
 from tqec.templates.qubit import QubitTemplate
+from tqec.utils.enums import Basis
 from tqec.utils.exceptions import TQECError
 from tqec.utils.frozendefaultdict import FrozenDefaultDict
-from tqec.utils.position import BlockPosition2D
+from tqec.utils.position import BlockPosition2D, Position3D
 from tqec.utils.scale import LinearFunction, PhysicalQubitScalable2D
 
 LOGICAL_QUBIT_SIDE: Final = LinearFunction(4, 5)
@@ -173,16 +181,6 @@ def test_to_conditional_circuit_weaves_ifblock_for_divergent_plaquette() -> None
     compile pipeline for a single-cube conditional graph. Asserts at least one
     IfBlock surfaces with the requested condition_recs.
     """
-    from tqec.compile.compile import compile_block_graph
-    from tqec.compile.conditional.circuit import ConditionalCircuit, IfBlock
-    from tqec.compile.convention import FIXED_BULK_CONVENTION
-    from tqec.compile.tree.node import LayerNode, NodeWalker
-    from tqec.computation.block_graph import BlockGraph
-    from tqec.computation.correlation import CorrelationSurface, ZXEdge, ZXNode
-    from tqec.computation.cube import ConditionalLeafCubeKind
-    from tqec.utils.enums import Basis
-    from tqec.utils.position import Position3D
-
     p0, p1 = Position3D(0, 0, 0), Position3D(0, 0, 1)
     init_kind = ConditionalLeafCubeKind.XZX_XZZ.value[0]
     g = BlockGraph("ll-cond")

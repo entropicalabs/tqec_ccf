@@ -1,5 +1,6 @@
 """Defines :func:`~.compile.compile_block_graph`."""
 
+import warnings
 from typing import Final, Literal
 
 from tqec.compile.blocks.layers.atomic.base import BaseLayer
@@ -7,6 +8,7 @@ from tqec.compile.blocks.layers.atomic.plaquettes import PlaquetteLayer
 from tqec.compile.blocks.layers.composed.base import BaseComposedLayer
 from tqec.compile.blocks.layers.composed.repeated import RepeatedLayer
 from tqec.compile.blocks.layers.composed.sequenced import SequencedLayers
+from tqec.compile.blocks.positioning import LayoutPosition3D
 from tqec.compile.convention import FIXED_BULK_CONVENTION, Convention
 from tqec.compile.graph import TopologicalComputationGraph
 from tqec.compile.observables.abstract_observable import (
@@ -252,9 +254,7 @@ def compile_block_graph(
         include_temporal_hadamard_pipes = convention.name == "fixed_bulk"
         for surface in observables:
             if isinstance(surface, ConditionalCorrelationSurface):
-                import warnings as _warnings
-
-                _warnings.warn(
+                warnings.warn(
                     "ConditionalCorrelationSurface: skipping per-branch surface "
                     "validation against substituted BlockGraph. TODO: replace the "
                     "conditional cube with each branch's ZXCube kind and run "
@@ -315,8 +315,6 @@ def compile_block_graph(
     # 0.5 Pre-compile each conditional cube's condition surface into an
     # AbstractObservable. Doing it here (where the BlockGraph is in scope)
     # lets the resolver run at emission time without needing the BlockGraph.
-    from tqec.compile.blocks.positioning import LayoutPosition3D
-
     conditional_observables = {
         LayoutPosition3D.from_block_position(
             BlockPosition3D(cube.position.x, cube.position.y, cube.position.z)

@@ -1,3 +1,5 @@
+import stim
+
 from tqec.circuit.measurement_map import MeasurementRecordsMap
 from tqec.compile.blocks.layers.atomic.layout import LayoutLayer
 from tqec.compile.conditional.circuit import IfBlock
@@ -114,8 +116,6 @@ def annotate_conditional_observable(
             bindings' absolute anchor z into ``root.children`` offsets.
 
     """
-    import stim  # local: avoid module-level dep when unused
-
     from tqec.compile.conditional.condition_recs import (  # noqa: PLC0415
         _collect_pre_cond_entries,
         _compute_tail_shifts,
