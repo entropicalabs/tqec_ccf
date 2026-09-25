@@ -79,7 +79,9 @@ class ConditionalCircuit:
 
     @property
     def qubit_map(self) -> QubitMap | None:
-        """Local qubit map of the circuit, when known. Set by
+        """Local qubit map of the circuit, when known.
+
+        Set by
         :meth:`LayoutLayer.to_conditional_circuit`; ``None`` for hand-built
         instances. Tree-level assembly uses this to remap local qubit indices to
         the global qubit map.
@@ -121,7 +123,9 @@ class ConditionalCircuit:
         self._entries.append(if_block)
 
     def append_instruction_or_if(self, entry: CircuitEntry) -> None:
-        """Append either a plain :class:`stim.CircuitInstruction` or an
+        """Append a plain instruction or an :class:`IfBlock`.
+
+        Append either a plain :class:`stim.CircuitInstruction` or an
         :class:`IfBlock`, dispatching on type. Convenience for callers iterating
         a mixed sequence.
         """

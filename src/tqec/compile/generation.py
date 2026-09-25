@@ -159,7 +159,9 @@ def _build_scheduled_circuits_for_plaquette_array(
     increments: Shift2D,
     plaquette_to_block: Mapping[int, BlockPosition2D] | None,
 ) -> tuple[list[ScheduledCircuit], dict[GridQubit, BlockPosition2D] | None, set[str]]:
-    """Walk ``plaquette_array`` row-major and produce one mapped ``ScheduledCircuit``
+    """Produce one mapped ``ScheduledCircuit`` per non-zero plaquette entry.
+
+    Walk ``plaquette_array`` row-major and produce one mapped ``ScheduledCircuit``
     per non-zero entry. Returns the per-plaquette list together with the accumulated
     ``GridQubit -> BlockPosition2D`` ownership map (when requested) and the union of
     plaquette-declared mergeable instruction names.

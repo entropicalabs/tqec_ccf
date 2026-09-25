@@ -187,7 +187,9 @@ class LookbackStack:
         list[Plaquettes],
         MeasurementRecordsMap,
     ]:
-        """Get the last ``n`` QEC rounds with parallel branch-zero and branch-one
+        """Get the last ``n`` QEC rounds with parallel per-branch plaquette lists.
+
+        Get the last ``n`` QEC rounds with parallel branch-zero and branch-one
         plaquette lists. Rounds with no branch-one alternate fall back to the
         branch-zero entry (both branches share that round's content).
         """

@@ -128,7 +128,9 @@ class BlockGeometries:
             self.geometries[kind] = faces
 
     def _load_conditional_cube_geometries(self) -> None:
-        """Geometries for ConditionalLeafCubeKind. Faces whose basis differs between
+        """Geometries for a ConditionalLeafCubeKind.
+
+        Faces whose basis differs between
         the two branches are painted gray; matching faces keep the basis color.
         """
         width, height = 1.0, 1.0

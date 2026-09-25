@@ -65,7 +65,9 @@ def _get_ordered_leaves(root: LayerNode) -> list[LayerNode]:
 def _collect_pre_cond_entries(
     tree_root: LayerNode, k: int, cond_z: int
 ) -> tuple[list[_LeafEntry], list[list[LayerNode]]]:
-    """Walk subtrees at ``z < cond_z`` in time order, returning per-leaf
+    """Collect the leaf entries of the subtrees below ``cond_z``, in time order.
+
+    Walk subtrees at ``z < cond_z`` in time order, returning per-leaf
     entries plus the per-z list of ordered leaves (needed by the
     component dispatch).
     """
@@ -100,7 +102,9 @@ def _collect_pre_cond_entries(
 
 
 def _compute_tail_shifts(entries: list[_LeafEntry]) -> list[int]:
-    """Return ``shifts`` where ``shifts[i]`` is the count of measurements
+    """Return, per entry, the count of measurements between it and the IfBlock.
+
+    Return ``shifts`` where ``shifts[i]`` is the count of measurements
     that happen *after* ``entries[i]`` and up to the IfBlock emission
     point (which is the moment immediately after the last entry). A
     qubit measured at ``entries[i]`` with local offset ``-r`` translates
@@ -189,7 +193,9 @@ def resolve_surface_condition_recs(
     *,
     debug_label: str = "<surface-anchored condition>",
 ) -> list[int]:
-    """Resolve a surface-anchored condition (no associated conditional cube)
+    """Resolve a surface-anchored condition to ``rec`` offsets.
+
+    Resolve a surface-anchored condition (no associated conditional cube)
     to a list of ``rec`` offsets, computed at an IfBlock that lives on the
     leaf at z = ``anchor_z`` (exclusive — so the condition's measurements
     must live at z < anchor_z).
@@ -228,7 +234,9 @@ def resolve_condition_recs(
     conditional_observables: dict[LayoutPosition3D, AbstractObservable],
     observable_builder: ObservableBuilder,
 ) -> dict[LayoutPosition3D, list[int]]:
-    """Resolve each pre-compiled :class:`AbstractObservable` to a list of
+    """Resolve each abstract observable to ``rec`` offsets in the IfBlock frame.
+
+    Resolve each pre-compiled :class:`AbstractObservable` to a list of
     ``rec`` offsets in the IfBlock emission frame.
 
     For each ``(cond_pos, obs)`` pair:

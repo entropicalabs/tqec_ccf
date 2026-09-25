@@ -111,7 +111,9 @@ def test_end_to_end_conditional_pair(pair_name: str) -> None:
 
 
 def test_branch_zero_is_lowercase_branch_kind() -> None:
-    """The else-branch (rec=0) of XZX_XZZ should reflect the XZX cube --
+    """Emit the XZX cube's X-basis readout in the else-branch.
+
+    The else-branch (rec=0) of XZX_XZZ should reflect the XZX cube --
     final data-qubit meas all in X basis -> single MX run, no M instructions.
     """
     g = _graph("XZX_XZZ")

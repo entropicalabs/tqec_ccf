@@ -1,4 +1,6 @@
-"""Stage 3c: AnnotateCircuitOnLayerNode propagates ConditionalCircuit when
+"""Stage 3c: the circuit annotator propagates a ConditionalCircuit.
+
+Stage 3c: AnnotateCircuitOnLayerNode propagates ConditionalCircuit when
 ``condition_recs`` is supplied and the leaf carries a non-empty
 ``conditional_layers`` map.
 """

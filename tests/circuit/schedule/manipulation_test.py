@@ -190,7 +190,9 @@ def test_emit_moment_with_ceo_weaves_ifblock_for_divergent_branch() -> None:
 
 
 def test_emit_moment_with_ceo_does_not_batch_across_gate_signatures() -> None:
-    """Divergent slots with different per-branch (name, args) signatures used to
+    """Merge divergent same-condition slots into a single IfBlock.
+
+    Divergent slots with different per-branch (name, args) signatures used to
     stay in separate IfBlocks; the same-condition merge post-pass collapses them
     into a single IfBlock whose then/else bodies preserve per-slot ordering.
     """

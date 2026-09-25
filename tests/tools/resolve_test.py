@@ -131,7 +131,9 @@ def test_invalid_outcome_raises() -> None:
 
 
 def test_resolve_matches_inplace_branch_compile() -> None:
-    """End-to-end: resolving the IF/ELSE text must reproduce the per-branch
+    """Reproduce the per-branch compiled circuit by resolving the IF/ELSE text.
+
+    End-to-end: resolving the IF/ELSE text must reproduce the per-branch
     compiled stim circuit instruction-for-instruction.
 
     The reference is the in-place swap (replace the ConditionalBlock in the
@@ -222,7 +224,9 @@ def _assert_circuits_equivalent_modulo_detector_order(
 def _absolute_meas_index_sets(
     circuit: stim.Circuit,
 ) -> tuple[frozenset[frozenset[int]], dict[int, frozenset[int]], int]:
-    """Walk flattened circuit. Return (detector_set, obs_parity_by_index,
+    """Walk a flattened circuit and collect its absolute measurement indices.
+
+    Walk flattened circuit. Return (detector_set, obs_parity_by_index,
     num_measurements). Detector set = frozenset of per-detector frozensets of
     absolute measurement indices. obs_parity_by_index = XOR'd absolute indices
     per OBSERVABLE_INCLUDE index.
@@ -253,7 +257,9 @@ def _absolute_meas_index_sets(
 
 
 def _assert_circuits_semantically_equivalent(actual: stim.Circuit, expected: stim.Circuit) -> None:
-    """Compare two circuits via:
+    """Assert two circuits are semantically equivalent.
+
+    Compare two circuits via:
     - identical sequential measurement record (gate name + qubit per measurement),
     - identical detector parity-set collection (ignoring annotation order),
     - identical per-index observable measurement parity sets,
@@ -271,7 +277,9 @@ def _assert_circuits_semantically_equivalent(actual: stim.Circuit, expected: sti
 
 
 def test_resolve_matches_inplace_branch_compile_with_conditional_observable() -> None:
-    """End-to-end with ConditionalCorrelationSurface: resolving the IF/ELSE
+    """Reproduce a per-branch circuit with a conditional observable.
+
+    End-to-end with ConditionalCorrelationSurface: resolving the IF/ELSE
     text per branch must reproduce the per-branch in-place compiled circuit
     semantically (same detector parity sets, same OBSERVABLE_INCLUDE measurement
     parity, same measurement count).

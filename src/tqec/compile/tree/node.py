@@ -32,7 +32,9 @@ def _extend_conditional_circuit(target: ConditionalCircuit, source: ConditionalC
 
 
 def _append_stim_circuit_to_conditional(circuit: stim.Circuit, target: ConditionalCircuit) -> None:
-    """Flatten a ``stim.Circuit`` (no nested blocks) into plain entries on
+    """Flatten a ``stim.Circuit`` into plain entries on ``target``.
+
+    Flatten a ``stim.Circuit`` (no nested blocks) into plain entries on
     ``target``. ``stim.CircuitRepeatBlock`` is rendered as a flat repetition —
     ``ConditionalCircuit`` has no native REPEAT primitive at this stage.
     """
@@ -163,7 +165,9 @@ class LayerNode:
     def set_conditional_circuit_annotation(
         self, k: int, conditional_circuit: ConditionalCircuit
     ) -> None:
-        """Set the branch-aware circuit annotation. Only populated for leaves whose
+        """Set the branch-aware circuit annotation.
+
+        Only populated for leaves whose
         ``LayoutLayer`` carries a non-empty ``conditional_layers``; ``circuit`` (the
         branch-zero :class:`ScheduledCircuit`) is set independently and unchanged.
         """
@@ -256,7 +260,9 @@ class LayerNode:
         raise TQECError(f"Unknown layer type found: {type(self._layer).__name__}.")
 
     def has_conditional_descendant(self, k: int) -> bool:
-        """Return ``True`` iff this node (or any descendant) holds a
+        """Return ``True`` iff this subtree surfaces an :class:`IfBlock`.
+
+        Return ``True`` iff this node (or any descendant) holds a
         :class:`ConditionalCircuit` annotation that actually surfaces an
         :class:`IfBlock`. Stabiliser-round leaves that happen to be
         byte-identical across branches are reported as non-conditional so the

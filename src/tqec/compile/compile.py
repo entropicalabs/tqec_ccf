@@ -39,7 +39,9 @@ _DEFAULT_BLOCK_REPETITIONS: LinearFunction = LinearFunction(2, -1)
 def _resolve_conditional_cubes(
     bg: BlockGraph, branch_assignment: "dict[Position3D, int] | int"
 ) -> BlockGraph:
-    """Return a BlockGraph copy in which every conditional cube is replaced by
+    """Return a copy of the graph with every conditional cube fixed to one branch.
+
+    Return a BlockGraph copy in which every conditional cube is replaced by
     one of its branch kinds.
 
     ``branch_assignment`` may be:
@@ -73,7 +75,9 @@ def _resolve_conditional_cubes(
 def _classify_conditions(
     bg: BlockGraph, surface: "ConditionalCorrelationSurface"
 ) -> tuple[_ConditionBinding, ...]:
-    """Bind each entry of ``surface.conditions`` either to an existing
+    """Bind each condition of a surface to a conditional cube or an anchor position.
+
+    Bind each entry of ``surface.conditions`` either to an existing
     conditional cube (when ``Cube.condition == surface.conditions[i]``) or to
     a surface-anchored position derived from the condition's max measurement
     z.

@@ -177,7 +177,9 @@ def test_to_conditional_circuit_requires_conditional_layers(
 
 
 def test_to_conditional_circuit_weaves_ifblock_for_divergent_plaquette() -> None:
-    """Exercise to_conditional_circuit on a LayoutLayer produced by the real
+    """Weave an IfBlock into a layer produced by the real compile pipeline.
+
+    Exercise to_conditional_circuit on a LayoutLayer produced by the real
     compile pipeline for a single-cube conditional graph. Asserts at least one
     IfBlock surfaces with the requested condition_recs.
     """

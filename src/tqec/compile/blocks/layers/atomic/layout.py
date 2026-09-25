@@ -98,7 +98,9 @@ class LayoutLayer(BaseLayer):
 
     @property
     def conditional_layers(self) -> dict[LayoutPosition2D, BaseLayer]:
-        """Branch-``one`` alternate layers for positions that originated from
+        """Branch-``one`` alternate layers, keyed by position.
+
+        Branch-``one`` alternate layers for positions that originated from
         a :class:`~tqec.compile.blocks.block.ConditionalBlock` cube.
 
         Co-indexed with ``self.layers`` (which holds the zero branch).
@@ -219,7 +221,9 @@ class LayoutLayer(BaseLayer):
         return self._compute_template_and_plaquettes(self.layers)
 
     def _branch_one_layers(self) -> dict[LayoutPosition2D, BaseLayer]:
-        """Build branch-``one`` layer map. Falls back to ``self.layers`` at positions
+        """Build the branch-``one`` layer map.
+
+        Falls back to ``self.layers`` at positions
         with no conditional alternate.
         """
         return {pos: self._conditional_layers.get(pos, layer) for pos, layer in self.layers.items()}
@@ -373,8 +377,9 @@ class LayoutLayer(BaseLayer):
         return out
 
     def _reschedule_per_branch_measurements(self) -> None:
-        """Sync both branches' plaquette schedules to the same max-schedule,
-        the conditional analogue of :meth:`reschedule_measurements`.
+        """Sync both branches' plaquette schedules to the same max-schedule.
+
+        The conditional analogue of :meth:`reschedule_measurements`.
         """
         all_plaquettes = []
         for layer in self.layers.values():

@@ -313,7 +313,9 @@ def _emit_moment_with_ceo(
 
 
 def _merge_same_condition_ifblocks(entries: list[CircuitEntry]) -> list[CircuitEntry]:
-    """Collapse runs of same-condition :class:`IfBlock` entries within a single
+    """Merge runs of same-condition :class:`IfBlock` entries within a moment.
+
+    Collapse runs of same-condition :class:`IfBlock` entries within a single
     moment, hoisting intervening non-IfBlock entries into both branches.
 
     Safety relies on the CEO target-ordering rule, which sorts multi-qubit
@@ -559,7 +561,9 @@ def merge_scheduled_circuits_per_branch(
     mergeable_instructions: Iterable[str] = (),
     qubit_to_block: Mapping[GridQubit, BlockPosition2D],
 ) -> tuple[list[list[CircuitEntry]], Schedule]:
-    """Merge two parallel branches of :class:`.ScheduledCircuit` instances into a per-moment
+    """Merge two parallel branches of scheduled circuits into one entry stream.
+
+    Merge two parallel branches of :class:`.ScheduledCircuit` instances into a per-moment
     stream of :class:`CircuitEntry` values, weaving :class:`IfBlock` at CEO slots that
     differ between the branches.
 

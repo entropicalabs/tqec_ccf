@@ -148,7 +148,9 @@ def _build_multi_cube_graph() -> tuple[BlockGraph, ConditionalCorrelationSurface
 
 
 def test_multi_conditional_observable_compiles_when_all_branches_identical() -> None:
-    """All four resolutions identical → trivially XOR-decomposable, no IF
+    """Emit no IF block for an observable whose resolutions all agree.
+
+    All four resolutions identical → trivially XOR-decomposable, no IF
     blocks for the observable (shared baseline only).
     """
     g, cond_obs = _build_multi_cube_graph()
@@ -159,7 +161,9 @@ def test_multi_conditional_observable_compiles_when_all_branches_identical() -> 
 
 
 def test_multi_condition_flat_xor_emits_one_if_per_cube_no_else() -> None:
-    """Two conditional cubes, identical resolutions across the truth table:
+    """Emit one IF block per conditional cube for its observable flip-delta.
+
+    Two conditional cubes, identical resolutions across the truth table:
     flat-XOR decomposable trivially; emission produces one IF(no-ELSE) per
     cube wrapping OBSERVABLE_INCLUDE(0) for that cube's flip-delta.
     """
@@ -178,7 +182,9 @@ def test_multi_condition_flat_xor_emits_one_if_per_cube_no_else() -> None:
 
 
 def test_surface_anchored_conditional_observable_on_plain_block_graph() -> None:
-    """Plain ZXZ BlockGraph (no ConditionalLeafCubeKind anywhere) carrying a
+    """Compile a surface-anchored conditional observable on a plain graph.
+
+    Plain ZXZ BlockGraph (no ConditionalLeafCubeKind anywhere) carrying a
     surface-anchored ConditionalCorrelationSurface. The conditional observable
     gates only OBSERVABLE_INCLUDE lines; no per-branch circuit divergence.
     """
