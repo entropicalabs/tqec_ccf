@@ -399,8 +399,13 @@ def _two_y_inits_with_main_column(kind: str = "ZXZ") -> BlockGraph:
     return g
 
 
+# The k = 2 distance searches take 15-70 s each, over the suite's 30 s
+# pytest-timeout, so they run only with the slow tests and get their own limit.
+_K2_DISTANCE_SEARCH = pytest.param(2, marks=[pytest.mark.slow, pytest.mark.timeout(300)])
+
+
 @pytest.mark.parametrize("kind", _BELOW_KINDS)
-@pytest.mark.parametrize("k", [1, 2])
+@pytest.mark.parametrize("k", [1, _K2_DISTANCE_SEARCH])
 def test_two_y_inits_observable_preserves_distance(k: int, kind: str) -> None:
     """Two Y-basis initialisations close the same surface at full distance.
 
@@ -434,7 +439,7 @@ def test_two_y_inits_observable_preserves_distance(k: int, kind: str) -> None:
 
 
 @pytest.mark.parametrize("kind", _BELOW_KINDS)
-@pytest.mark.parametrize("k", [1, 2])
+@pytest.mark.parametrize("k", [1, _K2_DISTANCE_SEARCH])
 def test_two_y_caps_observable_preserves_distance(k: int, kind: str) -> None:
     """The Y seam does not collapse the code distance of the closed surface.
 
