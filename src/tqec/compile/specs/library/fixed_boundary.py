@@ -1,10 +1,11 @@
+import dataclasses
 import functools
 from collections.abc import Callable
 from typing import Protocol
 
 from typing_extensions import override
 
-from tqec.compile.blocks.block import Block
+from tqec.compile.blocks.block import Block, ConditionalBlock
 from tqec.compile.blocks.layers.atomic.base import BaseLayer
 from tqec.compile.blocks.layers.atomic.plaquettes import PlaquetteLayer
 from tqec.compile.blocks.layers.composed.base import BaseComposedLayer
@@ -13,7 +14,7 @@ from tqec.compile.blocks.layers.composed.sequenced import SequencedLayers
 from tqec.compile.specs.base import CubeBuilder, CubeSpec, PipeBuilder, PipeSpec
 from tqec.compile.specs.enums import SpatialArms
 from tqec.compile.specs.library.generators.fixed_boundary import FixedBoundaryConventionGenerator
-from tqec.computation.cube import Port, YHalfCube, ZXCube
+from tqec.computation.cube import ConditionalLeafCubeKind, LeafCubeKind, ZXCube
 from tqec.plaquette.compilation.base import IdentityPlaquetteCompiler, PlaquetteCompiler
 from tqec.plaquette.plaquette import Plaquettes
 from tqec.plaquette.rpng.translators.base import RPNGTranslator
@@ -166,10 +167,25 @@ class FixedBoundaryCubeBuilder(CubeBuilder):
     @functools.cache
     def _call_impl(self, spec: CubeSpec, block_temporal_height: LinearFunction) -> Block:
         kind = spec.kind
-        if isinstance(kind, Port):
+        if kind is LeafCubeKind.PORT:
             raise TQECError("Cannot build a block for a Port.")
-        elif isinstance(kind, YHalfCube):
+        elif kind is LeafCubeKind.Y_HALF_CUBE:
             raise NotImplementedError("Y cube is not implemented.")
+        elif isinstance(kind, ConditionalLeafCubeKind):
+            kind_zero, kind_one = kind.value
+            condition = spec.condition
+            if condition is None:
+                raise TQECError(
+                    "Conditional cube spec is missing its CorrelationSurface "
+                    "condition.  This information is set on Cube.condition by "
+                    "the user when a conditional cube is added to the block "
+                    "graph; check that CubeSpec.from_cube propagates it."
+                )
+            spec_zero = dataclasses.replace(spec, kind=kind_zero, condition=None)
+            spec_one = dataclasses.replace(spec, kind=kind_one, condition=None)
+            block_zero = self._call_impl(spec_zero, block_temporal_height)
+            block_one = self._call_impl(spec_one, block_temporal_height)
+            return ConditionalBlock(block_zero, block_one, condition)
         template, pgen = self._get_template_and_plaquettes_generator(spec)
         return _get_block(
             z_basis=kind.z,

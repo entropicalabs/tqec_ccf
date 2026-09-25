@@ -1,5 +1,5 @@
 from itertools import chain, repeat
-from typing import TypeGuard
+from typing import TypeGuard, cast
 
 import numpy
 
@@ -64,19 +64,30 @@ def contains_only_repeated_or_sequenced_layers(
 def merge_base_layers(
     layers: dict[LayoutPosition2D, BaseLayer],
     scalable_qubit_shape: PhysicalQubitScalable2D,
+    conditional_layers: dict[LayoutPosition2D, BaseLayer] | None = None,
 ) -> LayoutLayer:
-    """Merge several :class:`.BaseLayer` instances into one."""
-    return LayoutLayer(layers, scalable_qubit_shape)
+    """Merge several :class:`.BaseLayer` instances into one.
+
+    ``conditional_layers``, if provided, carries the parallel branch-``one``
+    slices for cube positions that came from a
+    :class:`~tqec.compile.blocks.block.ConditionalBlock`.  The zero-branch
+    slice lives in ``layers`` at the same position.
+    """
+    return LayoutLayer(layers, scalable_qubit_shape, conditional_layers=conditional_layers)
 
 
 def merge_composed_layers(
     layers: dict[LayoutPosition2D, BaseComposedLayer],
     scalable_qubit_shape: PhysicalQubitScalable2D,
+    conditional_layers: dict[LayoutPosition2D, BaseComposedLayer] | None = None,
 ) -> BaseComposedLayer:
     """Merge several :class:`.BaseComposedLayer` instances into one.
 
     The specific type returned will depend on the provided ``layers``.
 
+    ``conditional_layers``, if provided, carries the parallel branch-``one``
+    composed layers for cube positions that came from a
+    :class:`~tqec.compile.blocks.block.ConditionalBlock`.
     """
     # First, check that all the provided layers have the same scalable timesteps.
     different_timesteps = frozenset(layer.scalable_timesteps for layer in layers.values())
@@ -86,11 +97,25 @@ def merge_composed_layers(
             f"Found the following different lengths: {different_timesteps}."
         )
     if contains_only_repeated_layers(layers):
-        repeated_layers = layers
-        return merge_repeated_layers(repeated_layers, scalable_qubit_shape)
+        repeated_layers = cast(dict[LayoutPosition2D, RepeatedLayer], layers)
+        cond_repeated = (
+            cast(dict[LayoutPosition2D, RepeatedLayer], conditional_layers)
+            if conditional_layers
+            else None
+        )
+        return merge_repeated_layers(
+            repeated_layers, scalable_qubit_shape, conditional_layers=cond_repeated
+        )
     if contains_only_sequenced_layers(layers):
-        sequenced_layers = layers
-        return merge_sequenced_layers(sequenced_layers, scalable_qubit_shape)
+        sequenced_layers = cast(dict[LayoutPosition2D, SequencedLayers], layers)
+        cond_sequenced = (
+            cast(dict[LayoutPosition2D, SequencedLayers], conditional_layers)
+            if conditional_layers
+            else None
+        )
+        return merge_sequenced_layers(
+            sequenced_layers, scalable_qubit_shape, conditional_layers=cond_sequenced
+        )
     # We are left here with a mix of RepeatedLayer and SequencedLayers.
     # Check that, in case a new subclass of BaseComposedLayer has been introduced.
     if not contains_only_repeated_or_sequenced_layers(layers):
@@ -103,13 +128,21 @@ def merge_composed_layers(
             f"Found instances of {unknown_types_names} that are not yet "
             "implemented in _merge_composed_layers."
         )
-    mixed_layers = layers
-    return merge_repeated_and_sequenced_layers(mixed_layers, scalable_qubit_shape)
+    mixed_layers = cast(dict[LayoutPosition2D, SequencedLayers | RepeatedLayer], layers)
+    cond_mixed = (
+        cast(dict[LayoutPosition2D, SequencedLayers | RepeatedLayer], conditional_layers)
+        if conditional_layers
+        else None
+    )
+    return merge_repeated_and_sequenced_layers(
+        mixed_layers, scalable_qubit_shape, conditional_layers=cond_mixed
+    )
 
 
 def merge_repeated_layers(
     layers: dict[LayoutPosition2D, RepeatedLayer],
     scalable_qubit_shape: PhysicalQubitScalable2D,
+    conditional_layers: dict[LayoutPosition2D, RepeatedLayer] | None = None,
 ) -> RepeatedLayer:
     """Merge several RepeatedLayer that should be executed in parallel.
 
@@ -169,9 +202,31 @@ def merge_repeated_layers(
         # meaning that we only have PlaquetteLayer instances.
         inner_layers = {pos: layer.internal_layer for pos, layer in layers.items()}
         assert contains_only_base_layers(inner_layers)
+        cond_inner: dict[LayoutPosition2D, BaseLayer] | None = None
+        if conditional_layers:
+            cond_inner = {}
+            for pos, alt in conditional_layers.items():
+                alt_inner = alt.internal_layer
+                if not isinstance(alt_inner, BaseLayer):
+                    raise TQECError(
+                        f"ConditionalBlock at {pos}: branch-one RepeatedLayer's "
+                        "internal_layer is not a BaseLayer while the zero side is. "
+                        "Both branches must share structure (EMC)."
+                    )
+                cond_inner[pos] = alt_inner
         return RepeatedLayer(
-            merge_base_layers(inner_layers, scalable_qubit_shape),
+            merge_base_layers(
+                cast(dict[LayoutPosition2D, BaseLayer], inner_layers),
+                scalable_qubit_shape,
+                conditional_layers=cond_inner,
+            ),
             next(iter(different_repetitions)),
+        )
+    if conditional_layers:
+        raise NotImplementedError(
+            "merge_repeated_layers: per-branch propagation through the LCM "
+            "expansion path is not yet implemented. Conditional cubes with "
+            "non-trivial internal timesteps in their memory layer hit this."
         )
     # Else, we need the least common multiple
     num_internal_layers = numpy.lcm.reduce(considered_timesteps)
@@ -217,6 +272,7 @@ def merge_repeated_layers(
 def merge_sequenced_layers(
     layers: dict[LayoutPosition2D, SequencedLayers],
     scalable_qubit_shape: PhysicalQubitScalable2D,
+    conditional_layers: dict[LayoutPosition2D, SequencedLayers] | None = None,
 ) -> SequencedLayers:
     """Merge several SequencedLayers that should be executed in parallel.
 
@@ -250,13 +306,44 @@ def merge_sequenced_layers(
         layers_at_timestep = {
             pos: sequenced_layers.layer_sequence[i] for pos, sequenced_layers in layers.items()
         }
+        # Per-timestep slice of branch-one alternates (if any).
+        cond_at_timestep: dict[LayoutPosition2D, BaseLayer | BaseComposedLayer] = (
+            {pos: alt.layer_sequence[i] for pos, alt in conditional_layers.items()}
+            if conditional_layers
+            else {}
+        )
         if contains_only_base_layers(layers_at_timestep):
-            merged_layers.append(merge_base_layers(layers_at_timestep, scalable_qubit_shape))
+            cond_base_at_t: dict[LayoutPosition2D, BaseLayer] = {}
+            for pos, alt in cond_at_timestep.items():
+                if not isinstance(alt, BaseLayer):
+                    raise TQECError(
+                        f"ConditionalBlock at {pos}: branch-one SequencedLayers "
+                        f"slice at timestep {i} is not a BaseLayer while the "
+                        "zero side is. Both branches must share structure."
+                    )
+                cond_base_at_t[pos] = alt
+            merged_layers.append(
+                merge_base_layers(
+                    cast(dict[LayoutPosition2D, BaseLayer], layers_at_timestep),
+                    scalable_qubit_shape,
+                    conditional_layers=cond_base_at_t or None,
+                )
+            )
         elif contains_only_composed_layers(layers_at_timestep):
+            cond_composed_at_t: dict[LayoutPosition2D, BaseComposedLayer] = {}
+            for pos, alt in cond_at_timestep.items():
+                if not isinstance(alt, BaseComposedLayer):
+                    raise TQECError(
+                        f"ConditionalBlock at {pos}: branch-one SequencedLayers "
+                        f"slice at timestep {i} is not a BaseComposedLayer while "
+                        "the zero side is."
+                    )
+                cond_composed_at_t[pos] = alt
             merged_layers.append(
                 merge_composed_layers(
                     layers_at_timestep,
                     scalable_qubit_shape,
+                    conditional_layers=cond_composed_at_t or None,
                 )
             )
         else:
@@ -273,6 +360,7 @@ def merge_sequenced_layers(
 def merge_repeated_and_sequenced_layers(
     layers: dict[LayoutPosition2D, SequencedLayers | RepeatedLayer],
     scalable_qubit_shape: PhysicalQubitScalable2D,
+    conditional_layers: dict[LayoutPosition2D, SequencedLayers | RepeatedLayer] | None = None,
 ) -> SequencedLayers:
     """Merge composed layers with both RepeatedLayer and SequencedLayers instances.
 
@@ -308,7 +396,14 @@ def merge_repeated_and_sequenced_layers(
             f"{sequenced_schedules}."
         )
     schedule = next(iter(sequenced_schedules))
+    cond_as_sequenced: dict[LayoutPosition2D, SequencedLayers] | None = None
+    if conditional_layers:
+        cond_as_sequenced = {
+            pos: alt.to_sequenced_layer_with_schedule(schedule)
+            for pos, alt in conditional_layers.items()
+        }
     return merge_sequenced_layers(
         {pos: layer.to_sequenced_layer_with_schedule(schedule) for pos, layer in layers.items()},
         scalable_qubit_shape,
+        conditional_layers=cond_as_sequenced,
     )

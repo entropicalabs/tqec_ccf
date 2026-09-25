@@ -4,7 +4,7 @@ import warnings
 from collections.abc import Mapping, Sequence
 from multiprocessing import cpu_count
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import stim
 from typing_extensions import override
@@ -12,13 +12,24 @@ from typing_extensions import override
 from tqec.circuit.qubit import GridQubit
 from tqec.circuit.qubit_map import QubitMap
 from tqec.compile.blocks.layers.composed.sequenced import SequencedLayers
+from tqec.compile.conditional.circuit import ConditionalCircuit
+
+if TYPE_CHECKING:
+    from tqec.compile.blocks.block import ConditionalBlock
+    from tqec.compile.blocks.positioning import LayoutPosition3D
 from tqec.compile.detectors.database import CURRENT_DATABASE_VERSION, DetectorDatabase
-from tqec.compile.observables.abstract_observable import AbstractObservable
+from tqec.compile.observables.abstract_observable import (
+    AbstractObservable,
+    ConditionalAbstractObservable,
+)
 from tqec.compile.observables.builder import ObservableBuilder
 from tqec.compile.tree.annotations import LayerTreeAnnotations, Polygon
 from tqec.compile.tree.annotators.circuit import AnnotateCircuitOnLayerNode
 from tqec.compile.tree.annotators.detectors import AnnotateDetectorsOnLayerNode
-from tqec.compile.tree.annotators.observables import annotate_observable
+from tqec.compile.tree.annotators.observables import (
+    annotate_conditional_observable,
+    annotate_observable,
+)
 from tqec.compile.tree.annotators.polygons import AnnotatePolygonOnLayerNode
 from tqec.compile.tree.node import LayerNode, NodeWalker
 from tqec.post_processing.shift import shift_to_only_positive
@@ -60,6 +71,8 @@ class LayerTree:
         observable_builder: ObservableBuilder,
         abstract_observables: list[AbstractObservable] | None = None,
         annotations: Mapping[int, LayerTreeAnnotations] | None = None,
+        conditional_blocks: Mapping["LayoutPosition3D", "ConditionalBlock"] | None = None,
+        conditional_abstract_observables: list[ConditionalAbstractObservable] | None = None,
     ):
         """Represent a computation as a tree.
 
@@ -78,12 +91,30 @@ class LayerTree:
                 of ``k``, the scaling factor, to annotations computed for that
                 value of ``k``.
             observable_builder: the style of the surface code patch.
+            conditional_blocks: mapping from each ``LayoutPosition3D`` that hosts
+                a ``ConditionalBlock`` to the block itself.  Used by the
+                IF/ELSE emission stages to recover both branches and the
+                ``CorrelationSurface`` condition associated with each
+                conditional cube.  Optional; defaults to an empty mapping.
 
         """
         self._root = LayerNode(root)
         self._abstract_observables = abstract_observables or []
         self._annotations = dict(annotations) if annotations is not None else {}
         self._observable_builder = observable_builder
+        self._conditional_blocks: dict["LayoutPosition3D", "ConditionalBlock"] = (
+            dict(conditional_blocks) if conditional_blocks is not None else {}
+        )
+        self._conditional_abstract_observables: list[ConditionalAbstractObservable] = (
+            list(conditional_abstract_observables)
+            if conditional_abstract_observables
+            else []
+        )
+
+    @property
+    def conditional_blocks(self) -> Mapping["LayoutPosition3D", "ConditionalBlock"]:
+        """Return the conditional-cube blocks indexed by ``LayoutPosition3D``."""
+        return self._conditional_blocks
 
     def to_dict(self) -> dict[str, Any]:
         """Return a dictionary representation of ``self``."""
@@ -93,9 +124,20 @@ class LayerTree:
             "annotations": {k: annotation.to_dict() for k, annotation in self._annotations.items()},
         }
 
-    def _annotate_circuits(self, k: int, reschedule_measurements: bool = True) -> None:
+    def _annotate_circuits(
+        self,
+        k: int,
+        reschedule_measurements: bool = True,
+        condition_recs: dict[int, list[int]] | None = None,
+        min_z: int = 0,
+    ) -> None:
         self._root.walk(
-            AnnotateCircuitOnLayerNode(k, reschedule_measurements=reschedule_measurements)
+            AnnotateCircuitOnLayerNode(
+                k,
+                reschedule_measurements=reschedule_measurements,
+                condition_recs=condition_recs,
+                min_z=min_z,
+            )
         )
 
     def _annotate_qubit_map(self, k: int) -> None:
@@ -106,9 +148,32 @@ class LayerTree:
         self._root.walk(qubit_lister)
         return QubitMap.from_qubits(sorted(qubit_lister.seen_qubits))
 
-    def _annotate_observables(self, k: int) -> None:
+    def _annotate_observables(
+        self,
+        k: int,
+        condition_recs: dict[int, list[int]] | None = None,
+        min_z: int = 0,
+    ) -> None:
         for obs_idx, observable in enumerate(self._abstract_observables):
             annotate_observable(self._root, k, observable, obs_idx, self._observable_builder)
+        if not self._conditional_abstract_observables:
+            return
+        if condition_recs is None:
+            # Non-conditional emission path: ConditionalCorrelationSurface
+            # has no IF/ELSE to live in, so its per-branch emission is silently
+            # dropped here. generate_conditional_stim_text supplies condition_recs.
+            return
+        next_idx = len(self._abstract_observables)
+        for i, cond_obs in enumerate(self._conditional_abstract_observables):
+            annotate_conditional_observable(
+                self._root,
+                k,
+                cond_obs,
+                next_idx + i,
+                self._observable_builder,
+                condition_recs,
+                min_z,
+            )
 
     def _annotate_detectors(
         self,
@@ -118,6 +183,8 @@ class LayerTree:
         database_path: Path | None = DEFAULT_DETECTOR_DATABASE_PATH,
         lookback: int = 2,
         parallel_process_count: int = 1,
+        condition_recs: dict[int, list[int]] | None = None,
+        min_z: int = 0,
     ) -> None:
         if manhattan_radius <= 0:
             return  # pragma: no cover
@@ -128,6 +195,8 @@ class LayerTree:
                 detector_database,
                 lookback,
                 parallel_process_count,
+                condition_recs=condition_recs,
+                min_z=min_z,
             )
         )
         # The database will have been updated inside the above function, and here at
@@ -229,13 +298,20 @@ class LayerTree:
         lookback: int = 2,
         parallel_process_count: int = 1,
         reschedule_measurements: bool = True,
+        condition_recs: dict[int, list[int]] | None = None,
+        min_z: int = 0,
     ) -> None:
         """Annotate the tree with circuits, qubit maps, detectors and observables."""
         # If already annotated, no need to re-annotate.
         if k in self._annotations:
             return  # pragma: no cover
         # Else, perform all the needed computations.
-        self._annotate_circuits(k, reschedule_measurements=reschedule_measurements)
+        self._annotate_circuits(
+            k,
+            reschedule_measurements=reschedule_measurements,
+            condition_recs=condition_recs,
+            min_z=min_z,
+        )
         self._annotate_qubit_map(k)
         # This method will also update the detector_database and save it to disk at database_path.
         self._annotate_detectors(
@@ -245,8 +321,10 @@ class LayerTree:
             database_path,
             lookback,
             parallel_process_count,
+            condition_recs=condition_recs,
+            min_z=min_z,
         )
-        self._annotate_observables(k)
+        self._annotate_observables(k, condition_recs=condition_recs, min_z=min_z)
 
     def generate_circuit(
         self,
@@ -355,6 +433,115 @@ class LayerTree:
             circuit += annotations.qubit_map.to_circuit()
         circuit += self._root.generate_circuit(k, annotations.qubit_map)
         return circuit
+
+    def generate_conditional_circuit(
+        self,
+        k: int,
+        condition_recs: dict[int, list[int]],
+        min_z: int = 0,
+        include_qubit_coords: bool = True,
+        manhattan_radius: int = 2,
+        detector_database: DetectorDatabase | None = None,
+        database_path: str | Path | None = DEFAULT_DETECTOR_DATABASE_PATH,
+        lookback: int = 2,
+        reschedule_measurements: bool = True,
+    ) -> ConditionalCircuit:
+        """Generate a single :class:`ConditionalCircuit` from this tree.
+
+        Drives the same annotation pipeline as :meth:`generate_circuit` but
+        threads ``condition_recs`` so every conditional leaf gets a per-branch
+        annotation, then assembles the tree via
+        :meth:`LayerNode.generate_conditional_circuit`.
+
+        Args:
+            k: scaling factor.
+            condition_recs: mapping from each conditional cube's z-layer
+                (``LayoutPosition3D.z``) to the list of negative ``stim``
+                ``rec`` offsets whose XOR selects its true branch. At most
+                one conditional cube per z-layer is supported; the caller
+                (:meth:`TopologicalComputationGraph.generate_conditional_stim_text`)
+                enforces that and re-keys the resolver's
+                ``dict[LayoutPosition3D, list[int]]`` to ``dict[int, list[int]]``.
+            min_z: minimum z-coordinate present in the underlying
+                :class:`BlockGraph`. Used by the per-leaf annotators to
+                map their walk position back to a z-layer key.
+            include_qubit_coords: whether to prepend ``QUBIT_COORDS``
+                annotations.
+            manhattan_radius, detector_database, database_path,
+            lookback,
+            reschedule_measurements: as on :meth:`generate_circuit`.
+
+        Returns:
+            A :class:`ConditionalCircuit` representing the full computation.
+
+        """
+        # Reuse the database-resolution prelude from generate_circuit by
+        # delegating through _generate_annotations + condition_recs.
+        db_path_input = DEFAULT_DETECTOR_DATABASE_PATH
+        if database_path is not None or detector_database is not None:
+            if isinstance(database_path, str):
+                db_path_input = Path(database_path)
+            else:
+                db_path_input = database_path
+            user_defined = (
+                detector_database is not None or database_path != DEFAULT_DETECTOR_DATABASE_PATH
+            )
+            if detector_database is None:
+                if db_path_input is not None and db_path_input.exists():
+                    detector_database = DetectorDatabase.from_file(db_path_input)
+                else:
+                    detector_database = DetectorDatabase()
+            loaded_version = detector_database.version
+            current_version = CURRENT_DATABASE_VERSION
+            if loaded_version != current_version:
+                if user_defined:
+                    raise TQECError(
+                        f"The detector database on disk you have specified is incompatible with"
+                        f" the version in the TQEC code you are running. The version of the disk"
+                        f" database is {loaded_version}, while the version in the TQEC code is "
+                        f"{current_version}."
+                    )
+                else:
+                    warnings.warn(
+                        f"The default detector database that you have saved on your system is out "
+                        f"of date (version {loaded_version}). The version in the TQEC code you are "
+                        f"running is newer (version {current_version}). The database will be "
+                        "regenerated.",
+                        TQECWarning,
+                    )
+                    detector_database = DetectorDatabase()
+        else:
+            detector_database = None
+
+        parallel_process_count = (
+            cpu_count() // 2 + 1
+            if (detector_database is None or len(detector_database) == 0)
+            else 1
+        )
+
+        self._generate_annotations(
+            k,
+            manhattan_radius,
+            detector_database=detector_database,
+            database_path=db_path_input,
+            lookback=lookback,
+            parallel_process_count=parallel_process_count,
+            reschedule_measurements=reschedule_measurements,
+            condition_recs=condition_recs,
+            min_z=min_z,
+        )
+        annotations = self._get_annotation(k)
+        assert annotations.qubit_map is not None
+
+        result = ConditionalCircuit()
+        if include_qubit_coords:
+            for inst in annotations.qubit_map.to_circuit():
+                assert isinstance(inst, stim.CircuitInstruction)
+                result.append_instruction(inst)
+        body = self._root.generate_conditional_circuit(k, annotations.qubit_map)
+        for entry in body.entries:
+            result.append_instruction_or_if(entry)
+        return result
 
     def _get_annotation(self, k: int) -> LayerTreeAnnotations:
         return self._annotations.setdefault(k, LayerTreeAnnotations())

@@ -2,14 +2,16 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from functools import cached_property
-from typing import Final
+from typing import TYPE_CHECKING, Final, cast
 
 from typing_extensions import override
 
 from tqec.compile.blocks.enums import SpatialBlockBorder, TemporalBlockBorder
 from tqec.compile.blocks.layers.atomic.base import BaseLayer
 from tqec.compile.blocks.layers.atomic.layout import LayoutLayer
+from tqec.compile.blocks.layers.atomic.plaquettes import PlaquetteLayer
 from tqec.compile.blocks.layers.composed.base import BaseComposedLayer
+from tqec.compile.blocks.layers.composed.repeated import RepeatedLayer
 from tqec.compile.blocks.layers.composed.sequenced import SequencedLayers
 from tqec.compile.blocks.layers.merge import (
     contains_only_base_layers,
@@ -20,6 +22,13 @@ from tqec.compile.blocks.layers.merge import (
 from tqec.compile.blocks.positioning import LayoutPosition2D
 from tqec.utils.exceptions import TQECError
 from tqec.utils.scale import LinearFunction, PhysicalQubitScalable2D
+
+if TYPE_CHECKING:
+    from tqec.computation.correlation import CorrelationSurface
+
+_MEASUREMENT_INSTR_NAMES: Final[frozenset[str]] = frozenset(
+    {"M", "MX", "MY", "MZ", "MR", "MRX", "MRY", "MRZ"}
+)
 
 
 class Block(SequencedLayers):
@@ -125,6 +134,123 @@ class Block(SequencedLayers):
         raise NotImplementedError(f"Cannot hash efficiently a {type(self).__name__}.")
 
 
+def _plaquette_layer_meas_signature(layer: PlaquetteLayer) -> dict[int, int]:
+    """Per-plaquette-index measurement-instruction count for a plaquette layer."""
+    return {
+        idx: sum(
+            len(inst.target_groups())
+            for moment in plaquette.circuit.moments
+            for inst in moment.instructions
+            if inst.name in _MEASUREMENT_INSTR_NAMES
+        )
+        for idx, plaquette in layer.plaquettes.collection.items()
+    }
+
+
+def _block_meas_signature(block: Block) -> list[dict[int, int]]:
+    """Per-layer plaquette-meas signature for a block.
+
+    Recurses into :class:`RepeatedLayer` once; each entry in the returned list
+    corresponds to one element in ``block.layer_sequence``.  Two blocks whose
+    signatures match produce structurally identical measurement schedules
+    under Canonical Emission Order.
+    """
+    sig: list[dict[int, int]] = []
+    for layer in block.layer_sequence:
+        if isinstance(layer, PlaquetteLayer):
+            sig.append(_plaquette_layer_meas_signature(layer))
+        elif isinstance(layer, RepeatedLayer):
+            inner = layer.internal_layer
+            if isinstance(inner, PlaquetteLayer):
+                sig.append(_plaquette_layer_meas_signature(inner))
+            else:
+                sig.append({})
+        else:
+            sig.append({})
+    return sig
+
+
+class ConditionalBlock(Block):
+    """Block whose execution depends on a runtime measurement outcome.
+
+    Carries two sibling :class:`Block` instances --- one per branch of the
+    enclosing :class:`~tqec.computation.cube.ConditionalLeafCubeKind`.
+    Downstream emission code is expected to special-case this type to produce
+    ``IF/ELSE`` wrapped Stim output.  Until that wiring lands, the inherited
+    :class:`Block` API exposes the false-branch layer sequence so vanilla
+    emission still produces a one-branch circuit.
+
+    Construction enforces the Equal Measurement Count assumption structurally:
+    both branches must share the same plaquette-meas signature per layer.
+    """
+
+    def __init__(
+        self,
+        block_if_zero: Block,
+        block_if_one: Block,
+        condition: CorrelationSurface,
+    ) -> None:
+        if len(block_if_zero.layer_sequence) != len(block_if_one.layer_sequence):
+            raise TQECError(
+                f"{type(self).__name__} requires both branches to have the "
+                f"same number of layers.  Got {len(block_if_zero.layer_sequence)} "
+                f"vs {len(block_if_one.layer_sequence)}."
+            )
+        sig_zero = _block_meas_signature(block_if_zero)
+        sig_one = _block_meas_signature(block_if_one)
+        if sig_zero != sig_one:
+            raise TQECError(
+                f"{type(self).__name__} requires both branches to share the "
+                "same per-layer measurement signature (Equal Measurement Count "
+                f"assumption).  zero={sig_zero}  one={sig_one}."
+            )
+        super().__init__(
+            block_if_zero.layer_sequence, block_if_zero.trimmed_spatial_borders
+        )
+        self._block_if_zero = block_if_zero
+        self._block_if_one = block_if_one
+        self._condition = condition
+
+    @property
+    def block_if_zero(self) -> Block:
+        """The Block executed when the condition evaluates to zero."""
+        return self._block_if_zero
+
+    @property
+    def block_if_one(self) -> Block:
+        """The Block executed when the condition evaluates to one."""
+        return self._block_if_one
+
+    @property
+    def condition(self) -> CorrelationSurface:
+        """Correlation surface whose Z outcome selects the active branch."""
+        return self._condition
+
+    @override
+    def with_spatial_borders_trimmed(
+        self, borders: Iterable[SpatialBlockBorder]
+    ) -> ConditionalBlock:
+        borders = tuple(borders)
+        return ConditionalBlock(
+            self._block_if_zero.with_spatial_borders_trimmed(borders),
+            self._block_if_one.with_spatial_borders_trimmed(borders),
+            self._condition,
+        )
+
+    @override
+    def with_temporal_borders_replaced(
+        self,
+        border_replacements: Mapping[TemporalBlockBorder, BaseLayer | None],
+    ) -> ConditionalBlock | None:
+        if not border_replacements:
+            return self
+        new_zero = self._block_if_zero.with_temporal_borders_replaced(border_replacements)
+        new_one = self._block_if_one.with_temporal_borders_replaced(border_replacements)
+        if new_zero is None or new_one is None:
+            return None
+        return ConditionalBlock(new_zero, new_one, self._condition)
+
+
 def merge_parallel_block_layers(
     blocks_in_parallel: Mapping[LayoutPosition2D, Block],
     scalable_qubit_shape: PhysicalQubitScalable2D,
@@ -167,10 +293,48 @@ def merge_parallel_block_layers(
     merged_layers: list[LayoutLayer | BaseComposedLayer] = []
     for i in range(len(schedule)):
         layers = {pos: block.layer_sequence[i] for pos, block in blocks_in_parallel.items()}
+        # Branch-``one`` alternates for ConditionalBlock cubes at this
+        # timestep. ``layers[pos]`` already holds the zero-branch slice
+        # via Block.__init__'s alias.
+        conditional_one_layers: dict[LayoutPosition2D, BaseLayer | BaseComposedLayer] = {
+            pos: block.block_if_one.layer_sequence[i]
+            for pos, block in blocks_in_parallel.items()
+            if isinstance(block, ConditionalBlock)
+        }
         if contains_only_base_layers(layers):
-            merged_layers.append(merge_base_layers(layers, scalable_qubit_shape))
+            cond_base: dict[LayoutPosition2D, BaseLayer] = {}
+            for pos, alt in conditional_one_layers.items():
+                if not isinstance(alt, BaseLayer):
+                    raise TQECError(
+                        f"ConditionalBlock at {pos}: branch-one layer at "
+                        f"timestep {i} is not a BaseLayer while the zero "
+                        "side is. Both branches must share structure."
+                    )
+                cond_base[pos] = alt
+            merged_layers.append(
+                merge_base_layers(
+                    cast(dict[LayoutPosition2D, BaseLayer], layers),
+                    scalable_qubit_shape,
+                    conditional_layers=cond_base or None,
+                )
+            )
         elif contains_only_composed_layers(layers):
-            merged_layers.append(merge_composed_layers(layers, scalable_qubit_shape))
+            cond_composed: dict[LayoutPosition2D, BaseComposedLayer] = {}
+            for pos, alt in conditional_one_layers.items():
+                if not isinstance(alt, BaseComposedLayer):
+                    raise TQECError(
+                        f"ConditionalBlock at {pos}: branch-one layer at "
+                        f"timestep {i} is not a BaseComposedLayer while "
+                        "the zero side is."
+                    )
+                cond_composed[pos] = alt
+            merged_layers.append(
+                merge_composed_layers(
+                    cast(dict[LayoutPosition2D, BaseComposedLayer], layers),
+                    scalable_qubit_shape,
+                    conditional_layers=cond_composed or None,
+                )
+            )
         else:
             raise RuntimeError(
                 f"Found a mix of {BaseLayer.__name__} instances and "

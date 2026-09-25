@@ -63,6 +63,7 @@ class TQECColor(Enum):
     H = "H"
     X_CORRELATION = "X_CORRELATION"
     Z_CORRELATION = "Z_CORRELATION"
+    CONDITIONAL = "CONDITIONAL"
 
     @property
     def rgba(self) -> RGBA:
@@ -77,6 +78,8 @@ class TQECColor(Enum):
             return RGBA(255, 255, 101, 1.0)
         if self == TQECColor.X_CORRELATION:
             return RGBA(255, 0, 0, 0.8)
+        if self == TQECColor.CONDITIONAL:
+            return RGBA(128, 128, 128, 1.0)
         else:  # if self == TQECColor.Z_CORRELATION:
             return RGBA(0, 0, 255, 0.8)
 
