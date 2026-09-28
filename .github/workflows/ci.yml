@@ -4,9 +4,9 @@ on:
   push:
     branches:
       - main
+  # Every pull request, whatever its base: the fork's PRs are stacked, so most
+  # of them do not target main.
   pull_request:
-    branches:
-      - main
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
