@@ -192,7 +192,10 @@ def compile_block_graph(
             determined from the block graph. If a list of correlation surfaces
             is provided, only those surfaces will be compiled into observables
             and included in the compiled circuit. If set to ``None``, no
-            observables will be included in the compiled circuit.
+            observables will be included in the compiled circuit. Entries may be
+            :class:`~tqec.computation.correlation.ConditionalCorrelationSurface`;
+            those are only emitted by
+            :meth:`~tqec.compile.graph.TopologicalComputationGraph.generate_conditional_stim_text`.
         block_temporal_height: the number of rounds of stabilizer measurements
             (ignoring one layer for initialization and another for final measurement).
             Defaults to `2k-1`.
@@ -259,10 +262,9 @@ def compile_block_graph(
         for surface in observables:
             if isinstance(surface, ConditionalCorrelationSurface):
                 warnings.warn(
-                    "ConditionalCorrelationSurface: skipping per-branch surface "
-                    "validation against substituted BlockGraph. TODO: replace the "
-                    "conditional cube with each branch's ZXCube kind and run "
-                    "_check_correlation_surface_validity on each branch.",
+                    "ConditionalCorrelationSurface: the per-branch resolutions "
+                    "are not checked to be valid correlation surfaces of the "
+                    "graph with each branch substituted in.",
                     stacklevel=2,
                 )
                 # Bind each surface condition either to an existing
