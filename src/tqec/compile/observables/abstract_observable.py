@@ -136,11 +136,7 @@ class AbstractObservable:
 
 @dataclass(frozen=True)
 class _ConditionBinding:
-    """How one condition surface anchors into the BlockGraph.
-
-    Mirrors ``tqec.compile.compile._ConditionBinding`` (kept here to avoid an
-    import cycle).
-    """
+    """How one condition surface anchors into the BlockGraph."""
 
     surface_index: int
     anchor_z: int
@@ -162,7 +158,8 @@ class ConditionalAbstractObservable:
     (binding's ``cube_position`` is set) or directly to a past measurement
     string (surface-anchored — no cube required). Only XOR-decomposable
     observables are supported; non-decomposable inputs (AND-structured) are
-    rejected at emission time.
+    rejected when the circuit is generated, by
+    :meth:`~tqec.compile.graph.TopologicalComputationGraph.generate_conditional_stim_text`.
 
     Attributes:
         branches: maps each outcome tuple in ``{False, True} ** N`` to the
@@ -171,11 +168,12 @@ class ConditionalAbstractObservable:
             ``branches``. ``condition_bindings[i]`` carries the i-th
             condition's IfBlock anchor z and an optional cube position.
         resolved_conditions: pre-compiled :class:`AbstractObservable` per
-            condition, used by the resolver to derive ``rec[-k]`` offsets.
-        condition_recs: filled in by the conditional-emission pipeline
-            (`TopologicalComputationGraph.generate_conditional_stim_text`)
-            after `resolve_condition_recs`. ``condition_recs[i]`` is the
-            rec-offset list gating the i-th condition's IfBlock.
+            condition, which the resolver lowers to measurements.
+        condition_recs: filled in by
+            :meth:`~tqec.compile.graph.TopologicalComputationGraph.generate_conditional_stim_text`.
+            ``condition_recs[i]`` holds the absolute indices of the measurements
+            gating the i-th condition's IfBlock (see
+            :class:`~tqec.compile.conditional.circuit.IfBlock`).
 
     """
 
@@ -263,8 +261,11 @@ def compile_correlation_surface_to_abstract_observable(
     """
     # 0. Handle single node edge case
     if correlation_surface.is_single_node:
-        # single stability experiment
-        cube = block_graph.cubes[0]
+        # A single node: a memory or stability experiment on one cube, or the
+        # condition of a conditional cube, which may name any cube of a larger
+        # graph -- so take the node's own cube, not the graph's first one.
+        (position,) = correlation_surface.positions
+        cube = block_graph[position]
         cube_with_arms = CubeWithArms(cube)
         if cube.is_spatial:
             return AbstractObservable(bottom_stabilizer_cubes=frozenset([cube_with_arms]))
