@@ -89,20 +89,22 @@ def _parse(lines: list[str], pos: int, depth_indent: str | None) -> tuple[list[_
 
 def _expand(
     entries: list[_Entry],
-    get_outcome: Callable[[_IfNode, int], int],
+    get_outcome: Callable[[_IfNode, int, int], int],
     sink: list[str],
     counter: list[int],
 ) -> None:
     """Walk the parsed AST, expanding each IF/ELSE via ``get_outcome``.
 
-    ``get_outcome(node, index)`` returns 0/1 for the ``index``-th IF block
-    encountered in program (pre-order) order.
+    ``get_outcome(node, index, measured)`` returns 0/1 for the ``index``-th IF
+    block encountered in program (pre-order) order, ``measured`` measurements
+    into the resolved circuit. ``counter`` holds ``[blocks seen, measurements
+    emitted]``.
     """
     for entry in entries:
         if isinstance(entry, _IfNode):
             index = counter[0]
             counter[0] += 1
-            outcome = get_outcome(entry, index)
+            outcome = get_outcome(entry, index, counter[1])
             if outcome not in (0, 1):
                 raise ValueError(
                     f"Outcome must be 0 or 1; got {outcome} for "
@@ -115,6 +117,7 @@ def _expand(
             # resulting text parses cleanly.  Internal Stim leading-space is
             # not semantically meaningful.
             sink.append(entry.lstrip())
+            counter[1] += stim.Circuit(entry.strip()).num_measurements
 
 
 def resolve_if_else(text: str, conditions: dict[int, int]) -> stim.Circuit:
@@ -138,7 +141,7 @@ def resolve_if_else(text: str, conditions: dict[int, int]) -> stim.Circuit:
 
     """
 
-    def get_outcome(node: _IfNode, index: int) -> int:
+    def get_outcome(node: _IfNode, index: int, measured: int) -> int:
         outcome = conditions.get(node.condition_rec)
         if outcome is None:
             raise ValueError(f"No outcome supplied for IF(rec[{node.condition_rec}]).")
@@ -147,7 +150,7 @@ def resolve_if_else(text: str, conditions: dict[int, int]) -> stim.Circuit:
     raw_lines = text.splitlines()
     entries, _ = _parse(raw_lines, 0, depth_indent=None)
     selected: list[str] = []
-    _expand(entries, get_outcome, selected, [0])
+    _expand(entries, get_outcome, selected, [0, 0])
     return stim.Circuit("\n".join(selected))
 
 
@@ -170,7 +173,7 @@ def resolve_if_else_by_order(text: str, outcomes: Sequence[int]) -> stim.Circuit
 
     """
 
-    def get_outcome(node: _IfNode, index: int) -> int:
+    def get_outcome(node: _IfNode, index: int, measured: int) -> int:
         if index >= len(outcomes):
             raise ValueError(
                 f"outcomes has {len(outcomes)} entries but the circuit has more "
@@ -181,5 +184,45 @@ def resolve_if_else_by_order(text: str, outcomes: Sequence[int]) -> stim.Circuit
     raw_lines = text.splitlines()
     entries, _ = _parse(raw_lines, 0, depth_indent=None)
     selected: list[str] = []
-    _expand(entries, get_outcome, selected, [0])
+    _expand(entries, get_outcome, selected, [0, 0])
+    return stim.Circuit("\n".join(selected))
+
+
+def resolve_if_else_by_measurement(text: str, outcomes: dict[int, int]) -> stim.Circuit:
+    """Resolve IF/ELSE blocks by the measurement their condition starts with.
+
+    Each IF block is keyed by the absolute index (0 for the circuit's first
+    measurement) of the first measurement its condition XORs. That index is the
+    same for every IF block a conditional cube emits, even though their ``rec``
+    offsets differ with where each block sits, so one entry per conditional cube
+    resolves all of its blocks.
+
+    Args:
+        text: Stim text with ``IF(rec[...]) { ... } ELSE { ... }`` blocks.
+        outcomes: mapping from the absolute index of a condition's first
+            measurement to the chosen outcome: ``1`` selects the ``IF`` body,
+            ``0`` the ``ELSE`` body (or nothing, if there is no ``ELSE`` arm).
+
+    Returns:
+        A vanilla ``stim.Circuit`` representing the resolved branch.
+
+    Raises:
+        ValueError: if an IF block's condition index is missing from
+            ``outcomes``, or an outcome is not 0 or 1.
+
+    """
+
+    def get_outcome(node: _IfNode, index: int, measured: int) -> int:
+        key = measured + node.condition_rec
+        outcome = outcomes.get(key)
+        if outcome is None:
+            raise ValueError(
+                f"No outcome supplied for the IF block #{index} conditioned on measurement {key}."
+            )
+        return outcome
+
+    raw_lines = text.splitlines()
+    entries, _ = _parse(raw_lines, 0, depth_indent=None)
+    selected: list[str] = []
+    _expand(entries, get_outcome, selected, [0, 0])
     return stim.Circuit("\n".join(selected))

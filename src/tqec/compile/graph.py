@@ -580,14 +580,12 @@ class TopologicalComputationGraph:
 
         Each conditional cube's :class:`CorrelationSurface` ``condition``
         (attached at :class:`Cube` construction time, see
-        :attr:`Cube.condition`) drives the IF/ELSE branch selection. The
-        surfaces are pre-compiled into :class:`AbstractObservable` at
-        :func:`compile_block_graph` time and stashed on
-        ``self._conditional_observables``; the resolver reads from there.
+        :attr:`Cube.condition`) drives the IF/ELSE branch selection: the
+        branch is chosen by the parity of the measurements that surface reads,
+        all of which happen strictly below the cube.
 
-        Single-pass implementation: delegates to
-        :meth:`LayerTree.generate_conditional_circuit`. The non-conditional
-        path falls through to :meth:`generate_stim_circuit`.
+        A graph with neither conditional cubes nor conditional observables
+        gives the same text as :meth:`generate_stim_circuit`.
 
         Args:
             k: scale factor of the templates.
@@ -611,6 +609,13 @@ class TopologicalComputationGraph:
         Returns:
             The compiled Stim circuit rendered as text, with the conditional
             cubes' branches emitted as ``IF``/``ELSE``-annotated blocks.
+
+        Raises:
+            TQECError: if the compiled conditions do not match the graph's
+                conditional cubes, if a ``z``-layer holds more than one conditional
+                cube, if a condition reads no measurement, if a conditional
+                observable is not XOR-decomposable, or if a conditional cube's
+                branches differ inside a repeated round.
 
         """
         # Fall back to the plain (non-conditional) path only if there are
@@ -655,11 +660,13 @@ class TopologicalComputationGraph:
         layer_tree = self.to_layer_tree()
         # Pre-annotate circuits so resolver can read MeasurementRecordsMap.
         layer_tree._annotate_circuits(k, reschedule_measurements=reschedule_measurements)
+        min_z = min(pos.z for pos in self._blocks.keys())
         resolved_condition_recs = resolve_condition_recs(
             layer_tree,
             k,
             self._conditional_observables,
             self._observable_builder,
+            min_z,
         )
         condition_recs_by_z: dict[int, list[int]] = {
             pos.z: recs for pos, recs in resolved_condition_recs.items()
@@ -683,6 +690,7 @@ class TopologicalComputationGraph:
                         obs,
                         binding.anchor_z,
                         self._observable_builder,
+                        min_z,
                         debug_label=(
                             f"ConditionalAbstractObservable bit "
                             f"{binding.surface_index} (anchor_z="
@@ -692,7 +700,6 @@ class TopologicalComputationGraph:
                 per_bit.append(tuple(recs))
             cao.condition_recs = tuple(per_bit)
 
-        min_z = min(pos.z for pos in self._blocks.keys())
         cc = layer_tree.generate_conditional_circuit(
             k,
             condition_recs=condition_recs_by_z,

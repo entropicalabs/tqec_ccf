@@ -3,6 +3,7 @@ import stim
 from tqec.circuit.measurement_map import MeasurementRecordsMap
 from tqec.compile.blocks.layers.atomic.layout import LayoutLayer
 from tqec.compile.conditional.circuit import IfBlock
+from tqec.compile.conditional.condition_recs import leaf_measurement_spans, ordered_leaves
 from tqec.compile.observables.abstract_observable import (
     AbstractObservable,
     ConditionalAbstractObservable,
@@ -82,24 +83,23 @@ def annotate_conditional_observable(
     cond_observable: ConditionalAbstractObservable,
     observable_index: int,
     observable_builder: ObservableBuilder,
-    condition_recs_by_z: dict[int, list[int]],
     min_z: int,
 ) -> None:
     """Annotate a truth-table-indexed logical observable on the tree.
 
-    Conditional cubes in ``cond_observable.conditional_cube_positions`` each
-    own the leaves at z-layers ``(prev_cube_z, this_cube_z]`` (after sorting by
-    z). At every anchor leaf, all ``2 ** N`` branch resolutions are independently
-    lowered to qubit sets. The N-condition flat-XOR decomposition
+    At every leaf where the observable reads measurements, all ``2 ** N`` branch
+    resolutions are independently lowered to qubit sets. The N-condition
+    flat-XOR decomposition
 
         O(key) = S ⊕ XOR_{i: key[i]} Δ_i
 
     is computed and validated; non-decomposable inputs (AND structure) are
     rejected with a descriptive error. ``S`` emits as a plain
-    ``OBSERVABLE_INCLUDE`` on the trunk; each ``Δ_i`` is wrapped in a single
-    ``IF(condition_recs_i) { OBSERVABLE_INCLUDE Δ_i }`` (no ELSE) at its
-    owning cube's anchor leaf. Stim XORs all contributions into one logical
-    observable.
+    ``OBSERVABLE_INCLUDE`` at each leaf it reads; each ``Δ_i`` is wrapped in a
+    single ``IF(condition_i) { OBSERVABLE_INCLUDE Δ_i }`` (no ELSE), placed on
+    the latest leaf among the one its condition is anchored to and the ones
+    ``Δ_i`` reads, so that every measurement it names already happened. Stim
+    XORs all contributions into one logical observable.
 
     Args:
         root: root node of the tree.
@@ -109,18 +109,16 @@ def annotate_conditional_observable(
         observable_index: index of the observable in the circuit.
         observable_builder: builder that computes and constructs qubits whose
             measurements will be included in the logical observable.
-        condition_recs_by_z: retained for backward compatibility only and no
-            longer read; per-bit measurement records are taken from
-            ``cond_observable.condition_recs``.
         min_z: smallest z-layer index spanned by the tree, used to convert the
             bindings' absolute anchor z into ``root.children`` offsets.
 
-    """
-    from tqec.compile.conditional.condition_recs import (  # noqa: PLC0415
-        _collect_pre_cond_entries,
-        _compute_tail_shifts,
-    )
+    Raises:
+        TQECError: if ``cond_observable`` has no condition, does not cover every
+            truth-table key, anchors a condition outside the tree, has not had
+            its conditions resolved, is not XOR-decomposable, or would have to
+            place an ``IF`` block inside a repeated layer.
 
+    """
     bindings = cond_observable.condition_bindings
     n_bits = len(bindings)
     if n_bits == 0:
@@ -148,9 +146,6 @@ def annotate_conditional_observable(
                 f"[{min_z}, {min_z + n_layers}]."
             )
 
-    bits_in_z_order = sorted(range(n_bits), key=lambda b: anchor_idx_by_bit[b])
-    sorted_cube_z_indices = [anchor_idx_by_bit[b] for b in bits_in_z_order]
-
     # Per-bit rec lists from the resolver pipeline (graph.py populates
     # ``cond_observable.condition_recs`` before calling into the annotator).
     if cond_observable.condition_recs is None or len(cond_observable.condition_recs) != n_bits:
@@ -161,42 +156,12 @@ def annotate_conditional_observable(
         )
     recs_per_bit: list[list[int]] = [list(r) for r in cond_observable.condition_recs]
 
-    max_idx = sorted_cube_z_indices[-1]
-    entries, subtree_leaves = _collect_pre_cond_entries(root, k, max_idx + 1)
-    tail_shifts_max = _compute_tail_shifts(entries)
-    entry_by_leaf_id = {id(e.leaf): (e, i) for i, e in enumerate(entries)}
-
-    # For each z-sorted anchor, find the index of its last entry and the
-    # count of measurements after that entry up to the end of the walk.
-    # Subtracting tail_beyond from tail_shifts_max maps rec offsets from the
-    # max-anchor frame into that anchor's IfBlock frame.
-    end_entry_idx_per_sorted: list[int] = []
-    j = 0
-    for anchor_idx in sorted_cube_z_indices:
-        while j < len(entries) and entries[j].z <= anchor_idx:
-            j += 1
-        end_entry_idx_per_sorted.append(j - 1)
-    running_total = sum(e.num_measurements for e in entries)
-    cumulative_through: list[int] = []
-    cum = 0
-    for e in entries:
-        cum += e.num_measurements
-        cumulative_through.append(cum)
-    tail_beyond_per_bit: list[int] = [0] * n_bits
-    for s, end_idx in enumerate(end_entry_idx_per_sorted):
-        through = cumulative_through[end_idx] if end_idx >= 0 else 0
-        tail_beyond_per_bit[bits_in_z_order[s]] = running_total - through
-
+    spans = leaf_measurement_spans(root, k)
+    subtree_leaves = [ordered_leaves(subtree) for subtree in root.children]
+    # Absolute indices of the measurements each Δ_i reads, and the leaves it
+    # reads them in (the IF block has to come after the last of those).
     delta_per_bit: list[list[int]] = [[] for _ in range(n_bits)]
-
-    def _collect_recs(leaf: LayerNode, qubits: set, target: list[int], bit: int) -> None:
-        entry, idx = entry_by_leaf_id[id(leaf)]
-        shift = tail_shifts_max[idx] - tail_beyond_per_bit[bit]
-        for q in qubits:
-            if q not in entry.records:
-                continue
-            local = entry.records[q][-1]
-            target.append(local - shift)
+    delta_leaves_per_bit: list[list[LayerNode]] = [[] for _ in range(n_bits)]
 
     def _anchor_actions(
         leaves: list[LayerNode],
@@ -249,30 +214,42 @@ def annotate_conditional_observable(
                 anchor_leaf.get_annotations(k).observables.append(
                     get_observable_with_measurement_records(shared, meas, observable_index)
                 )
+            span = spans[id(anchor_leaf)]
             for bit, delta in enumerate(deltas):
-                _collect_recs(anchor_leaf, delta, delta_per_bit[bit], bit)
+                indices = [i for q in delta if (i := span.absolute_index(q)) is not None]
+                if indices:
+                    delta_per_bit[bit].extend(indices)
+                    delta_leaves_per_bit[bit].append(anchor_leaf)
 
     for bit in range(n_bits):
-        delta_recs = delta_per_bit[bit]
-        if not delta_recs:
+        delta_indices = delta_per_bit[bit]
+        if not delta_indices:
             continue
-        # Anchor leaf for the IfBlock: last leaf at the binding's anchor z
-        # (clamped if the anchor sits beyond the walked range).
+        # The leaf the condition is anchored to: the last leaf of its anchor
+        # z-layer, clamped when the anchor sits past the last layer.
         leaf_z = min(anchor_idx_by_bit[bit], len(subtree_leaves) - 1)
-        cube_leaf = subtree_leaves[leaf_z][-1]
+        candidates = [subtree_leaves[leaf_z][-1], *delta_leaves_per_bit[bit]]
+        host_leaf = max(candidates, key=lambda leaf: spans[id(leaf)].end)
+        host = spans[id(host_leaf)]
+        if host.repeated:
+            raise TQECError(
+                f"The IF block for condition {bit} of a ConditionalCorrelationSurface "
+                "would sit inside a repeated layer, which conditional emission does "
+                "not support."
+            )
         then_body: list = [
             stim.CircuitInstruction(
                 "OBSERVABLE_INCLUDE",
-                [stim.target_rec(o) for o in sorted(delta_recs)],
+                [stim.target_rec(i - host.end) for i in sorted(delta_indices)],
                 [observable_index],
             )
         ]
-        annotations = cube_leaf.get_annotations(k)
+        annotations = host_leaf.get_annotations(k)
         if annotations.conditional_observables is None:
             annotations.conditional_observables = []
         annotations.conditional_observables.append(
             IfBlock(
-                condition_recs=recs_per_bit[bit],
+                condition_recs=list(recs_per_bit[bit]),
                 then_body=then_body,
                 else_body=None,
             )

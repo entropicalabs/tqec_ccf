@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 
+from tests.compile.conditional._conditions import add_condition_source
 from tqec.compile.compile import compile_block_graph
 from tqec.compile.convention import FIXED_BULK_CONVENTION
 from tqec.computation.block_graph import BlockGraph
@@ -30,13 +31,7 @@ def _build_graph() -> tuple[BlockGraph, ConditionalCorrelationSurface]:
     g.add_cube(c1, "ZXZ")
     g.add_cube(c2, "ZXZ")
     g.add_cube(t1, "ZXX")
-    g.add_cube(
-        t2,
-        ConditionalLeafCubeKind.ZXX_ZXZ,
-        condition=CorrelationSurface(
-            span=frozenset({ZXEdge(u=ZXNode(b1, Basis.Z), v=ZXNode(c1, Basis.Z))})
-        ),
-    )
+    g.add_cube(t2, ConditionalLeafCubeKind.ZXX_ZXZ, condition=add_condition_source(g))
     g.add_pipe(b1, c1)
     g.add_pipe(c1, c2)
     g.add_pipe(c1, t1)
@@ -101,24 +96,12 @@ def _build_multi_cube_graph() -> tuple[BlockGraph, ConditionalCorrelationSurface
     init_kind = ConditionalLeafCubeKind.ZXX_ZXZ.value[0]
     g = BlockGraph("multi_cond_obs")
     g.add_cube(a0, init_kind)
-    g.add_cube(
-        a1,
-        ConditionalLeafCubeKind.ZXX_ZXZ,
-        condition=CorrelationSurface(
-            span=frozenset({ZXEdge(u=ZXNode(a0, Basis.Z), v=ZXNode(a0, Basis.Z))})
-        ),
-    )
-    g.add_pipe(a0, a1)
     g.add_cube(b0, init_kind)
+    g.add_cube(a1, ConditionalLeafCubeKind.ZXX_ZXZ, condition=add_condition_source(g))
+    g.add_pipe(a0, a1)
     g.add_cube(b1, init_kind)
     g.add_cube(b2, init_kind)
-    g.add_cube(
-        b3,
-        ConditionalLeafCubeKind.ZXX_ZXZ,
-        condition=CorrelationSurface(
-            span=frozenset({ZXEdge(u=ZXNode(b2, Basis.Z), v=ZXNode(b2, Basis.Z))})
-        ),
-    )
+    g.add_cube(b3, ConditionalLeafCubeKind.ZXX_ZXZ, condition=add_condition_source(g))
     g.add_pipe(b0, b1)
     g.add_pipe(b1, b2)
     g.add_pipe(b2, b3)
@@ -202,9 +185,7 @@ def test_surface_anchored_conditional_observable_on_plain_block_graph() -> None:
     g.add_pipe(b2, b3)
     g.add_pipe(b3, c)
 
-    cond = CorrelationSurface(
-        span=frozenset({ZXEdge(u=ZXNode(b1, Basis.X), v=ZXNode(b2, Basis.X))})
-    )
+    cond = add_condition_source(g)
     spine = {
         ZXEdge(u=ZXNode(b1, Basis.Z), v=ZXNode(b2, Basis.Z)),
         ZXEdge(u=ZXNode(b2, Basis.Z), v=ZXNode(b3, Basis.Z)),

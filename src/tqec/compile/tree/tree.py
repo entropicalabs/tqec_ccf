@@ -163,9 +163,16 @@ class LayerTree:
         if not self._conditional_abstract_observables:
             return
         if condition_recs is None:
-            # Non-conditional emission path: ConditionalCorrelationSurface
-            # has no IF/ELSE to live in, so its per-branch emission is silently
-            # dropped here. generate_conditional_stim_text supplies condition_recs.
+            # Non-conditional emission path: a ConditionalCorrelationSurface has
+            # no IF/ELSE to live in. generate_conditional_stim_text supplies
+            # condition_recs and emits it.
+            warnings.warn(
+                f"{len(self._conditional_abstract_observables)} conditional "
+                "observable(s) cannot be expressed in a plain stim circuit and are "
+                "left out of it. Use generate_conditional_stim_text to include them.",
+                TQECWarning,
+                stacklevel=3,
+            )
             return
         next_idx = len(self._abstract_observables)
         for i, cond_obs in enumerate(self._conditional_abstract_observables):
@@ -175,7 +182,6 @@ class LayerTree:
                 cond_obs,
                 next_idx + i,
                 self._observable_builder,
-                condition_recs,
                 min_z,
             )
 
