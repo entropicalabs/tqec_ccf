@@ -430,9 +430,12 @@ class FixedBulkConventionGenerator:
     ) -> Plaquettes:
         """Return the memory plaquettes retimed to the Y cap's interaction order.
 
-        The memory round directly below a ``Y_HALF_CUBE`` -- the *junction round*
-        -- is followed immediately by the cap's transition round, which is a port
-        of Gidney's construction and uses his interaction order. The fixed-bulk
+        The memory round directly below a ``Y_HALF_CUBE`` cap -- the *junction
+        round* -- is followed immediately by the cap's transition round, which is
+        a port of Gidney's construction and uses his interaction order. For a
+        Y-basis initialisation the junction round is the one directly *above*
+        it, after the init's own handoff round, and is re-timed with
+        ``reverse=True``. The fixed-bulk
         order and Gidney's disagree about which pair of data qubits each
         stabilizer touches last, i.e. about where the hook error lies, and that
         disagreement across the seam costs the assembled circuit its distance: a

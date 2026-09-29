@@ -81,10 +81,11 @@ def _y_cube_is_initialisation(cube: Cube, graph: BlockGraph) -> bool:
 def _y_cap_is_transposed(cube: Cube, graph: BlockGraph) -> bool:
     """Whether a ``Y_HALF_CUBE``'s patch must be reflected across its main diagonal.
 
-    A Y cap continues the patch of the cube below it, so it inherits that cube's
-    spatial orientation. Gidney's construction is written for a ``ZX*`` cube
-    (spatial boundaries normal to ``x`` in ``Z``); an ``XZ*`` cube needs the
-    reflection. Returns ``False`` for any cube that is not a Y cube.
+    A Y cube runs on the patch of the regular cube it attaches to (below a cap, above an
+    initialisation), so it inherits that cube's spatial orientation. Gidney's
+    construction is written for a ``ZX*`` cube (spatial boundaries normal to ``x`` in
+    ``Z``); an ``XZ*`` cube needs the reflection. Returns ``False`` for any cube that is
+    not a Y cube.
     """
     if not cube.is_y_cube:
         return False
@@ -111,10 +112,11 @@ class CubeSpec:
         condition: The correlation surface carried over from a conditional ``Cube``;
             ``None`` for non-conditional specs.
         y_cap_transposed: For a ``Y_HALF_CUBE`` only: whether the cap's patch is
-            reflected across its main diagonal. The Y cap runs on the patch of
-            the cube below it, and Gidney's construction is written for a ``ZX*``
-            cube (left/right boundaries in ``Z``). An ``XZ*`` cube below has those
-            boundaries in ``X`` and needs the reflected patch. ``False`` for every
+            reflected across its main diagonal. A Y cube runs on the patch of the
+            regular cube it attaches to (below a cap, above an initialisation),
+            and Gidney's construction is written for a ``ZX*`` cube (left/right
+            boundaries in ``Z``). An ``XZ*`` neighbour has those boundaries in
+            ``X`` and needs the reflected patch. ``False`` for every
             other cube kind.
         y_cube_initialises: For a ``Y_HALF_CUBE`` only: whether it is a Y-basis
             *initialisation* (the regular cube it attaches to sits above it)
