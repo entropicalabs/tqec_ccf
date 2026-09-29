@@ -731,3 +731,36 @@ def test_y_cubes_sharing_a_slice_compile_deterministically(
     circuit = compile_block_graph(build(kind), observables=[]).generate_stim_circuit(k=k)
     assert circuit.num_detectors > 0
     circuit.detector_error_model(decompose_errors=False)  # raises if non-deterministic
+
+
+def _y_init_beside_a_column(kind: str = "ZXZ") -> BlockGraph:
+    """Build a Y initialisation feeding a cube that joins a continuing column."""
+    g = BlockGraph("y_init_beside_a_column")
+    column = [Position3D(0, 0, 0), Position3D(0, 0, 1)]
+    init, fed = _beside(kind, 1, 0), _beside(kind, 1, 1)
+    for p in (*column, fed):
+        g.add_cube(p, ZXCube.from_str(kind))
+    g.add_cube(init, LeafCubeKind.Y_HALF_CUBE)
+    g.add_pipe(*column)
+    g.add_pipe(init, fed)
+    g.add_pipe(column[1], fed)
+    return g
+
+
+@pytest.mark.timeout(120)
+@pytest.mark.parametrize("k", [3, 4, 5])
+@pytest.mark.parametrize(
+    "build", [_y_init_beside_a_column, _two_y_inits_with_main_column], ids=["one", "two"]
+)
+def test_y_init_shorter_than_its_slice_is_end_aligned(
+    build: Callable[[str], BlockGraph], k: int
+) -> None:
+    """Regression: from k = 4 an init (k + 4 rounds) is shorter than a 2k + 1 column.
+
+    It used to be padded like a memory cube, with degenerate-patch rounds
+    inserted after its patch had grown back to full size. It resets every qubit
+    before using it, so it is end-aligned instead. k = 3 is the boundary, where
+    both are 7 rounds.
+    """
+    circuit = compile_block_graph(build("ZXZ")).generate_stim_circuit(k=k)
+    circuit.detector_error_model(decompose_errors=False)  # raises if non-deterministic

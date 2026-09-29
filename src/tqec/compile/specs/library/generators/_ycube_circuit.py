@@ -1437,6 +1437,15 @@ class YHalfCubeBlock(Block):
         # above and must stay present in every trailing layer of its slice.
         return not self._initialises
 
+    @property
+    @override
+    def acquires_its_qubits(self) -> bool:
+        # An initialisation resets every qubit before it uses it: its first round
+        # resets the degenerate patch, and the reversed transition round resets
+        # the qubits the full patch adds. It owns no state before its own rounds,
+        # so it is end-aligned, its last rounds flush with the pipe above.
+        return self._initialises
+
     @override
     def with_temporal_borders_replaced(
         self,
