@@ -505,11 +505,11 @@ class LayoutLayer(BaseLayer):
         That common frame is **absolute**: a block at position ``bp`` occupies
         qubit coordinates starting at ``bp * (eshape - 1)``. The plaquette path
         already lands there, since :meth:`to_circuit` shifts its template-relative
-        output by its own bounds minimum. An earlier revision shifted the raw
-        circuits by the position *relative* to ``self.bounds`` instead, which
-        agrees only when this layer's minimum block position is zero: with a
-        minimum of one, a plaquette cube at ``bp = 1`` and a raw cube at
-        ``bp = 2`` both landed on the same qubits.
+        output by its own bounds minimum. The raw circuits must not be shifted
+        by their position *relative* to ``self.bounds``: that agrees only when
+        this layer's minimum block position is zero, and with a minimum of one a
+        plaquette cube at ``bp = 1`` and a raw cube at ``bp = 2`` would land on
+        the same qubits.
         """
         eshape = self.element_shape.to_shape_2d(k)
 

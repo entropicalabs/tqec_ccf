@@ -21,10 +21,10 @@ class FlowSpecLayer(Protocol):
     A :class:`RawCircuitLayer` provides a circuit but no template, so the
     detector annotator cannot recover the round's stabilizers the way it does
     for a :class:`~tqec.compile.blocks.layers.atomic.plaquettes.PlaquetteLayer`.
-    A raw round that is one round of a longer construction (the rounds of the
-    Y-basis measurement cap) instead states its flows explicitly, and the
-    annotators build the cross-round detectors and the logical readout from
-    them.
+    A raw round that is one round of a longer construction (the rounds of a
+    Y-basis measurement cap or initialisation) instead states its flows
+    explicitly, and the annotators build the cross-round detectors and the
+    logical readout from them.
 
     Every spec is keyed by, and made of, **qubit coordinates in the round's
     local element frame** --- never measurement record indices, which do not
@@ -45,8 +45,12 @@ class FlowSpecLayer(Protocol):
         """Qubits this round measures while *preparing* each stabilizer.
 
         ``None`` when the next round can recover the match on its own, which it
-        can whenever this round measures every stabilizer with a single ancilla
-        (every standard round).
+        can when this round measures every stabilizer with a single ancilla and
+        the next round can look back through it (a standard round followed by
+        another raw round). A round followed by a plaquette round must give one
+        even so --- a Y initialisation's handoff round --- because a plaquette
+        round cannot look back through a raw round and closes its seam from
+        this spec instead.
         """
         ...
 

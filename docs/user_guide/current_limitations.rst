@@ -21,10 +21,10 @@ Spatial junctions
 A spatial junction is any cube that has at least 2 pipes in the spatial (``XY``) plane.
 These kind of computation require special handling that is not currently implemented.
 
-``Y``-basis measurements
-------------------------
+``Y``-basis measurement and initialization
+------------------------------------------
 
-An in-place ``Y``-basis *measurement* --- a :class:`.YHalfCube` capping a
+An in-place ``Y``-basis *measurement* --- a ``LeafCubeKind.Y_HALF_CUBE`` capping a
 column, i.e. the readout half of an ``S`` gate --- is implemented for the
 fixed-bulk convention, following `Gidney's construction
 <https://quantum-journal.org/papers/q-2024-04-08-1310/>`_. The cap may coexist
@@ -34,22 +34,23 @@ without user intervention.
 
 A ``Y``-basis **initialization** --- a ``Y`` cube with a pipe above it rather
 than below --- is lowered as the time reverse of the measurement cap. It is one
-round longer than the cap (``k + 4`` rounds rather than ``k + 3``): the
-interaction-order seam needs two rounds in the cap's order next to the fold of
-an initialization but only one next to that of a measurement, and the temporal
-pipe supplies only one.
+round longer than the cap (``k + 4`` rounds rather than ``k + 3``). Next to its
+fold, a measurement needs one round that is not in the fixed-bulk interaction
+order, and the temporal pipe's junction round provides it. An initialization
+needs two: the pipe's junction round, and a *handoff* round the initialization
+carries itself, in the cap's interaction order.
 
 Both halves are verified to preserve the circuit distance ``2k + 1`` only for
 ``k <= 2``. At ``k = 3`` they measure ``2k``: the degenerate patch carries
 ``k`` boundary rounds, which is too few at ``d = 7``. Gidney's own reference
 circuit, with the same number of boundary rounds, falls short in exactly the
-same way.
+same way. Use ``k <= 2`` where the full distance matters.
 
-The following are **not** implemented yet:
+The following are **not** implemented yet, and raise ``NotImplementedError``:
 
-* the same cube under the **fixed-boundary** convention, which still raises
-  ``NotImplementedError``.
-* a ``Y`` cube directly connected to a ``Port``.
+* the same cube under the **fixed-boundary** convention;
+* a ``Y`` cube directly connected to a ``Port``;
+* a ``Y`` cube attached through a Hadamard temporal pipe.
 
 Walking codes
 -------------

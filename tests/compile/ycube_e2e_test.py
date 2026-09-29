@@ -467,6 +467,12 @@ def test_two_y_caps_observable_preserves_distance(k: int, kind: str) -> None:
     Splitting that noise into independent single-qubit errors hides it, so
     ``uniform_depolarizing`` (which emits ``DEPOLARIZE2`` after two-qubit gates)
     is required here.
+
+    The search is bounded (no detection-event set larger than 4, no error
+    touching more than 4 detectors), so ``== 2k + 1`` is a bound check rather
+    than a proof: a lighter logical error whose intermediate syndromes are all
+    larger would escape it. It is also a statement about this observable only;
+    a missing detector away from its support would not show here.
     """
     graph, surfaces = _closed_surface(kind)
     circuit = compile_block_graph(graph, observables=surfaces).generate_stim_circuit(k=k)

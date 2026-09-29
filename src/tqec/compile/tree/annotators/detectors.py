@@ -526,14 +526,14 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
         **absolute**: a block at position ``bp`` occupies qubit coordinates
         starting at ``bp * (eshape - 1)``, whatever else the layer contains.
 
-        Deliberately *not* relative to ``layout.bounds``. An earlier revision
-        subtracted the layer's minimum block position, which agrees with the
-        absolute offset only when the slice happens to contain a block at the
-        computation's minimum ``x``/``y``. A Y cap alone in its z-slice --- a
-        logical qubit that moves sideways and is then capped --- has a slice
-        minimum equal to its own position, so the offset collapsed to zero and
-        every seam detector looked its ancillas up one block pitch away from
-        where they were measured.
+        Deliberately *not* relative to ``layout.bounds``: subtracting the
+        layer's minimum block position agrees with the absolute offset only when
+        the slice happens to contain a block at the computation's minimum
+        ``x``/``y``. A Y cap alone in its z-slice --- a logical qubit that moves
+        sideways and is then capped --- has a slice minimum equal to its own
+        position, so a relative offset would collapse to zero and every seam
+        detector would look its ancillas up one block pitch away from where they
+        were measured.
         """
         if not isinstance(pos, LayoutCubePosition2D):
             raise TQECError("A RawCircuitLayer is only supported at a cube position.")

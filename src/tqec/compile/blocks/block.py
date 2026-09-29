@@ -455,8 +455,14 @@ def merge_parallel_block_layers(
         provided ``blocks_in_parallel``.
 
     Raises:
+        TQECError: if a conditional block's two branches do not share the same
+            layer structure.
         NotImplementedError: if the provided blocks have mismatched schedules but
-            no ``k`` was provided to flatten them.
+            no ``k`` was provided to flatten them; if a mismatched-schedule merge
+            meets a block it cannot flatten or pad (a composed ``RepeatedLayer``
+            body, or not exactly one ``RepeatedLayer``); or if the blocks cannot
+            be merged due to a code branch not being implemented yet (and not due
+            to a logical error making the blocks unmergeable).
 
     """
     if not blocks_in_parallel:
