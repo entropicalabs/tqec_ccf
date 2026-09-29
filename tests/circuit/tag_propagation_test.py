@@ -146,9 +146,7 @@ def test_noise_model_preserves_a_tag() -> None:
 def test_noise_model_preserves_a_tag_in_an_exempt_moment() -> None:
     circuit = stim.Circuit()
     circuit.append(_tagged("S", [0]))
-    noisy = NoiseModel.uniform_depolarizing(1e-3).noisy_circuit(
-        circuit, noiseless_moments=frozenset({0})
-    )
+    noisy = NoiseModel.uniform_depolarizing(1e-3).noisy_circuit(circuit, noiseless_qubits={0: {0}})
     assert _tags(noisy) == {"S[T] 0": _TAG}
 
 

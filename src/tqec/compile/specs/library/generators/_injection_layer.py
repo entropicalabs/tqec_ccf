@@ -35,6 +35,7 @@ from collections.abc import Iterable, Mapping, Sequence
 
 from typing_extensions import override
 
+from tqec.circuit.qubit_map import QubitMap
 from tqec.circuit.schedule.circuit import ScheduledCircuit
 from tqec.compile.blocks.block import Block
 from tqec.compile.blocks.enums import SpatialBlockBorder, TemporalBlockBorder
@@ -42,6 +43,7 @@ from tqec.compile.blocks.layers.atomic.base import BaseLayer
 from tqec.compile.blocks.layers.atomic.layout import LayoutLayer
 from tqec.compile.blocks.layers.atomic.raw import RawCircuitLayer
 from tqec.compile.blocks.layers.composed.base import BaseComposedLayer
+from tqec.compile.blocks.positioning import LayoutCubePosition2D, LayoutPosition2D
 from tqec.compile.specs.library.generators.injection import (
     INJECTION_ENCODER_MOMENTS,
     injection_encoder_circuit,
@@ -55,6 +57,7 @@ from tqec.utils.injection_state import (
     is_clifford_injection_state,
     validate_injection_state,
 )
+from tqec.utils.position import Shift2D
 from tqec.utils.scale import LinearFunction, PhysicalQubitScalable2D
 
 Coord = tuple[int, int]
@@ -285,12 +288,14 @@ def make_injection_block(
 
 
 class InjectionMomentFinder(NodeWalker):
-    """Locate the moments of a compiled circuit that belong to injection encoders.
+    """Locate the injection encoders' qubits in the moments of a compiled circuit.
 
     Walks an *annotated* layer tree --- the circuits have to be on the nodes
     already --- and records, for each leaf holding an :class:`InjectionRawLayer`,
     the indices its moments occupy in the circuit
-    :meth:`~tqec.compile.tree.node.LayerNode.generate_circuit` produces.
+    :meth:`~tqec.compile.tree.node.LayerNode.generate_circuit` produces, together
+    with the encoder's own qubits. Only those qubits are exempted in those
+    moments: a neighbouring patch sharing the moments keeps its noise.
 
     An encoder may be preceded by other rounds but not by a ``REPEAT`` block. The
     generated circuit collapses a repeated layer into one, and
@@ -303,17 +308,24 @@ class InjectionMomentFinder(NodeWalker):
     indices that address the wrong moments.
     """
 
-    def __init__(self, k: int) -> None:
-        """Prepare to walk an annotated tree at scaling factor ``k``."""
+    def __init__(self, k: int, qubit_map: QubitMap) -> None:
+        """Prepare to walk an annotated tree at scaling factor ``k``.
+
+        Args:
+            k: scaling factor.
+            qubit_map: the global qubit map of the circuit the moments index.
+
+        """
         self._k = k
+        self._qubit_map = qubit_map
         self._moments = 0
-        self._indices: set[int] = set()
+        self._qubits: dict[int, frozenset[int]] = {}
         self._seen_repeat_block = False
 
     @property
-    def indices(self) -> frozenset[int]:
-        """Moment indices belonging to injection encoders."""
-        return frozenset(self._indices)
+    def noiseless_qubits(self) -> dict[int, frozenset[int]]:
+        """For each moment an encoder occupies, the encoder's qubit indices."""
+        return dict(self._qubits)
 
     @override
     def visit_node(self, node: LayerNode) -> None:
@@ -323,10 +335,13 @@ class InjectionMomentFinder(NodeWalker):
             if node.is_repeated:
                 self._seen_repeat_block = True
             return
-        assert isinstance(node._layer, LayoutLayer)
-        is_encoder = any(
-            isinstance(sublayer, InjectionRawLayer) for sublayer in node._layer.layers.values()
-        )
+        layout = node._layer
+        assert isinstance(layout, LayoutLayer)
+        encoders = {
+            pos: sublayer
+            for pos, sublayer in layout.layers.items()
+            if isinstance(sublayer, InjectionRawLayer)
+        }
         circuit = node.get_annotations(self._k).circuit
         if circuit is None:
             raise TQECError(
@@ -334,7 +349,7 @@ class InjectionMomentFinder(NodeWalker):
                 "have been annotated with their circuits."
             )
         count = circuit.get_circuit(include_qubit_coords=False).num_ticks + 1
-        if is_encoder:
+        if encoders:
             if self._seen_repeat_block:
                 raise NotImplementedError(
                     "Leaving the state-injection encoder noiseless is only "
@@ -342,5 +357,23 @@ class InjectionMomentFinder(NodeWalker):
                     "and it collapses into a single top-level REPEAT entry, so "
                     "the encoder's moments cannot be addressed unambiguously."
                 )
-            self._indices.update(range(self._moments, self._moments + count))
+            qubits = frozenset(
+                index
+                for pos, encoder in encoders.items()
+                for index in self._encoder_qubits(layout, pos, encoder)
+            )
+            for moment in range(self._moments, self._moments + count):
+                self._qubits[moment] = qubits
         self._moments += count
+
+    def _encoder_qubits(
+        self, layout: LayoutLayer, pos: LayoutPosition2D, encoder: InjectionRawLayer
+    ) -> Iterable[int]:
+        """Return the global indices of the qubits the encoder at ``pos`` acts on."""
+        if not isinstance(pos, LayoutCubePosition2D):
+            raise TQECError("An injection encoder is only supported at a cube position.")
+        block = pos.to_block_position()
+        eshape = layout.element_shape.to_shape_2d(self._k)
+        shift = Shift2D(block.x * (eshape.x - 1), block.y * (eshape.y - 1))
+        for qubit in encoder.circuit_factory(self._k).qubits:
+            yield self._qubit_map[qubit + shift]

@@ -579,15 +579,19 @@ class TopologicalComputationGraph:
                 ``noise_model``. State injection is not fault tolerant, so a fault
                 in the encoder corrupts the injected state outright and dominates
                 the logical error rate; leaving the encoder noiseless isolates the
-                error rate of everything downstream. Has no effect without a
-                ``noise_model``, or on a graph with no injection cube.
+                error rate of everything downstream. Only the encoder's own qubits
+                are exempted, in the encoder's moments: a patch sharing those
+                moments keeps its noise, and so do the injection patch's qubits
+                the encoder does not act on (they are reset before first use).
+                Has no effect without a ``noise_model``, or on a graph with no
+                injection cube.
 
         Returns:
             A compiled stim circuit.
 
         Raises:
-            NotImplementedError: if ``noiseless_injection`` is set and an
-                injection encoder is not the first round of the circuit.
+            NotImplementedError: if ``noiseless_injection`` is set and a
+                repeated round precedes an injection encoder.
 
         """
         tree = self.to_layer_tree(k)
@@ -600,12 +604,14 @@ class TopologicalComputationGraph:
         )
         # If provided, apply the noise model.
         if noise_model is not None:
-            noiseless_moments: frozenset[int] = frozenset()
+            noiseless_qubits: dict[int, frozenset[int]] = {}
             if noiseless_injection:
-                finder = InjectionMomentFinder(k)
+                qubit_map = tree._get_annotation(k).qubit_map
+                assert qubit_map is not None
+                finder = InjectionMomentFinder(k, qubit_map)
                 tree.walk(finder)
-                noiseless_moments = finder.indices
-            circuit = noise_model.noisy_circuit(circuit, noiseless_moments=noiseless_moments)
+                noiseless_qubits = finder.noiseless_qubits
+            circuit = noise_model.noisy_circuit(circuit, noiseless_qubits=noiseless_qubits)
         return circuit
 
     def _non_clifford_injection_states(self) -> frozenset[str]:

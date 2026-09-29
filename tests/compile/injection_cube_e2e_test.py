@@ -469,17 +469,83 @@ def test_noiseless_injection_still_finds_a_late_encoder(k: int) -> None:
     noisy = compiled.generate_stim_circuit(k, noise_model=noise)
     exempt = compiled.generate_stim_circuit(k, noise_model=noise, noiseless_injection=True)
     assert _noise_instruction_count(exempt) < _noise_instruction_count(noisy)
-    # And the exempted moments really are the encoder's: the moment holding the
-    # injected gate carries no noise at all.
-    for moment in str(exempt).split("TICK"):
-        lines = moment.splitlines()
-        if any(line.strip().split()[:1] == ["S"] for line in lines):
-            assert not any(
-                line.strip().startswith(("DEPOLARIZE", "X_ERROR", "Z_ERROR")) for line in lines
-            )
+    # And the exempted qubits really are the encoder's: in the moment holding the
+    # injected gate, no noise lands on a qubit the encoder acts on, while the
+    # column beside it keeps its noise.
+    in_patch = _qubits_in_block(exempt, _NEIGHBOUR.x, k)
+    for moment in _moments(exempt):
+        if any(i.name == "S" for i in moment):
+            encoder_qubits = {
+                t.value
+                for i in moment
+                if not _is_noise(i)
+                for t in i.targets_copy()
+                if t.is_qubit_target and t.value in in_patch
+            }
+            noisy_qubits = {t.value for i in moment if _is_noise(i) for t in i.targets_copy()}
+            assert encoder_qubits
+            assert noisy_qubits - in_patch
+            assert not noisy_qubits & encoder_qubits
             break
     else:  # pragma: no cover
         pytest.fail("no moment holding the injected gate")
+
+
+@pytest.mark.parametrize("k", _KS)
+def test_noiseless_injection_leaves_a_neighbouring_column_noisy(k: int) -> None:
+    """Regression: the exemption used to cover whole moments.
+
+    The encoder shares its moments with the column beside it, whose gates,
+    measurements and idling in those moments escaped noise too, biasing its
+    logical error rate low. Outside the injection patch, the noise must be exactly
+    what it is without the flag.
+    """
+    compiled = compile_block_graph(_injection_beside_a_column(), FIXED_BULK_CONVENTION)
+    noise = NoiseModel.uniform_depolarizing(1e-3)
+    noisy = compiled.generate_stim_circuit(k, noise_model=noise)
+    exempt = compiled.generate_stim_circuit(k, noise_model=noise, noiseless_injection=True)
+    in_patch = _qubits_in_block(noisy, _NEIGHBOUR.x, k)
+
+    def noise_outside_patch(circuit: stim.Circuit) -> list[list[tuple[str, int]]]:
+        return [
+            sorted(
+                (i.name, t.value)
+                for i in moment
+                if _is_noise(i)
+                for t in i.targets_copy()
+                if t.value not in in_patch
+            )
+            for moment in _moments(circuit)
+        ]
+
+    assert noise_outside_patch(exempt) == noise_outside_patch(noisy)
+    assert _noise_instruction_count(exempt) < _noise_instruction_count(noisy)
+
+
+def _moments(circuit: stim.Circuit) -> list[list[stim.CircuitInstruction]]:
+    """Split a flattened circuit into its moments."""
+    moments: list[list[stim.CircuitInstruction]] = [[]]
+    for instruction in circuit.flattened():
+        if instruction.name == "TICK":
+            moments.append([])
+        else:
+            moments[-1].append(instruction)
+    return moments
+
+
+def _is_noise(instruction: stim.CircuitInstruction) -> bool:
+    data = stim.gate_data(instruction.name)
+    return data.is_noisy_gate and not data.produces_measurements
+
+
+def _qubits_in_block(circuit: stim.Circuit, block_x: int, k: int) -> set[int]:
+    """Return the qubits whose coordinates lie in the block at ``x = block_x``."""
+    pitch = 4 * k + 4  # qubit-coordinate width of one block
+    return {
+        q
+        for q, (x, _) in circuit.get_final_qubit_coordinates().items()
+        if block_x * pitch <= x <= (block_x + 1) * pitch
+    }
 
 
 @pytest.mark.parametrize("add_polygons", [False, True])

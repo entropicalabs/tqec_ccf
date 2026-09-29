@@ -29,7 +29,7 @@ Modifications to the original code:
 """
 
 from collections import Counter, defaultdict
-from collections.abc import Iterator, Set
+from collections.abc import Iterator, Mapping, Set
 
 import stim
 
@@ -373,7 +373,7 @@ class NoiseModel:
         *,
         system_qubits: set[int] | None = None,
         immune_qubits: set[int] | None = None,
-        noiseless_moments: Set[int] | None = None,
+        noiseless_qubits: Mapping[int, Set[int]] | None = None,
     ) -> stim.Circuit:
         """Return a noisy version of the given circuit, by applying the receiving noise model.
 
@@ -382,25 +382,27 @@ class NoiseModel:
             system_qubits: All qubits used by the circuit. These are the qubits eligible for idling
                 noise.
             immune_qubits: Qubits to not apply noise to, even if they are operated on.
-            noiseless_moments: indices of moments to leave untouched --- no gate
-                noise and no idling noise. Indices count the top-level entries of
-                ``circuit``, where a ``REPEAT`` block counts as one entry; naming
-                such an entry leaves the whole block noiseless. Use this for a
-                part of the circuit that is idealised by assumption rather than
-                modelled, such as a non-fault-tolerant state-injection encoder.
-
-                Note this is per *moment*, not per qubit: a qubit idling through a
-                noiseless moment for reasons of its own also escapes noise.
+            noiseless_qubits: for some moments, the qubits to leave untouched in
+                that moment --- no gate noise on operations acting on them, and no
+                idling noise on them. Every other qubit of the moment gets its
+                noise as usual. Keys index the top-level entries of ``circuit``,
+                where a ``REPEAT`` block counts as one entry and cannot be named.
+                Use this for a part of the circuit that is idealised by assumption
+                rather than modelled, such as a non-fault-tolerant state-injection
+                encoder sharing its moments with a neighbouring patch.
 
         Returns:
             The noisy version of the circuit.
+
+        Raises:
+            ValueError: if ``noiseless_qubits`` names a ``REPEAT`` block.
 
         """
         if system_qubits is None:
             system_qubits = set(range(circuit.num_qubits))
         if immune_qubits is None:
             immune_qubits = set()
-        noiseless = noiseless_moments if noiseless_moments is not None else frozenset()
+        noiseless = noiseless_qubits if noiseless_qubits is not None else {}
 
         result = stim.Circuit()
         for index, moment_split_ops in enumerate(
@@ -415,6 +417,11 @@ class NoiseModel:
             else:
                 result.append("TICK", [], [])
             if isinstance(moment_split_ops, stim.CircuitRepeatBlock):
+                if index in noiseless:
+                    raise ValueError(
+                        f"noiseless_qubits names entry {index}, a REPEAT block; only "
+                        "the moments outside REPEAT blocks can be exempted."
+                    )
                 noisy_body = self.noisy_circuit(
                     moment_split_ops.body_copy(),
                     system_qubits=system_qubits,
@@ -425,9 +432,18 @@ class NoiseModel:
                         repeat_count=moment_split_ops.repeat_count, body=noisy_body
                     )
                 )
-            elif index in noiseless:
-                for op in moment_split_ops:
-                    result.append(op)
+            elif noiseless.get(index):
+                exempt = set(immune_qubits) | set(noiseless[index])
+                self._append_noisy_moment(
+                    moment_split_ops=[
+                        piece
+                        for op in moment_split_ops
+                        for piece in _split_targets_if_needed(op, immune_qubits=exempt)
+                    ],
+                    out=result,
+                    system_qubits=system_qubits,
+                    immune_qubits=exempt,
+                )
             else:
                 self._append_noisy_moment(
                     moment_split_ops=moment_split_ops,
