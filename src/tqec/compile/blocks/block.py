@@ -65,7 +65,7 @@ class Block(SequencedLayers):
 
     @property
     def acquires_its_qubits(self) -> bool:
-        """Whether the block's first layer resets every data qubit it ever touches.
+        """Whether the block resets every data qubit it touches before using it.
 
         The time-reverse of :attr:`releases_its_qubits`. A block that does owns no
         live state *before* its own rounds, so in a merged slice whose duration is
@@ -76,24 +76,22 @@ class Block(SequencedLayers):
         Two kinds of block want this. A state-injection cube prepares a state
         that is not fault-tolerantly encoded, so every extra round it is held for
         is extra exposure --- injecting as late as possible is strictly better.
-        A Y-basis *initialisation* cap would need it outright: its last round is
-        the transition to the full patch, which has to be the slice's last round
-        or the pipe above receives a degenerate patch.
+        A Y-basis *initialisation* needs it outright: its last rounds hand the
+        full patch to the pipe above, so they have to be the slice's last rounds. Padding it
+        like a memory cube instead inserts degenerate-patch rounds *after* the
+        patch has grown back to full size, and the circuit stops being
+        deterministic.
 
-        The condition is stronger than it looks and is what an implementer has to
-        check: the first round must reset **every** data qubit the block touches
-        in *any* later round, the union and not just the first round's footprint.
-        A block whose patch grows (a Y cap's degenerate patch, magic-state
-        cultivation) has different footprints per round; if a later round touches
-        a qubit the first round did not reset, absence is wrong, because that
-        qubit was never initialised. Exactly the mirror of
-        :attr:`releases_its_qubits` needing to measure out *every* qubit.
+        What an implementer has to check is that no qubit is used before the
+        block resets it, across *all* its rounds, not just the first one: a
+        block whose patch grows (a Y initialisation's degenerate patch) touches
+        new qubits in later rounds, and each of those rounds must reset them.
 
         Note absence means those physical qubits carry **no idling noise** during
         the leading rounds. That is right for a block satisfying the condition
-        above --- the qubits hold no state, and the block's own first round resets
-        them --- and it is what a released block already does at the trailing end.
-        A hardware-faithful idling model would need a real idle layer instead.
+        above --- the qubits hold no state --- and it is what a released block
+        already does at the trailing end. A hardware-faithful idling model would
+        need a real idle layer instead.
 
         Defaults to ``False``, i.e. start-aligned and padded, the safe answer.
 
@@ -385,10 +383,11 @@ def _merge_mismatched_block_layers(
     ``max`` rounds over the parallel blocks, and a block shorter than the slice is
     handled one of three ways:
 
-    - a block that resets every data qubit it touches
-      (:attr:`Block.acquires_its_qubits` --- a state-injection cube) owns no live
-      state before its own rounds, so it is **end-aligned**: absent from the
-      leading merged layers, with its last round flush with the end of the slice;
+    - a block that resets every data qubit it touches before using it
+      (:attr:`Block.acquires_its_qubits` --- a Y-basis initialisation or a
+      state-injection cube) owns no live state before its own rounds, so it is
+      **end-aligned**: absent from the leading merged layers, with its last round
+      flush with the end of the slice;
     - a block that measures out its data qubits
       (:attr:`Block.releases_its_qubits` --- a Y-basis measurement cap) is
       finished when its layers run out, so it is start-aligned and simply
@@ -398,11 +397,12 @@ def _merge_mismatched_block_layers(
       so it is start-aligned and **padded** with extra bulk rounds inserted just
       before its final border round, so that round stays last.
 
-    This lets a Y cap coexist with a continuing memory cube whatever their
-    relative lengths: at small ``k`` the cap outlasts the column and the column is
-    padded; at larger ``k`` the column outlasts the cap, which drops out and
-    leaves the column to finish the slice alone. It also lets an injection cube,
-    whose height is a constant two rounds, sit beside a ``2k+1`` column.
+    This lets a Y cube coexist with a continuing memory cube whatever their
+    relative lengths: at small ``k`` the Y cube outlasts the column and the
+    column is padded; at larger ``k`` the column outlasts it, and the Y cube
+    occupies only the end (an initialisation) or the start (a cap) of the slice. It
+    also lets an injection cube, whose height is a constant two rounds, sit
+    beside a ``2k+1`` column.
 
     A block claiming both properties has no live state on either side, so either
     alignment is sound; ``acquires_its_qubits`` wins, so the choice is a stated
@@ -461,8 +461,14 @@ def merge_parallel_block_layers(
         provided ``blocks_in_parallel``.
 
     Raises:
+        TQECError: if a conditional block's two branches do not share the same
+            layer structure.
         NotImplementedError: if the provided blocks have mismatched schedules but
-            no ``k`` was provided to flatten them.
+            no ``k`` was provided to flatten them; if a mismatched-schedule merge
+            meets a block it cannot flatten or pad (a composed ``RepeatedLayer``
+            body, or not exactly one ``RepeatedLayer``); or if the blocks cannot
+            be merged due to a code branch not being implemented yet (and not due
+            to a logical error making the blocks unmergeable).
 
     """
     if not blocks_in_parallel:

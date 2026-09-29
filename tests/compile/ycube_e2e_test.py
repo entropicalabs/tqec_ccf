@@ -8,6 +8,7 @@ property).
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from itertools import pairwise
 
 import pytest
@@ -22,6 +23,7 @@ from tqec.compile.specs.library.generators.fixed_bulk import FixedBulkConvention
 from tqec.compile.tree.node import LayerNode
 from tqec.compile.tree.tree import LayerTree
 from tqec.computation.cube import LeafCubeKind, ZXCube
+from tqec.computation.pipe import PipeKind
 from tqec.plaquette.compilation.base import IdentityPlaquetteCompiler
 from tqec.plaquette.rpng.translators.default import DefaultRPNGTranslator
 from tqec.utils.enums import Orientation
@@ -465,6 +467,12 @@ def test_two_y_caps_observable_preserves_distance(k: int, kind: str) -> None:
     Splitting that noise into independent single-qubit errors hides it, so
     ``uniform_depolarizing`` (which emits ``DEPOLARIZE2`` after two-qubit gates)
     is required here.
+
+    The search is bounded (no detection-event set larger than 4, no error
+    touching more than 4 detectors), so ``== 2k + 1`` is a bound check rather
+    than a proof: a lighter logical error whose intermediate syndromes are all
+    larger would escape it. It is also a statement about this observable only;
+    a missing detector away from its support would not show here.
     """
     graph, surfaces = _closed_surface(kind)
     circuit = compile_block_graph(graph, observables=surfaces).generate_stim_circuit(k=k)
@@ -664,3 +672,147 @@ def test_y_cap_observable_away_from_the_origin(x0: int) -> None:
     circuit.detector_error_model(decompose_errors=False)
     _, observables = circuit.compile_detector_sampler().sample(500, separate_observables=True)
     assert len({bool(v) for v in observables.reshape(-1)}) == 1
+
+
+def _beside(kind: str, offset: int, z: int) -> Position3D:
+    """Return the position ``offset`` blocks beside the main column, along the branch axis."""
+    if _branch_axis(kind) is Direction3D.X:
+        return Position3D(offset, 0, z)
+    return Position3D(0, offset, z)
+
+
+def _two_y_caps_in_one_slice(kind: str) -> BlockGraph:
+    """Build two side branches of a main column, both Y-capped in the same z-slice."""
+    g = BlockGraph("two_y_caps_in_one_slice")
+    column = [Position3D(0, 0, z) for z in range(3)]
+    for p in column:
+        g.add_cube(p, ZXCube.from_str(kind))
+    for below, above in pairwise(column):
+        g.add_pipe(below, above)
+    for offset in (-1, 1):
+        branch, cap = _beside(kind, offset, 1), _beside(kind, offset, 2)
+        g.add_cube(branch, ZXCube.from_str(kind))
+        g.add_cube(cap, LeafCubeKind.Y_HALF_CUBE)
+        if offset < 0:
+            g.add_pipe(branch, column[1])
+        else:
+            g.add_pipe(column[1], branch)
+        g.add_pipe(branch, cap)
+    return g
+
+
+def _y_cap_and_init_in_one_slice(kind: str) -> BlockGraph:
+    """Build a Y cap and a Y initialisation beside a main column, in the same z-slice."""
+    g = BlockGraph("y_cap_and_init_in_one_slice")
+    column = [Position3D(0, 0, z) for z in range(3)]
+    for p in column:
+        g.add_cube(p, ZXCube.from_str(kind))
+    for below, above in pairwise(column):
+        g.add_pipe(below, above)
+    capped, cap = _beside(kind, -1, 0), _beside(kind, -1, 1)
+    g.add_cube(capped, ZXCube.from_str(kind))
+    g.add_cube(cap, LeafCubeKind.Y_HALF_CUBE)
+    g.add_pipe(capped, column[0])
+    g.add_pipe(capped, cap)
+    init, fed = _beside(kind, 1, 1), _beside(kind, 1, 2)
+    g.add_cube(init, LeafCubeKind.Y_HALF_CUBE)
+    g.add_cube(fed, ZXCube.from_str(kind))
+    g.add_pipe(init, fed)
+    g.add_pipe(column[2], fed)
+    return g
+
+
+@pytest.mark.parametrize("kind", _BELOW_KINDS)
+@pytest.mark.parametrize("k", [1, 2])
+@pytest.mark.parametrize(
+    "build", [_two_y_caps_in_one_slice, _y_cap_and_init_in_one_slice], ids=["caps", "cap-init"]
+)
+def test_y_cubes_sharing_a_slice_compile_deterministically(
+    build: Callable[[str], BlockGraph], k: int, kind: str
+) -> None:
+    """Regression: several Y cubes in one slice used to share one pending seam spec.
+
+    Each raw round read the spec the previous raw position of the slice had just
+    written, skipped its own seam detectors, and overwrote the handoff.
+    """
+    circuit = compile_block_graph(build(kind), observables=[]).generate_stim_circuit(k=k)
+    assert circuit.num_detectors > 0
+    circuit.detector_error_model(decompose_errors=False)  # raises if non-deterministic
+
+
+def _y_init_beside_a_column(kind: str = "ZXZ") -> BlockGraph:
+    """Build a Y initialisation feeding a cube that joins a continuing column."""
+    g = BlockGraph("y_init_beside_a_column")
+    column = [Position3D(0, 0, 0), Position3D(0, 0, 1)]
+    init, fed = _beside(kind, 1, 0), _beside(kind, 1, 1)
+    for p in (*column, fed):
+        g.add_cube(p, ZXCube.from_str(kind))
+    g.add_cube(init, LeafCubeKind.Y_HALF_CUBE)
+    g.add_pipe(*column)
+    g.add_pipe(init, fed)
+    g.add_pipe(column[1], fed)
+    return g
+
+
+@pytest.mark.timeout(120)
+@pytest.mark.parametrize("k", [3, 4, 5])
+@pytest.mark.parametrize(
+    "build", [_y_init_beside_a_column, _two_y_inits_with_main_column], ids=["one", "two"]
+)
+def test_y_init_shorter_than_its_slice_is_end_aligned(
+    build: Callable[[str], BlockGraph], k: int
+) -> None:
+    """Regression: from k = 4 an init (k + 4 rounds) is shorter than a 2k + 1 column.
+
+    It used to be padded like a memory cube, with degenerate-patch rounds
+    inserted after its patch had grown back to full size. It resets every qubit
+    before using it, so it is end-aligned instead. k = 3 is the boundary, where
+    both are 7 rounds.
+    """
+    circuit = compile_block_graph(build("ZXZ")).generate_stim_circuit(k=k)
+    circuit.detector_error_model(decompose_errors=False)  # raises if non-deterministic
+
+
+def _two_gadgets_in_one_slice(origins: tuple[int, ...] = (0, 4)) -> BlockGraph:
+    """Build one two-cap gadget per origin, all four caps in the same z-slice."""
+    g = BlockGraph("two_gadgets_in_one_slice")
+    for x0 in origins:
+        column = [Position3D(x0, 0, z) for z in range(3)]
+        for p in column:
+            g.add_cube(p, ZXCube.ZXZ)
+        for below, above in pairwise(column):
+            g.add_pipe(below, above)
+        for dx in (-1, 1):
+            branch, cap = Position3D(x0 + dx, 0, 1), Position3D(x0 + dx, 0, 2)
+            g.add_cube(branch, ZXCube.ZXZ)
+            g.add_cube(cap, LeafCubeKind.Y_HALF_CUBE)
+            g.add_pipe(*sorted([branch, column[1]], key=lambda p: p.x))
+            g.add_pipe(branch, cap)
+    return g
+
+
+@pytest.mark.parametrize("k", [1, 2])
+def test_y_readout_reads_only_the_surface_s_own_y_cubes(k: int) -> None:
+    """Regression: a Y readout used to include every Y cube of the slice.
+
+    One gadget's closed surface reaches its own two caps only. The other
+    gadget's caps share the slice, and XORing their random readouts in made the
+    observable non-deterministic.
+    """
+    graph = _two_gadgets_in_one_slice()
+    own_surface = _two_gadgets_in_one_slice(origins=(0,)).find_correlation_surfaces()[0]
+    assert sorted(p.x for p in own_surface.positions if graph[p].is_y_cube) == [-1, 1]
+    circuit = compile_block_graph(graph, observables=[own_surface]).generate_stim_circuit(k=k)
+    assert circuit.num_observables == 1
+    circuit.detector_error_model(decompose_errors=False)  # raises if non-deterministic
+
+
+def test_y_cube_on_a_hadamard_pipe_is_rejected() -> None:
+    """A Hadamard temporal pipe used to fail deep in the detector annotator."""
+    g = BlockGraph("y_cap_on_hadamard_pipe")
+    below, cap = Position3D(0, 0, 0), Position3D(0, 0, 1)
+    g.add_cube(below, ZXCube.ZXZ)
+    g.add_cube(cap, LeafCubeKind.Y_HALF_CUBE)
+    g.add_pipe(below, cap, PipeKind.from_str("ZXOH"))
+    with pytest.raises(NotImplementedError, match="Hadamard temporal pipe"):
+        compile_block_graph(g, observables=[]).generate_stim_circuit(k=1)

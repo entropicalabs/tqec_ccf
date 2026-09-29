@@ -222,17 +222,13 @@ class FixedBulkPipeBuilder(PipeBuilder):
             PlaquetteLayer(template, memory_plaquettes)
             for _ in range(3 if spec.at_temporal_hadamard_layer else 2)
         ]
-        # A Y cap above turns the last layer into the cap's *junction round*, which
-        # has to run the cap's interaction order rather than the fixed-bulk one --
-        # see `get_y_cap_junction_plaquettes`. Only the last layer: this block's
-        # `Z_NEGATIVE` border (layer 0) replaces the top border of the cube *below*,
-        # which may share a time slice with a spatial pipe still on the fixed-bulk
-        # schedule, and re-timing it makes the two collide on their shared data
-        # qubits. `CompiledGraph._add_temporal_pipe` maps the borders that way, and
-        # `YHalfCubeBlock` prepends the `Z_NEGATIVE` replacement it receives.
-        # `CompiledGraph._add_temporal_pipe` hands this block's `Z_NEGATIVE`
-        # border (layer 0) to the cube *below* and its `Z_POSITIVE` border
-        # (layer -1) to the cube *above*, so each endpoint owns one layer. Re-time
+        # A Y cube at either end turns the layer that lands inside it into its
+        # *junction round*, which has to run the cap's interaction order (reversed
+        # for an initialisation) rather than the fixed-bulk one -- see
+        # `get_y_cap_junction_plaquettes`. `CompiledGraph._add_temporal_pipe`
+        # hands this block's `Z_NEGATIVE` border (layer 0) to the cube *below* and
+        # its `Z_POSITIVE` border (layer -1) to the cube *above*, so each endpoint
+        # owns one layer. Re-time
         # whichever layer lands inside a Y block, and only that one: the other is
         # an ordinary memory round that may share a time slice with a spatial pipe
         # still on the fixed-bulk schedule, and re-timing it makes the two collide

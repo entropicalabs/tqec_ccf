@@ -988,8 +988,8 @@ def reversed_order_patch(patch: PatchGeometry) -> PatchGeometry:
     Measured, at ``d = 3`` and ``d = 5``: an initialisation whose transition round
     is reversed but whose boundary and memory rounds are not has circuit distance
     ``k + 1`` instead of ``2k + 1`` --- the same hook mismatch, and the same
-    collapse, as the measurement cap's junction-round bug. Reversing the
-    neighbouring rounds too restores the full distance.
+    collapse, as a measurement cap whose junction round runs the fixed-bulk
+    order. Reversing the neighbouring rounds too restores the full distance.
     """
     return replace(
         patch,
@@ -1284,12 +1284,16 @@ def handoff_raw_slice(
     An ordinary memory round on the ``xtop`` patch, run in the cap's own
     interaction order rather than the fixed-bulk one.
 
-    A Y cap needs exactly one round in its own order next to its fold -- the
-    junction round the temporal pipe supplies. An initialisation needs **two**:
-    measured at ``d = 5``, an init followed by one own-order round and then
-    fixed-bulk host rounds has circuit distance 4 instead of 5, and only a second
-    own-order round restores it. The pipe supplies one, so the block carries the
-    other itself, right after the reversed transition round.
+    A Y cap needs exactly one round next to its fold that is not in the
+    fixed-bulk order -- the junction round the temporal pipe supplies, re-timed
+    to the cap's order. An initialisation needs **two**: measured at ``d = 5``,
+    an init followed by only the junction round and then fixed-bulk host rounds
+    has circuit distance 4 instead of 5, and a second re-timed round restores it.
+    The block carries that second one itself, right after the reversed
+    transition round: this handoff round, in the cap's order. (The pipe re-times
+    the junction round above an init to the *reversed* cap order; measured, the
+    forward order gives the same distance -- what matters is the number of
+    rounds that are not in the fixed-bulk order.)
 
     Returns the round and its ``start_spec``; the caller also publishes the same
     map as the ``end_spec`` the junction round above closes against.
@@ -1373,28 +1377,26 @@ def make_y_init_layers(transposed: bool = False) -> list[BaseLayer | BaseCompose
 
 
 class YHalfCubeBlock(Block):
-    """A Y-basis measurement cap, which *gains* its junction round rather than
-    having its first round overwritten.
+    """A Y-basis measurement cap or initialisation, which gains its junction round.
 
-    For an ordinary cube, a temporal pipe below replaces the block's
-    ``Z_NEGATIVE`` border --- ``layer_sequence[0]`` --- with the pipe's junction
-    layer. A Y cap has no round to spare there: its first layer is the transition
-    round, and letting the substitution proceed would overwrite it with a memory
-    round. Nothing in the substitution machinery objects (``RawCircuitLayer`` is
-    a ``BaseLayer``, so ``get_atomic_temporal_border`` happily returns it); the
-    loss only surfaces further downstream, as a seam-detector mismatch.
+    For an ordinary cube, a temporal pipe replaces the block's border layer on
+    its side --- ``layer_sequence[0]`` for a pipe below, ``layer_sequence[-1]``
+    for one above --- with the pipe's junction layer. A Y cube has no round to
+    spare there: a cap's first layer is its transition round, an initialisation's
+    last layer is its handoff round, and letting the substitution proceed would
+    overwrite that with a memory round. Nothing in the substitution machinery
+    objects (``RawCircuitLayer`` is a ``BaseLayer``, so
+    ``get_atomic_temporal_border`` happily returns it); the loss only surfaces
+    further downstream, as a seam-detector mismatch.
 
-    Earlier revisions dodged this by prefixing the cap with a hard-coded memory
-    "adapter" round that existed only to absorb the substitution. That forced the
-    adapter's orientation to be guessed (it was pinned to ``HORIZONTAL``, i.e. a
-    ``ZX*`` cube below). Prepending instead lets the junction round come from the
-    pipe itself, whose kind is derived from the cube below, so no orientation is
-    assumed here. The resulting layer sequence is identical to the one the
-    adapter produced.
+    So the block *gains* the junction round instead: a cap prepends the pipe's
+    ``Z_NEGATIVE`` replacement, an initialisation appends its ``Z_POSITIVE`` one.
+    The junction round comes from the pipe itself, whose kind is derived from the
+    regular cube the Y cube attaches to, so no orientation is assumed here.
 
     ``template`` is the block's spatial footprint, needed to build the
-    :class:`~tqec.compile.specs.base.PipeSpec` of the temporal pipe below (raw
-    layers carry no template of their own). It describes shape only --- the
+    :class:`~tqec.compile.specs.base.PipeSpec` of the temporal pipe it attaches
+    to (raw layers carry no template of their own). It describes shape only --- the
     orientation lives in the plaquettes, which the pipe supplies --- so carrying
     it here reintroduces no orientation assumption.
     """
@@ -1436,6 +1438,15 @@ class YHalfCubeBlock(Block):
         # initialisation is the opposite: it hands its data qubits on to the cube
         # above and must stay present in every trailing layer of its slice.
         return not self._initialises
+
+    @property
+    @override
+    def acquires_its_qubits(self) -> bool:
+        # An initialisation resets every qubit before it uses it: its first round
+        # resets the degenerate patch, and the reversed transition round resets
+        # the qubits the full patch adds. It owns no state before its own rounds,
+        # so it is end-aligned, its last rounds flush with the pipe above.
+        return self._initialises
 
     @override
     def with_temporal_borders_replaced(

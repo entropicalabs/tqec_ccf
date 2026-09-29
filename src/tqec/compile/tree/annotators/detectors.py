@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from typing_extensions import override
@@ -330,11 +330,14 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
         self._min_z = min_z
         self._depth = 0
         self._z_index = -1
-        # Explicit multi-qubit end_spec handed forward by the transition round
-        # (Y cap), consumed by the next raw round: for each (shifted) stabilizer
-        # ancilla coordinate, the (shifted) qubit coordinates the transition
-        # measured to prepare that stabilizer.
-        self._pending_end_spec: dict[Coord2D, list[Coord2D]] | None = None
+        # Explicit multi-qubit end_specs handed forward by raw rounds (the Y
+        # cap's transition round, a Y init's last rounds), keyed by the cube
+        # position the raw round sits at, and consumed by the next round at that
+        # position: for each (shifted) stabilizer ancilla coordinate, the
+        # (shifted) qubit coordinates the raw round measured to prepare it.
+        # Keyed by position so that several raw rounds sharing a slice cannot
+        # read or overwrite each other's spec.
+        self._pending_end_specs: dict[LayoutPosition2D, dict[Coord2D, list[Coord2D]]] = {}
 
     @override
     def visit_node(self, node: LayerNode) -> None:
@@ -377,7 +380,7 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
         # does, and above the state-injection encoder, which prepares the
         # stabilizers rather than measuring them -- so the seam is closed from
         # that spec instead, and the template path is skipped for this one round.
-        if self._pending_end_spec is not None:
+        if self._pending_end_specs:
             # The seam always comes from the spec. Whether the *rest* of this
             # round can still use the template path depends on the previous
             # round: a slice that was entirely raw (a lone Y column) leaves no
@@ -491,7 +494,7 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
         * the *transition* round, whose ``end_spec`` prepares each degenerate
           stabilizer with multiple records not recoverable from a
           coordinate-keyed record map, so it is handed forward explicitly via
-          ``self._pending_end_spec``.
+          ``self._pending_end_specs``.
 
         Any detectors internal to a single round (the final round's stabilizer
         reconstruction) stay inside the round's own circuit.
@@ -503,9 +506,10 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
         raw_records = MeasurementRecordsMap.from_scheduled_circuit(annotations.circuit)
         raw_total = annotations.circuit.get_circuit().num_measurements
 
-        self._emit_raw_seam(
-            annotations, raw_layer, raw_records, raw_total, self._raw_shift(layout, pos)
+        outgoing = self._emit_raw_seam(
+            annotations, pos, raw_layer, raw_records, raw_total, self._raw_shift(layout, pos)
         )
+        self._pending_end_specs = {pos: outgoing} if outgoing is not None else {}
 
         if raw_total == 0:
             # A raw round that measures nothing -- the state-injection encoder --
@@ -531,14 +535,14 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
         **absolute**: a block at position ``bp`` occupies qubit coordinates
         starting at ``bp * (eshape - 1)``, whatever else the layer contains.
 
-        Deliberately *not* relative to ``layout.bounds``. An earlier revision
-        subtracted the layer's minimum block position, which agrees with the
-        absolute offset only when the slice happens to contain a block at the
-        computation's minimum ``x``/``y``. A Y cap alone in its z-slice --- a
-        logical qubit that moves sideways and is then capped --- has a slice
-        minimum equal to its own position, so the offset collapsed to zero and
-        every seam detector looked its ancillas up one block pitch away from
-        where they were measured.
+        Deliberately *not* relative to ``layout.bounds``: subtracting the
+        layer's minimum block position agrees with the absolute offset only when
+        the slice happens to contain a block at the computation's minimum
+        ``x``/``y``. A Y cap alone in its z-slice --- a logical qubit that moves
+        sideways and is then capped --- has a slice minimum equal to its own
+        position, so a relative offset would collapse to zero and every seam
+        detector would look its ancillas up one block pitch away from where they
+        were measured.
         """
         if not isinstance(pos, LayoutCubePosition2D):
             raise TQECError("A RawCircuitLayer is only supported at a cube position.")
@@ -549,12 +553,18 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
     def _emit_raw_seam(
         self,
         annotations: LayerNodeAnnotations,
+        pos: LayoutPosition2D,
         raw_layer: RawCircuitLayer,
         raw_records: MeasurementRecordsMap,
         raw_total: int,
         shift: Coord2D,
-    ) -> None:
+    ) -> dict[Coord2D, list[Coord2D]] | None:
         """Emit the cross-round seam / bulk / reconstruction detectors of one raw round.
+
+        Reads the spec the previous round at ``pos`` handed forward, if any, but
+        does not touch ``self._pending_end_specs``: it returns this round's own
+        outgoing spec instead, so that the caller can install the specs of every
+        raw round of a slice only once all of them have read theirs.
 
         The round's flow-spec qubit coordinates are offset by ``shift`` into the
         layer's qubit frame. All spec values are qubit coordinates; a measurement is located by
@@ -579,13 +589,12 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
         if not isinstance(raw_layer, FlowSpecLayer):
             # A raw round that does not describe its flows carries whatever
             # detectors it needs inside its own circuit; nothing to do here.
-            self._pending_end_spec = None
-            return
+            return None
         start_spec = raw_layer.start_spec(self._k)
 
         if start_spec:
             prev_records = self._lookback_stack.lookback_records(1)
-            pending = self._pending_end_spec
+            pending = self._pending_end_specs.get(pos)
             for anc_coord, cur_coords in start_spec.items():
                 sc = sh(anc_coord)
                 cur_offsets = this_offsets(cur_coords)
@@ -594,7 +603,11 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
                     # used to prepare this stabilizer (resolved in the previous
                     # round's record map) with this round's ancilla.
                     if sc not in pending:
-                        continue
+                        raise TQECError(
+                            f"The raw round at {pos} closes the stabilizer at {sc} "
+                            "against the round before it, but that round handed no "
+                            "preparation forward for it; the two rounds do not match."
+                        )
                     prev_offsets = [
                         prev_records[GridQubit(*pc)][-1] - raw_total for pc in pending[sc]
                     ]
@@ -628,38 +641,51 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
                     )
                 )
 
-        # Hand this round's explicit end_spec forward, if any (only the
-        # transition round has one). Cleared once consumed by the next round.
+        # Hand this round's explicit end_spec forward, if any: the transition
+        # round, the reversed transition round and the init's handoff round
+        # have one.
         end_spec = raw_layer.end_spec(self._k)
-        if end_spec is not None:
-            self._pending_end_spec = {sh(c): [sh(q) for q in v] for c, v in end_spec.items()}
-        else:
-            self._pending_end_spec = None
+        if end_spec is None:
+            return None
+        return {sh(c): [sh(q) for q in v] for c, v in end_spec.items()}
 
-    def _emit_seam_against_raw_round(self, annotations: LayerNodeAnnotations) -> None:
-        """Close a plaquette round against the raw round that precedes it.
+    def _emit_seam_against_raw_round(
+        self,
+        annotations: LayerNodeAnnotations,
+        positions: Iterable[LayoutPosition2D] | None = None,
+    ) -> None:
+        """Close a plaquette round against the raw rounds that precede it.
 
-        The mirror of the ``pending`` branch of :meth:`_emit_raw_seam`. The raw
+        The mirror of the ``pending`` branch of :meth:`_emit_raw_seam`. Each raw
         round handed forward, per stabilizer, the qubit coordinates whose records
         prepare it; this round measures each of those stabilizers once, by
         ancilla. Pairing the two gives the seam detectors, and consumes the
-        pending spec.
+        pending specs.
 
-        Two raw rounds hand a spec forward: the last round of a Y-basis
-        initialisation, and the state-injection encoder. The encoder measures
+        Raw rounds that hand a spec forward include the last round of a Y-basis
+        initialisation and the state-injection encoder. The encoder measures
         nothing, so its spec lists no preparing coordinates and each detector is
         this round's single ancilla measurement.
 
+        Args:
+            annotations: annotations of this round.
+            positions: the positions whose pending specs to close, all of which
+                this round holds as plaquettes. ``None`` closes every pending spec.
+
         Raises:
-            TQECError: if this round does not measure a stabilizer the raw round
+            TQECError: if this round does not measure a stabilizer a raw round
                 reported as prepared, i.e. the raw round does not match the
                 patch above it.
 
         """
         assert annotations.circuit is not None
-        pending = self._pending_end_spec
-        assert pending is not None
-        self._pending_end_spec = None
+        if positions is None:
+            positions = list(self._pending_end_specs)
+        pending = {
+            ancilla: prepared
+            for pos in positions
+            for ancilla, prepared in self._pending_end_specs.pop(pos, {}).items()
+        }
 
         records = MeasurementRecordsMap.from_scheduled_circuit(annotations.circuit)
         total = annotations.circuit.get_circuit().num_measurements
@@ -703,11 +729,23 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
         raw_total = annotations.circuit.get_circuit().num_measurements
 
         # Raw (Y-cap) seam detectors first, while the lookback's most recent
-        # entry is still the *previous* round (this round is pushed below).
+        # entry is still the *previous* round (this round is pushed below). Each
+        # raw position reads only the spec handed forward at its own position,
+        # and the specs they hand on are installed only once all have read.
+        outgoing: dict[LayoutPosition2D, dict[Coord2D, list[Coord2D]]] = {}
         for pos, raw_layer in raw_by_pos.items():
-            self._emit_raw_seam(
-                annotations, raw_layer, full_records, raw_total, self._raw_shift(layout, pos)
+            spec = self._emit_raw_seam(
+                annotations, pos, raw_layer, full_records, raw_total, self._raw_shift(layout, pos)
             )
+            if spec is not None:
+                outgoing[pos] = spec
+        # A raw round that precedes a plaquette position of this slice -- the
+        # injection encoder beside a Y cap -- is closed from its spec here, as
+        # a plain plaquette round would close it.
+        closing = [pos for pos in self._pending_end_specs if pos not in raw_by_pos]
+        if closing:
+            self._emit_seam_against_raw_round(annotations, closing)
+        self._pending_end_specs = outgoing
 
         # Plaquette (memory) detectors: build a sub-layer over just those
         # positions, push this round, and reuse the fixed-radius computation

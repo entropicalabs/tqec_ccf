@@ -19,12 +19,10 @@ qubits, stabilizers) reproduced in tqec integer coordinates. The circuits built
 on top of it (gate schedules, detectors, observable) live in
 :mod:`tqec.compile.specs.library.generators._ycube_circuit`.
 
-## Coordinate frame
-
-Gidney places data qubits at integer points of the complex plane and stabilizer
-ancillas at half-integer points. tqec places data qubits at odd integer grid
-points and ancillas at even integer points. The two are related by a single
-uniform transform, verified empirically against tqec's own memory patch::
+**Coordinate frame.** Gidney places data qubits at integer points of the complex plane
+and stabilizer ancillas at half-integer points. tqec places data qubits at odd integer
+grid points and ancillas at even integer points. The two are related by a single uniform
+transform, verified empirically against tqec's own memory patch::
 
     tqec_coord(q) = (2 * q.real + 1, 2 * q.imag + 1)
 
