@@ -96,13 +96,13 @@ class BlockGraph:
         return len([node for node in self.cubes if node.is_port])
 
     @property
-    def num_half_y_cubes(self) -> float:
-        """Number of half Y cubes in the graph."""
-        return sum(
-            1 if node.kind is LeafCubeKind.Y_HALF_CUBE else 0.5
-            for node in self.cubes
-            if node.is_y_cube or node.is_conditional
-        )
+    def num_half_y_cubes(self) -> int:
+        """Number of half Y cubes in the graph.
+
+        A conditional cube is not one: each of its branches is a full
+        :class:`~tqec.computation.cube.ZXCube`.
+        """
+        return len([node for node in self.cubes if node.is_y_cube])
 
     @property
     def ordered_ports(self) -> list[str]:
