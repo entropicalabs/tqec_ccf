@@ -530,11 +530,18 @@ def merge_scheduled_circuits(
             merged into a single instruction.
         qubit_to_block: optional mapping from ``GridQubit`` to owning
             ``BlockPosition2D`` (cube position in the enclosing ``LayoutLayer``).
-            Plumbed in for the upcoming Canonical Emission Order pass; currently
-            unused. ``None`` preserves baseline behaviour.
+            When given, the targets of each multi-qubit instruction are emitted
+            in Canonical Emission Order: grouped by owning block, blocks sorted
+            by ``(y, x)``, then by qubit index. ``None`` keeps the baseline
+            order.
 
     Returns:
         a circuit representing the merged scheduled circuits given as input.
+
+    Raises:
+        NotImplementedError: if the Canonical Emission Order pass produces an
+            ``IfBlock``, which only
+            :func:`merge_scheduled_circuits_per_branch` can merge.
 
     """
     scheduled_circuits = _ScheduledCircuits(circuits, global_qubit_map)
@@ -572,8 +579,8 @@ def merge_scheduled_circuits(
             for entry in entries:
                 if isinstance(entry, IfBlock):
                     raise NotImplementedError(
-                        "merge_scheduled_circuits: IfBlock emission requires per-branch "
-                        "input wiring (Stage A commit 3)."
+                        "merge_scheduled_circuits produced an IfBlock; branch-dependent "
+                        "circuits must be merged with merge_scheduled_circuits_per_branch."
                     )
                 circuit.append(entry)
         all_moments.append(Moment(circuit))

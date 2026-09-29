@@ -5,7 +5,8 @@ import pytest
 
 from tests.interop.collada.read_write_test import rotated_cnot
 from tqec.computation.block_graph import BlockGraph
-from tqec.computation.cube import ZXCube
+from tqec.computation.correlation import CorrelationSurface, ZXEdge, ZXNode
+from tqec.computation.cube import ConditionalLeafCubeKind, LeafCubeKind, ZXCube
 from tqec.computation.pipe import PipeKind
 from tqec.gallery import cnot, memory
 from tqec.utils.enums import Basis
@@ -18,6 +19,25 @@ def test_block_graph_construction() -> None:
     assert len(g.cubes) == 0
     assert len(g.pipes) == 0
     assert g.spacetime_volume == 0
+
+
+def test_conditional_and_y_cubes_spacetime_volume() -> None:
+    """A conditional cube is a full cube in either branch; a Y cube is half of one."""
+    g = BlockGraph()
+    base = g.add_cube(Position3D(0, 0, 0), "ZXZ")
+    condition = CorrelationSurface(
+        span=frozenset([ZXEdge(ZXNode(base, Basis.Z), ZXNode(base, Basis.Z))])
+    )
+    top = g.add_cube(Position3D(0, 0, 1), ConditionalLeafCubeKind.ZXZ_ZXX, condition=condition)
+    g.add_pipe(base, top)
+    assert g.num_half_y_cubes == 0
+    assert g.spacetime_volume == 2
+
+    below = g.add_cube(Position3D(1, 0, 0), "ZXZ")
+    y = g.add_cube(Position3D(1, 0, 1), LeafCubeKind.Y_HALF_CUBE)
+    g.add_pipe(below, y)
+    assert g.num_half_y_cubes == 1
+    assert g.spacetime_volume == 3.5
 
 
 def test_block_graph_add_cube() -> None:

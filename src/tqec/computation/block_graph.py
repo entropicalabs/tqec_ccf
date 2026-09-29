@@ -19,7 +19,6 @@ from tqec.computation.correlation import CorrelationSurface, find_correlation_su
 from tqec.computation.cube import (
     Cube,
     CubeKind,
-    LeafCubeKind,
     ZXCube,
     cube_kind_from_string,
 )
@@ -98,13 +97,13 @@ class BlockGraph:
         return len([node for node in self.cubes if node.is_port])
 
     @property
-    def num_half_y_cubes(self) -> float:
-        """Number of half Y cubes in the graph."""
-        return sum(
-            1 if node.kind is LeafCubeKind.Y_HALF_CUBE else 0.5
-            for node in self.cubes
-            if node.is_y_cube or node.is_conditional
-        )
+    def num_half_y_cubes(self) -> int:
+        """Number of half Y cubes in the graph.
+
+        A conditional cube is not one: each of its branches is a full
+        :class:`~tqec.computation.cube.ZXCube`.
+        """
+        return len([node for node in self.cubes if node.is_y_cube])
 
     @property
     def ordered_ports(self) -> list[str]:
@@ -205,9 +204,9 @@ class BlockGraph:
             kind: The kind of the cube. It can be a :py:class:`~tqec.computation.cube.CubeKind`
                 instance or a string representation of the cube kind.
             label: The label of the cube. Default is None.
-            condition: The condition for when the cube kind is conditional, specified as a partial
-                correlation surface. The full correlation surface will be constructed at run-time
-                from this and other conditional cubes decided before this cube. Default is None.
+            condition: For a conditional cube kind, the correlation surface whose parity
+                selects the branch. Required for a conditional kind, must be ``None``
+                otherwise, and must lie strictly below the cube in ``z``. Default is None.
             state: For an ``INJECTION`` cube only, which single-qubit state to inject.
                 See :py:attr:`~tqec.computation.cube.Cube.state`.
 
@@ -217,7 +216,9 @@ class BlockGraph:
         Raises:
             TQECError: If there is already a cube at the same position, or
                 if the cube kind is not recognized, or if the cube is a port and
-                there is already a port with the same label in the graph.
+                there is already a port with the same label in the graph, or if
+                ``condition`` is missing for a conditional kind, given for any other
+                kind, or not strictly below the cube.
 
         """
         if isinstance(kind, str):
@@ -645,9 +646,9 @@ class BlockGraph:
         Args:
             port: The label or position of the port to fill.
             kind: The cube kind to fill the port with.
-            condition: The condition for when the cube kind is conditional, specified as a partial
-                correlation surface. The full correlation surface will be constructed at run-time
-                from this and other conditional cubes decided before this cube. Default is None.
+            condition: For a conditional cube kind, the correlation surface whose parity
+                selects the branch. Required for a conditional kind, must be ``None``
+                otherwise, and must lie strictly below the cube in ``z``. Default is None.
 
         Raises:
             TQECError: if there is no port with the given label or position.
@@ -693,9 +694,11 @@ class BlockGraph:
             fill: A mapping from the label of the ports to the cube kind to fill.
                 If a single kind is given, all the ports will be filled with the
                 same kind.
-            condition: The condition for when the cube kind is conditional, specified as a partial
-                correlation surface. The full correlation surface will be constructed at run-time
-                from this and other conditional cubes decided before this cube. Default is None.
+            condition: For a conditional cube kind, the correlation surface whose parity
+                selects the branch. Required for a conditional kind, must be ``None``
+                otherwise, and must lie strictly below the cube in ``z``. Default is None.
+                The same condition is given to every filled port, which a
+                ``ConditionalCorrelationSurface`` cannot then bind to a single cube.
 
         Raises:
             TQECError: if there is no port with the given label.

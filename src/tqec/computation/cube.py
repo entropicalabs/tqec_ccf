@@ -62,6 +62,26 @@ class ZXCube(Enum):
     def __str__(self) -> str:
         return self.name
 
+    @classmethod
+    def _missing_(cls, value: object) -> None:
+        if (
+            isinstance(value, tuple)
+            and len(value) == 3
+            and all(isinstance(b, Basis) for b in value)
+            and len(set(value)) == 1
+        ):
+            raise TQECError("The cube with the same basis along all axes is not allowed.")
+
+    @staticmethod
+    def all_kinds() -> list[ZXCube]:
+        """Return all the allowed ``ZXCube`` instances.
+
+        Returns:
+            The list of all the allowed ``ZXCube`` instances.
+
+        """
+        return list(ZXCube)
+
     @staticmethod
     def from_str(string: str) -> ZXCube:
         """Create a cube kind from the string representation.
@@ -378,17 +398,23 @@ class Cube:
 
     @property
     def is_zx_cube(self) -> bool:
-        """Verify whether the cube is of kind ``ZXCube``."""
+        """Verify whether the cube is of kind :py:class:`~tqec.computation.cube.ZXCube`."""
         return isinstance(self.kind, ZXCube)
 
     @property
     def is_port(self) -> bool:
-        """Verify whether the cube is of kind ``PORT``."""
+        """Verify whether the cube is a port.
+
+        That is, of kind :py:attr:`~tqec.computation.cube.LeafCubeKind.PORT`.
+        """
         return self.kind is LeafCubeKind.PORT
 
     @property
     def is_y_cube(self) -> bool:
-        """Verify whether the cube is of kind ``Y_HALF_CUBE``."""
+        """Verify whether the cube is a Y half cube.
+
+        That is, of kind :py:attr:`~tqec.computation.cube.LeafCubeKind.Y_HALF_CUBE`.
+        """
         return self.kind is LeafCubeKind.Y_HALF_CUBE
 
     @property

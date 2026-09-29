@@ -21,21 +21,15 @@ import re
 
 import pytest
 
+from tests.compile.conditional._conditions import add_condition_source
 from tqec.compile.compile import compile_block_graph
 from tqec.compile.convention import FIXED_BULK_CONVENTION
 from tqec.computation.block_graph import BlockGraph
-from tqec.computation.correlation import CorrelationSurface, ZXEdge, ZXNode
 from tqec.computation.cube import ConditionalLeafCubeKind
-from tqec.utils.enums import Basis
 from tqec.utils.position import Position3D
 
 _TEMPORAL_PAIRS = ["XZZ_XZX", "ZXX_ZXZ", "XZX_XZZ"]
 _MEAS_RE = re.compile(r"^\s*(M[XYZ]?R?|MR[XYZ]?)\s+([0-9 ]+)", re.MULTILINE)
-
-
-def _condition() -> CorrelationSurface:
-    p = Position3D(0, 0, 0)
-    return CorrelationSurface(span=frozenset([ZXEdge(ZXNode(p, Basis.Z), ZXNode(p, Basis.Z))]))
 
 
 def _graph(pair_name: str) -> BlockGraph:
@@ -43,7 +37,7 @@ def _graph(pair_name: str) -> BlockGraph:
     init_kind = ConditionalLeafCubeKind[pair_name].value[0]
     p0, p1 = Position3D(0, 0, 0), Position3D(0, 0, 1)
     g.add_cube(p0, init_kind)
-    g.add_cube(p1, ConditionalLeafCubeKind[pair_name], condition=_condition())
+    g.add_cube(p1, ConditionalLeafCubeKind[pair_name], condition=add_condition_source(g))
     g.add_pipe(p0, p1)
     return g
 
