@@ -491,3 +491,45 @@ def test_crumble_url_beside_a_taller_column(add_polygons: bool) -> None:
     compiled = compile_block_graph(_injection_beside_a_column(), FIXED_BULK_CONVENTION)
     url = compiled.generate_crumble_url(k=1, add_polygons=add_polygons)
     assert url.startswith("https://algassert.com/crumble#circuit=")
+
+
+def _injection_beside_a_y_cap() -> BlockGraph:
+    """Put an injection cube, a Y cap and an ordinary column in one z-slice."""
+    graph = BlockGraph("injection beside a Y cap")
+    graph.add_cube(Position3D(0, 0, 0), "ZXZ")
+    graph.add_cube(Position3D(0, 0, 1), "Y")
+    graph.add_pipe(Position3D(0, 0, 0), Position3D(0, 0, 1))
+    graph.add_cube(Position3D(1, 0, 1), "I")
+    graph.add_cube(Position3D(1, 0, 2), "ZXZ")
+    graph.add_pipe(Position3D(1, 0, 1), Position3D(1, 0, 2))
+    for z in range(3):
+        graph.add_cube(Position3D(2, 0, z), "ZXZ")
+    graph.add_pipe(Position3D(2, 0, 0), Position3D(2, 0, 1))
+    graph.add_pipe(Position3D(2, 0, 1), Position3D(2, 0, 2))
+    return graph
+
+
+@pytest.mark.parametrize("k", _KS)
+def test_injection_beside_a_y_cap_detects_every_stabilizer(k: int) -> None:
+    """Regression: an encoder sharing a slice with a Y cap lost its preparation spec.
+
+    Both are raw rounds, and they shared one pending-spec slot: the cap's round
+    read the encoder's spec, skipped its own seam, and cleared it, leaving the
+    injection patch with a single first-round detector instead of ``d**2 - 1``.
+    """
+    distance = 2 * k + 1
+    circuit = _without_observables(
+        compile_block_graph(
+            _injection_beside_a_y_cap(), FIXED_BULK_CONVENTION
+        ).generate_stim_circuit(k)
+    )
+    circuit.detector_error_model()  # raises if non-deterministic
+    pitch = 4 * k + 4  # qubit-coordinate width of one block
+    single_record_in_patch = [
+        instruction
+        for instruction in circuit.flattened()
+        if instruction.name == "DETECTOR"
+        and len(instruction.targets_copy()) == 1
+        and pitch <= instruction.gate_args_copy()[0] < 2 * pitch
+    ]
+    assert len(single_record_in_patch) == distance**2 - 1
