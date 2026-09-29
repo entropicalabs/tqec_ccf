@@ -8,6 +8,7 @@ property).
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from itertools import pairwise
 
 import pytest
@@ -664,3 +665,69 @@ def test_y_cap_observable_away_from_the_origin(x0: int) -> None:
     circuit.detector_error_model(decompose_errors=False)
     _, observables = circuit.compile_detector_sampler().sample(500, separate_observables=True)
     assert len({bool(v) for v in observables.reshape(-1)}) == 1
+
+
+def _beside(kind: str, offset: int, z: int) -> Position3D:
+    """Return the position ``offset`` blocks beside the main column, along the branch axis."""
+    if _branch_axis(kind) is Direction3D.X:
+        return Position3D(offset, 0, z)
+    return Position3D(0, offset, z)
+
+
+def _two_y_caps_in_one_slice(kind: str) -> BlockGraph:
+    """Build two side branches of a main column, both Y-capped in the same z-slice."""
+    g = BlockGraph("two_y_caps_in_one_slice")
+    column = [Position3D(0, 0, z) for z in range(3)]
+    for p in column:
+        g.add_cube(p, ZXCube.from_str(kind))
+    for below, above in pairwise(column):
+        g.add_pipe(below, above)
+    for offset in (-1, 1):
+        branch, cap = _beside(kind, offset, 1), _beside(kind, offset, 2)
+        g.add_cube(branch, ZXCube.from_str(kind))
+        g.add_cube(cap, LeafCubeKind.Y_HALF_CUBE)
+        if offset < 0:
+            g.add_pipe(branch, column[1])
+        else:
+            g.add_pipe(column[1], branch)
+        g.add_pipe(branch, cap)
+    return g
+
+
+def _y_cap_and_init_in_one_slice(kind: str) -> BlockGraph:
+    """Build a Y cap and a Y initialisation beside a main column, in the same z-slice."""
+    g = BlockGraph("y_cap_and_init_in_one_slice")
+    column = [Position3D(0, 0, z) for z in range(3)]
+    for p in column:
+        g.add_cube(p, ZXCube.from_str(kind))
+    for below, above in pairwise(column):
+        g.add_pipe(below, above)
+    capped, cap = _beside(kind, -1, 0), _beside(kind, -1, 1)
+    g.add_cube(capped, ZXCube.from_str(kind))
+    g.add_cube(cap, LeafCubeKind.Y_HALF_CUBE)
+    g.add_pipe(capped, column[0])
+    g.add_pipe(capped, cap)
+    init, fed = _beside(kind, 1, 1), _beside(kind, 1, 2)
+    g.add_cube(init, LeafCubeKind.Y_HALF_CUBE)
+    g.add_cube(fed, ZXCube.from_str(kind))
+    g.add_pipe(init, fed)
+    g.add_pipe(column[2], fed)
+    return g
+
+
+@pytest.mark.parametrize("kind", _BELOW_KINDS)
+@pytest.mark.parametrize("k", [1, 2])
+@pytest.mark.parametrize(
+    "build", [_two_y_caps_in_one_slice, _y_cap_and_init_in_one_slice], ids=["caps", "cap-init"]
+)
+def test_y_cubes_sharing_a_slice_compile_deterministically(
+    build: Callable[[str], BlockGraph], k: int, kind: str
+) -> None:
+    """Regression: several Y cubes in one slice used to share one pending seam spec.
+
+    Each raw round read the spec the previous raw position of the slice had just
+    written, skipped its own seam detectors, and overwrote the handoff.
+    """
+    circuit = compile_block_graph(build(kind), observables=[]).generate_stim_circuit(k=k)
+    assert circuit.num_detectors > 0
+    circuit.detector_error_model(decompose_errors=False)  # raises if non-deterministic
