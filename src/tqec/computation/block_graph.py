@@ -218,7 +218,9 @@ class BlockGraph:
                 if the cube kind is not recognized, or if the cube is a port and
                 there is already a port with the same label in the graph, or if
                 ``condition`` is missing for a conditional kind, given for any other
-                kind, or not strictly below the cube.
+                kind, or not strictly below the cube, or if ``state`` is not one of
+                :data:`~tqec.utils.injection_state.INJECTION_STATES` or is set on a
+                cube that is not an ``INJECTION`` cube.
 
         """
         if isinstance(kind, str):

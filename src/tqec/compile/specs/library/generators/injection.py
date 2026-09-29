@@ -13,10 +13,9 @@ states are not stabilizer states and are compiled as a tagged Clifford stand-in,
 because stim has no gate for either --- see that module for why substituting the
 real gate afterwards cannot change any detector.
 
-The construction is the one used by the sibling Entropica project ``noncliff``
-(``noncliff/injection.py``), vendored as a test oracle in
-``tests/_vendor/noncliff``. A ``d = 3`` patch is encoded directly, and a larger
-patch is reached by wrapping the ``d - 2`` patch in a *shell*: a ring of freshly
+The construction is ported from an external reference implementation, vendored as a test
+oracle in ``tests/_vendor/noncliff``. A ``d = 3`` patch is encoded directly, and a
+larger patch is reached by wrapping the ``d - 2`` patch in a *shell*: a ring of freshly
 reset boundary qubits entangled with the interior by two ``CX`` layers.
 
 Injection is **not** fault tolerant. A single fault during the encoder can
@@ -24,16 +23,14 @@ corrupt the injected state, so the encoded state carries an error rate of order
 ``p`` rather than ``p**d``. That is inherent to state injection, and the reason
 the encoder is a distinct cube kind rather than an initialisation basis.
 
-## Coordinate frame
-
-``noncliff`` and tqec already agree on the qubit-coordinate frame --- data qubits
-on odd-odd grid points, stabilizer ancillas on even-even points, with the same
-checkerboard parity --- so no coordinate transform is involved. The patch this
-encoder prepares is exactly
-:func:`~tqec.compile.specs.library.generators.ycube.xtop_qubit_patch`, whose
-left and right walls are ``Z`` (a ``ZX*`` cube above the injection). An ``XZ*``
-cube above has those walls in ``X``, and its patch is the reflection across the
-main diagonal, obtained with ``transposed=True``.
+**Coordinate frame.** The reference implementation and tqec already agree on the
+qubit-coordinate frame --- data qubits on odd-odd grid points, stabilizer ancillas on
+even-even points, with the same checkerboard parity --- so no coordinate transform is
+involved. The patch this encoder prepares is exactly
+:func:`~tqec.compile.specs.library.generators.ycube.xtop_qubit_patch`, whose left and
+right walls are ``Z`` (a ``ZX*`` cube above the injection). An ``XZ*`` cube above has
+those walls in ``X``, and its patch is the reflection across the main diagonal, obtained
+with ``transposed=True``.
 
 The centre data qubit, which carries the injected state, sits at ``(d, d)`` and
 is therefore fixed by that reflection.

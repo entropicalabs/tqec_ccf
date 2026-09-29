@@ -113,6 +113,18 @@ A port is a special type of cube that represents the input or output of a logica
 It functions as a virtual cube, serving only as a placeholder for other sources or sinks of logical information.
 Therefore, ports are not visualized in spacetime diagrams and occupy zero spacetime volume.
 
+``LeafCubeKind.INJECTION``
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+An injection cube (``"I"``) starts a logical column in a chosen single-qubit state,
+by a non-fault-tolerant encoder. It sits directly below a regular
+:py:class:`~tqec.computation.cube.ZXCube`, to which it hands the encoded state
+through one temporal pipe, and the state is given as ``state=`` to
+:py:meth:`~tqec.computation.block_graph.BlockGraph.add_cube`. The eight states are
+``"0"``, ``"1"``, ``"+"``, ``"-"``, ``"i"`` (:math:`S|+\rangle`, the default),
+``"-i"``, ``"T"`` (:math:`T|+\rangle`) and ``"T_DAG"`` (:math:`T^\dagger|+\rangle`).
+See :doc:`current_limitations` for what is supported.
+
 :py:class:`~tqec.computation.cube.ConditionalLeafCubeKind`
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

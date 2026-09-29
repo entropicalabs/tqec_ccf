@@ -1,7 +1,7 @@
 """The single-qubit states a state-injection cube can prepare.
 
-An injection cube encodes an arbitrary single-qubit state onto the logical qubit
-of a surface-code patch. Which state is named by a short string, and each name
+An injection cube encodes one of eight single-qubit states onto the logical
+qubit of a surface-code patch. Which state is named by a short string, and each name
 maps to a reset basis and one gate applied to the patch's centre data qubit
 before the encoder entangles it into the code.
 
@@ -46,6 +46,11 @@ INJECTION_STATES: Final[dict[str, tuple[str, str, str]]] = {
     "T_DAG": ("RX", "S_DAG", "T_DAG"),
 }
 """Each injectable state, as ``(reset, gate, stands_in_for)``.
+
+The keys name the state prepared on the logical qubit: ``"0"`` and ``"1"`` are
+``|0>`` and ``|1>``, ``"+"`` and ``"-"`` are ``|+>`` and ``|->``, ``"i"`` and
+``"-i"`` are ``S|+>`` and ``S_DAG|+>``, and ``"T"`` and ``"T_DAG"`` are ``T|+>``
+and ``T_DAG|+>``.
 
 ``stands_in_for`` is empty for a state stim can represent directly. Where it is
 not, it is both the stim tag the compiled gate carries and the name the text

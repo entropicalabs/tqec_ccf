@@ -52,6 +52,30 @@ The following are **not** implemented yet, and raise ``NotImplementedError``:
 * a ``Y`` cube directly connected to a ``Port``;
 * a ``Y`` cube attached through a Hadamard temporal pipe.
 
+Injection cubes
+---------------
+
+An injection cube (``LeafCubeKind.INJECTION``) starts a logical column in one of
+eight single-qubit states. The encoder is **not fault tolerant**: a single fault
+in it corrupts the injected state, so a column started this way has circuit
+distance 1. The following restrictions apply:
+
+* fixed-bulk convention only; the fixed-boundary convention raises
+  ``NotImplementedError``;
+* it must sit directly below a regular cube, joined by one temporal pipe: an
+  injection cube on a ``Port``, or directly into a ``Y`` cube, is rejected;
+* its observable is non-deterministic by design, even for a stabilizer state
+  such as ``"0"``: the correlation surface ends open at the injection cube;
+* ``"T"`` and ``"T_DAG"`` are not stim gates, so
+  :meth:`~tqec.compile.graph.TopologicalComputationGraph.generate_stim_circuit`
+  and :meth:`~tqec.compile.graph.TopologicalComputationGraph.generate_crumble_url`
+  (and hence :mod:`tqec.simulation`) refuse them; only
+  :meth:`~tqec.compile.graph.TopologicalComputationGraph.generate_stim_text` emits
+  them, as text stim cannot parse;
+* the state is not stored in ``.dae`` or ``.bgraph`` files: an injection cube read
+  back from either has the default state ``"i"``;
+* two injection cubes in the same ``z``-slice are untested.
+
 Walking codes
 -------------
 

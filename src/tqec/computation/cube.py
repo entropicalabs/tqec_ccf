@@ -193,8 +193,9 @@ class LeafCubeKind(Enum):
             itself and should be invisible when visualizing the computation model.
         Y_HALF_CUBE: Cube kind representing the Y-basis initialization/measurements.
         INJECTION: Cube kind representing non-fault-tolerant state injection. It
-            prepares an arbitrary single-qubit state on the logical qubit of the
-            patch and hands it upward, so it can only cap a temporal pipe from
+            prepares one of eight single-qubit states (see
+            :data:`~tqec.utils.injection_state.INJECTION_STATES`) on the logical
+            qubit of the patch and hands it upward, so it can only cap a temporal pipe from
             below: exactly one pipe, timelike, with the injection cube at its
             lower end.
 
@@ -345,8 +346,9 @@ class Cube:
             surface must lie in the past of the cube. Default is ``None``.
         state: For an ``INJECTION`` cube only: which single-qubit state to prepare
             on the logical qubit, named exactly as in
-            :data:`~tqec.utils.injection_state.INJECTION_STATES`. Must be left at
-            its default for every other cube kind.
+            :data:`~tqec.utils.injection_state.INJECTION_STATES`. Defaults to
+            ``"i"``, the state ``S|+>``. Must be left at its default for every
+            other cube kind.
 
             Two caveats. ``"T"`` and ``"T_DAG"`` cannot be represented as a
             ``stim.Circuit`` at all, so they compile as a tagged Clifford stand-in
@@ -358,8 +360,8 @@ class Cube:
 
             Note also that a stabilizer state such as ``"0"`` currently still
             leaves the emitted observable non-deterministic: the injection leaf is
-            treated as an open boundary for every state, and teaching correlation
-            surfaces to terminate in a definite basis there is separate work.
+            treated as an open boundary for every state; correlation surfaces do
+            not yet terminate in a definite basis there.
 
     """
 

@@ -554,45 +554,8 @@ class TopologicalComputationGraph:
         The public entry points wrap this: :meth:`generate_stim_circuit` refuses
         such a state, and :meth:`generate_stim_text` renders it. Keeping the build
         itself unguarded is what lets the text path compile a non-Clifford
-        injection at all.
-
-
-        Args:
-            k: scale factor of the templates.
-            noise_model: noise model to be applied to the circuit.
-            manhattan_radius: radius considered to compute detectors.
-                Detectors are not computed and added to the circuit if this
-                argument is negative.
-            detector_database: an instance to retrieve from / store in detectors
-                that are computed as part of the circuit generation. If not given,
-                the detectors are retrieved from/stored in the provided
-                ``database_path``.
-            database_path: specify where to save to after the calculation. This
-                defaults to :data:`.DEFAULT_DETECTOR_DATABASE_PATH`
-                if not specified. If detector_database is not passed in, the code
-                attempts to retrieve the database from this location.
-            reschedule_measurements: whether to reschedule measurements in a ``LayoutLayer``
-                to be in the same moment. Since each plaquette may have its own measurement
-                schedule, setting this may be necessary for hardware that requires
-                measurements to be synchronous.
-            noiseless_injection: whether to exempt a state-injection encoder from
-                ``noise_model``. State injection is not fault tolerant, so a fault
-                in the encoder corrupts the injected state outright and dominates
-                the logical error rate; leaving the encoder noiseless isolates the
-                error rate of everything downstream. Only the encoder's own qubits
-                are exempted, in the encoder's moments: a patch sharing those
-                moments keeps its noise, and so do the injection patch's qubits
-                the encoder does not act on (they are reset before first use).
-                Has no effect without a ``noise_model``, or on a graph with no
-                injection cube.
-
-        Returns:
-            A compiled stim circuit.
-
-        Raises:
-            NotImplementedError: if ``noiseless_injection`` is set and a
-                repeated round precedes an injection encoder.
-
+        injection at all. Arguments, return value and errors are those of
+        :meth:`generate_stim_circuit`.
         """
         tree = self.to_layer_tree(k)
         circuit = tree.generate_circuit(
@@ -656,7 +619,34 @@ class TopologicalComputationGraph:
     ) -> stim.Circuit:
         """Generate the ``stim.Circuit`` from the compiled graph.
 
-        See :meth:`_build_stim_circuit` for the arguments.
+        Args:
+            k: scale factor of the templates.
+            noise_model: noise model to be applied to the circuit.
+            manhattan_radius: radius considered to compute detectors.
+                Detectors are not computed and added to the circuit if this
+                argument is negative.
+            detector_database: an instance to retrieve from / store in detectors
+                that are computed as part of the circuit generation. If not given,
+                the detectors are retrieved from/stored in the provided
+                ``database_path``.
+            database_path: specify where to save to after the calculation. This
+                defaults to :data:`.DEFAULT_DETECTOR_DATABASE_PATH`
+                if not specified. If detector_database is not passed in, the code
+                attempts to retrieve the database from this location.
+            reschedule_measurements: whether to reschedule measurements in a ``LayoutLayer``
+                to be in the same moment. Since each plaquette may have its own measurement
+                schedule, setting this may be necessary for hardware that requires
+                measurements to be synchronous.
+            noiseless_injection: whether to exempt a state-injection encoder from
+                ``noise_model``. State injection is not fault tolerant, so a fault
+                in the encoder corrupts the injected state outright and dominates
+                the logical error rate; leaving the encoder noiseless isolates the
+                error rate of everything downstream. Only the encoder's own qubits
+                are exempted, in the encoder's moments: a patch sharing those
+                moments keeps its noise, and so do the injection patch's qubits
+                the encoder does not act on (they are reset before first use).
+                Has no effect without a ``noise_model``, or on a graph with no
+                injection cube.
 
         Returns:
             A compiled stim circuit.
@@ -664,6 +654,8 @@ class TopologicalComputationGraph:
         Raises:
             TQECError: if the computation injects a state stim cannot represent.
                 Use :meth:`generate_stim_text` for those.
+            NotImplementedError: if ``noiseless_injection`` is set and a
+                repeated round precedes an injection encoder.
 
         """
         self._require_representable_states("generate_stim_text")
@@ -700,15 +692,48 @@ class TopologicalComputationGraph:
         With neither present the result is exactly
         ``str(self.generate_stim_circuit(...))``.
 
-        See :meth:`_build_stim_circuit` for the arguments.
+        Args:
+            k: scale factor of the templates.
+            noise_model: noise model to be applied to the circuit.
+            manhattan_radius: radius considered to compute detectors.
+                Detectors are not computed and added to the circuit if this
+                argument is negative.
+            detector_database: an instance to retrieve from / store in detectors
+                that are computed as part of the circuit generation. If not given,
+                the detectors are retrieved from/stored in the provided
+                ``database_path``.
+            database_path: specify where to save to after the calculation. This
+                defaults to :data:`.DEFAULT_DETECTOR_DATABASE_PATH`
+                if not specified. If detector_database is not passed in, the code
+                attempts to retrieve the database from this location.
+            reschedule_measurements: whether to reschedule measurements in a ``LayoutLayer``
+                to be in the same moment. Since each plaquette may have its own measurement
+                schedule, setting this may be necessary for hardware that requires
+                measurements to be synchronous.
+            noiseless_injection: whether to exempt a state-injection encoder from
+                ``noise_model``. State injection is not fault tolerant, so a fault
+                in the encoder corrupts the injected state outright and dominates
+                the logical error rate; leaving the encoder noiseless isolates the
+                error rate of everything downstream. Only the encoder's own qubits
+                are exempted, in the encoder's moments: a patch sharing those
+                moments keeps its noise, and so do the injection patch's qubits
+                the encoder does not act on (they are reset before first use).
+                Has no effect without a ``noise_model``, or on a graph with no
+                injection cube.
 
         Returns:
             the computation as Stim text.
 
         Raises:
             TQECError: if ``noise_model`` is given for a graph with conditional
-                cubes. Noise is applied to a ``stim.Circuit``, and the conditional
-                path never builds one.
+                cubes (noise is applied to a ``stim.Circuit``, and the conditional
+                path never builds one); or, for a graph with conditional cubes,
+                if the compiled conditions do not match them, a ``z``-layer holds
+                more than one, a condition reads no measurement, a conditional
+                observable is not XOR-decomposable, or a conditional cube's
+                branches differ inside a repeated round.
+            NotImplementedError: if ``noiseless_injection`` is set and a
+                repeated round precedes an injection encoder.
 
         """
         if self._conditional_blocks or self._conditional_abstract_observables:
@@ -880,7 +905,7 @@ class TopologicalComputationGraph:
     ) -> str:
         """Compile the graph into ``IF``/``ELSE``-annotated Stim text.
 
-        .. deprecated::
+        .. deprecated:: 0.2.0
             Use :meth:`generate_stim_text`, which covers ``IF``/``ELSE`` blocks
             and non-Clifford gates alike. This is a thin alias kept so existing
             callers keep working.
