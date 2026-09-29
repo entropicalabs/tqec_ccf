@@ -66,9 +66,16 @@ def _annotate_y_cube_readouts(
 
     This walks the z-slice's leaves for the round carrying such a spec, shifts
     its qubit coordinates (given in the local element frame) to the cube's
-    position, and XORs the matching measurements into the observable.
+    position, and XORs the matching measurements into the observable. Only the Y
+    cubes the surface actually reaches are read: another Y cube sharing the
+    slice belongs to another surface, and its readout is random for this one.
     """
-    if not any(c.cube.is_y_cube for c in obs_slice.top_readout_cubes):
+    y_positions = {
+        (c.cube.position.x, c.cube.position.y)
+        for c in obs_slice.top_readout_cubes
+        if c.cube.is_y_cube
+    }
+    if not y_positions:
         return
     for leaf in leaves:
         layout = leaf._layer
@@ -77,13 +84,16 @@ def _annotate_y_cube_readouts(
         for pos, layer in layout.layers.items():
             if not isinstance(layer, FlowSpecLayer):
                 continue
+            if not isinstance(pos, LayoutCubePosition2D):
+                raise TQECError("A RawCircuitLayer is only supported at a cube position.")
+            block = pos.to_block_position()
+            if (block.x, block.y) not in y_positions:
+                continue
             spec = layer.observable_spec(k)
             if not spec:
                 continue
-            if not isinstance(pos, LayoutCubePosition2D):
-                raise TQECError("A RawCircuitLayer is only supported at a cube position.")
             eshape = layout.element_shape.to_shape_2d(k)
-            bp = pos.to_block_position()
+            bp = block
             # The spec is in patch-local coordinates while ``records`` below is
             # keyed by the circuit's qubit coordinates, which are absolute: a
             # block at ``bp`` starts at ``bp * (eshape - 1)``. Offsetting by the

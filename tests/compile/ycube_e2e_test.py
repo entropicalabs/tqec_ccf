@@ -764,3 +764,37 @@ def test_y_init_shorter_than_its_slice_is_end_aligned(
     """
     circuit = compile_block_graph(build("ZXZ")).generate_stim_circuit(k=k)
     circuit.detector_error_model(decompose_errors=False)  # raises if non-deterministic
+
+
+def _two_gadgets_in_one_slice(origins: tuple[int, ...] = (0, 4)) -> BlockGraph:
+    """Build one two-cap gadget per origin, all four caps in the same z-slice."""
+    g = BlockGraph("two_gadgets_in_one_slice")
+    for x0 in origins:
+        column = [Position3D(x0, 0, z) for z in range(3)]
+        for p in column:
+            g.add_cube(p, ZXCube.ZXZ)
+        for below, above in pairwise(column):
+            g.add_pipe(below, above)
+        for dx in (-1, 1):
+            branch, cap = Position3D(x0 + dx, 0, 1), Position3D(x0 + dx, 0, 2)
+            g.add_cube(branch, ZXCube.ZXZ)
+            g.add_cube(cap, LeafCubeKind.Y_HALF_CUBE)
+            g.add_pipe(*sorted([branch, column[1]], key=lambda p: p.x))
+            g.add_pipe(branch, cap)
+    return g
+
+
+@pytest.mark.parametrize("k", [1, 2])
+def test_y_readout_reads_only_the_surface_s_own_y_cubes(k: int) -> None:
+    """Regression: a Y readout used to include every Y cube of the slice.
+
+    One gadget's closed surface reaches its own two caps only. The other
+    gadget's caps share the slice, and XORing their random readouts in made the
+    observable non-deterministic.
+    """
+    graph = _two_gadgets_in_one_slice()
+    own_surface = _two_gadgets_in_one_slice(origins=(0,)).find_correlation_surfaces()[0]
+    assert sorted(p.x for p in own_surface.positions if graph[p].is_y_cube) == [-1, 1]
+    circuit = compile_block_graph(graph, observables=[own_surface]).generate_stim_circuit(k=k)
+    assert circuit.num_observables == 1
+    circuit.detector_error_model(decompose_errors=False)  # raises if non-deterministic
