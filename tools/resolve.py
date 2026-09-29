@@ -129,15 +129,22 @@ def resolve_if_else(text: str, conditions: dict[int, int]) -> stim.Circuit:
             which may contain ``IF(rec[k]) { ... } ELSE { ... }`` blocks
             (``ELSE`` arm is optional).
         conditions: mapping from each IF block's ``rec`` offset (the negative
-            integer inside ``IF(rec[k])``) to the chosen outcome --
-            ``1`` selects the ``IF`` body, ``0`` selects the ``ELSE`` body
-            (or empty, if no ``ELSE`` arm).  Every distinct ``rec`` offset
+            integer inside ``IF(rec[k])``; for a multi-rec condition
+            ``IF(rec[a]^rec[b]^...)``, its first one, ``a``) to the chosen
+            outcome -- ``1`` selects the ``IF`` body, ``0`` selects the ``ELSE``
+            body (or empty, if no ``ELSE`` arm).  Every distinct ``rec`` offset
             appearing in the text MUST be present in this mapping. Blocks that
             share a ``rec`` offset all take the same outcome; use
-            :func:`resolve_if_else_by_order` to drive them independently.
+            :func:`resolve_if_else_by_order` to drive them independently, or
+            :func:`resolve_if_else_by_measurement` to key them by the
+            measurement their condition starts with.
 
     Returns:
         A vanilla ``stim.Circuit`` representing the resolved branch.
+
+    Raises:
+        ValueError: if an IF block's offset is missing from ``conditions``, or
+            an outcome is not 0 or 1.
 
     """
 

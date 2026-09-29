@@ -156,10 +156,13 @@ def merge_repeated_layers(
 
     Raises:
         TQECError: if the provided repeated layers do not all have the same
-            temporal footprint.
+            temporal footprint, or if a conditional position's branch-one
+            internal layer does not have the same structure as its branch-zero
+            one.
         NotImplementedError: if any of the provided repeated layers have an
             internal layer (i.e., the layer that is being repeated) with a
-            non-constant temporal footprint.
+            non-constant temporal footprint, or if the layers need the
+            least-common-multiple expansion while ``conditional_layers`` is given.
 
     Returns:
         a unique repeated layer implementing the same piece of computation as
@@ -290,6 +293,8 @@ def merge_sequenced_layers(
     Raises:
         NotImplementedError: if any of the provided sequenced layer contains a different sub-layer
             schedule.
+        TQECError: if a conditional position's branch-one layer at some timestep
+            does not have the same structure as its branch-zero one.
 
     Returns:
         a unique sequenced layer implementing the same piece of computation as
@@ -369,6 +374,18 @@ def merge_repeated_and_sequenced_layers(
     conditional_layers: dict[LayoutPosition2D, SequencedLayers | RepeatedLayer] | None = None,
 ) -> SequencedLayers:
     """Merge composed layers with both RepeatedLayer and SequencedLayers instances.
+
+    Args:
+        layers: the layers to merge, at least one of each type.
+        scalable_qubit_shape: scalable shape of a scalable qubit. Considered
+            valid across the whole domain.
+        conditional_layers: optional branch-``one`` alternates for positions
+            that originated from a conditional cube, keyed like ``layers``.
+            ``None`` for a merge with no conditional position.
+
+    Returns:
+        a unique sequenced layer implementing the same piece of computation as
+        the provided layers.
 
     Raises:
         TQECError: if there is no layer of type SequencedLayers.

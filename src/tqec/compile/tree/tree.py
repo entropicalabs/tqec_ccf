@@ -486,6 +486,11 @@ class LayerTree:
         Returns:
             A :class:`ConditionalCircuit` representing the full computation.
 
+        Raises:
+            TQECError: if a user-specified detector database is incompatible
+                with the running TQEC version, or if a repeated layer holds a
+                conditional descendant.
+
         """
         # Reuse the database-resolution prelude from generate_circuit by
         # delegating through _generate_annotations + condition_recs.

@@ -359,17 +359,23 @@ class Cube:
 
     @property
     def is_zx_cube(self) -> bool:
-        """Verify whether the cube is of kind ``ZXCube``."""
+        """Verify whether the cube is of kind :py:class:`~tqec.computation.cube.ZXCube`."""
         return isinstance(self.kind, ZXCube)
 
     @property
     def is_port(self) -> bool:
-        """Verify whether the cube is of kind ``PORT``."""
+        """Verify whether the cube is a port.
+
+        That is, of kind :py:attr:`~tqec.computation.cube.LeafCubeKind.PORT`.
+        """
         return self.kind is LeafCubeKind.PORT
 
     @property
     def is_y_cube(self) -> bool:
-        """Verify whether the cube is of kind ``Y_HALF_CUBE``."""
+        """Verify whether the cube is a Y half cube.
+
+        That is, of kind :py:attr:`~tqec.computation.cube.LeafCubeKind.Y_HALF_CUBE`.
+        """
         return self.kind is LeafCubeKind.Y_HALF_CUBE
 
     @property

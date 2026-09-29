@@ -6,11 +6,11 @@ At detector / observable emission, the active frame is consulted and the
 relevant ``rec[-K]`` indices are XOR-appended so the emitted record list is
 branch-independent.
 
-Stage 1 stub: identity Clifford propagation only.  A frame registered on
-qubit ``q`` at timestep ``t`` stays attached to ``q`` until a later
-``register_measurement`` call overrides it.  Real Clifford propagation
-(``CX``, ``CZ``, ``H``, ``S``, ...) is wired in a later stage when the
-emission code starts driving the tracker through actual gates.
+Clifford propagation is not implemented: a frame registered on qubit ``q`` at
+timestep ``t`` stays attached to ``q`` until a later ``register_measurement``
+call overrides it, and :meth:`PauliFrameTracker.propagate_through` is a no-op.
+The compiler does not use the tracker yet; branch-independent records currently
+come from the Equal Measurement Count and Canonical Emission Order assumptions.
 """
 
 from __future__ import annotations
@@ -68,9 +68,8 @@ class PauliFrameTracker:
     ) -> None:
         """Propagate frames through a Clifford gate.
 
-        Stage 1 stub: no-op.  When the emission code starts feeding the tracker
-        every gate it emits, this method will gain a Clifford propagation table
-        (``CX``: X1->X1X2 / Z2->Z1Z2 / etc.) so frames follow Pauli flow.
+        Not implemented: this is a no-op, so frames do not follow Pauli flow
+        through ``CX``, ``CZ``, ``H``, ``S`` or any other gate.
         """
         del gate_name, qubits, timestep
 
