@@ -23,6 +23,7 @@ from tqec.compile.specs.library.generators.fixed_bulk import FixedBulkConvention
 from tqec.compile.tree.node import LayerNode
 from tqec.compile.tree.tree import LayerTree
 from tqec.computation.cube import LeafCubeKind, ZXCube
+from tqec.computation.pipe import PipeKind
 from tqec.plaquette.compilation.base import IdentityPlaquetteCompiler
 from tqec.plaquette.rpng.translators.default import DefaultRPNGTranslator
 from tqec.utils.enums import Orientation
@@ -798,3 +799,14 @@ def test_y_readout_reads_only_the_surface_s_own_y_cubes(k: int) -> None:
     circuit = compile_block_graph(graph, observables=[own_surface]).generate_stim_circuit(k=k)
     assert circuit.num_observables == 1
     circuit.detector_error_model(decompose_errors=False)  # raises if non-deterministic
+
+
+def test_y_cube_on_a_hadamard_pipe_is_rejected() -> None:
+    """A Hadamard temporal pipe used to fail deep in the detector annotator."""
+    g = BlockGraph("y_cap_on_hadamard_pipe")
+    below, cap = Position3D(0, 0, 0), Position3D(0, 0, 1)
+    g.add_cube(below, ZXCube.ZXZ)
+    g.add_cube(cap, LeafCubeKind.Y_HALF_CUBE)
+    g.add_pipe(below, cap, PipeKind.from_str("ZXOH"))
+    with pytest.raises(NotImplementedError, match="Hadamard temporal pipe"):
+        compile_block_graph(g, observables=[]).generate_stim_circuit(k=1)

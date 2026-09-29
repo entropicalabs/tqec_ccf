@@ -33,20 +33,29 @@ def _y_cube_neighbour(cube: Cube, graph: BlockGraph) -> tuple[ZXCube, bool]:
     Raises:
         NotImplementedError: if the Y cube has no regular cube on either
             temporal side --- a Y cube attached only to a ``Port``, which is not
-            lowered.
+            lowered --- or if it is attached through a Hadamard temporal pipe,
+            which the construction does not account for.
 
     """
     position = cube.position
     below = Position3D(position.x, position.y, position.z - 1)
-    if graph.has_pipe_between(below, position):
-        below_kind = graph[below].kind
-        if isinstance(below_kind, ZXCube):
-            return below_kind, False
     above = Position3D(position.x, position.y, position.z + 1)
-    if graph.has_pipe_between(position, above):
-        above_kind = graph[above].kind
-        if isinstance(above_kind, ZXCube):
-            return above_kind, True
+    for u, v, neighbour, initialises in (
+        (below, position, below, False),
+        (position, above, above, True),
+    ):
+        if not graph.has_pipe_between(u, v):
+            continue
+        neighbour_kind = graph[neighbour].kind
+        if not isinstance(neighbour_kind, ZXCube):
+            continue
+        if graph.get_pipe(u, v).kind.has_hadamard:
+            raise NotImplementedError(
+                f"The Y cube at {position} is attached through a Hadamard temporal "
+                "pipe, which is not implemented. Attach it through a plain "
+                "temporal pipe."
+            )
+        return neighbour_kind, initialises
     raise NotImplementedError(
         f"The Y cube at {position} has no regular cube directly below or above "
         "it, so it is neither a Y-basis measurement cap nor a Y-basis "
