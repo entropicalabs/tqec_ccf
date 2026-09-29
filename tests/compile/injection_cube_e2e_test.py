@@ -24,6 +24,9 @@ from tqec.compile.specs.library.generators._injection_layer import (
     InjectionRawLayer,
 )
 from tqec.computation.block_graph import BlockGraph
+from tqec.computation.correlation import CorrelationSurface, ZXEdge, ZXNode
+from tqec.computation.cube import ConditionalLeafCubeKind
+from tqec.utils.enums import Basis
 from tqec.utils.exceptions import TQECError
 from tqec.utils.injection_state import INJECTION_STATES
 from tqec.utils.noise_model import NoiseModel
@@ -599,3 +602,31 @@ def test_injection_beside_a_y_cap_detects_every_stabilizer(k: int) -> None:
         and pitch <= instruction.gate_args_copy()[0] < 2 * pitch
     ]
     assert len(single_record_in_patch) == distance**2 - 1
+
+
+def test_stim_text_keeps_the_non_clifford_gate_beside_a_conditional_cube() -> None:
+    """A T injection sharing the compile with a conditional cube.
+
+    The conditional path emits through ``ConditionalCircuit`` and the Canonical
+    Emission Order batching, not the plain circuit; the tag has to survive both
+    for the real gate to come out.
+    """
+    graph = BlockGraph("T beside a conditional cube")
+    graph.add_cube(Position3D(0, 0, 0), "I", state="T")
+    graph.add_cube(Position3D(0, 0, 1), "ZXZ")
+    graph.add_pipe(Position3D(0, 0, 0), Position3D(0, 0, 1))
+    graph.add_cube(Position3D(1, 0, 0), "ZXZ")
+    graph.add_cube(Position3D(1, 0, 1), "ZXZ")
+    graph.add_pipe(Position3D(1, 0, 0), Position3D(1, 0, 1))
+    graph.add_cube(Position3D(2, 0, 1), "ZXZ")  # a lone cube the condition reads
+    condition = CorrelationSurface(
+        span=frozenset(
+            [ZXEdge(ZXNode(Position3D(2, 0, 1), Basis.Z), ZXNode(Position3D(2, 0, 1), Basis.Z))]
+        )
+    )
+    graph.add_cube(Position3D(1, 0, 2), ConditionalLeafCubeKind.ZXZ_ZXX, condition=condition)
+    graph.add_pipe(Position3D(1, 0, 1), Position3D(1, 0, 2))
+    text = compile_block_graph(graph, FIXED_BULK_CONVENTION, observables=None).generate_stim_text(1)
+    assert "IF(" in text
+    assert [line.split()[0] for line in text.splitlines() if line.split()[:1] == ["T"]] == ["T"]
+    assert "S[T]" not in text
