@@ -640,6 +640,7 @@ class BlockGraph:
         port: str | Position3D,
         kind: CubeKind | str,
         condition: CorrelationSurface | None = None,
+        state: str = DEFAULT_INJECTION_STATE,
     ) -> None:
         """Fill a single port at the specified position with a cube of the given kind.
 
@@ -649,6 +650,8 @@ class BlockGraph:
             condition: For a conditional cube kind, the correlation surface whose parity
                 selects the branch. Required for a conditional kind, must be ``None``
                 otherwise, and must lie strictly below the cube in ``z``. Default is None.
+            state: For an ``INJECTION`` cube only, which single-qubit state to inject.
+                See :py:attr:`~tqec.computation.cube.Cube.state`.
 
         Raises:
             TQECError: if there is no port with the given label or position.
@@ -671,7 +674,7 @@ class BlockGraph:
         if isinstance(kind, str):
             kind = cube_kind_from_string(kind)
 
-        fill_node = Cube(pos, kind, label, condition)
+        fill_node = Cube(pos, kind, label, condition, state=state)
         self._graph.add_node(pos, **{self._NODE_DATA_KEY: fill_node})
         for pipe in self.pipes_at(pos):
             self._graph.remove_edge(pipe.u.position, pipe.v.position)
@@ -687,6 +690,7 @@ class BlockGraph:
         self,
         fill: Mapping[str, CubeKind] | CubeKind,
         condition: CorrelationSurface | None = None,
+        state: str = DEFAULT_INJECTION_STATE,
     ) -> None:
         """Fill the ports at specified positions with cubes of the given kind.
 
@@ -699,6 +703,9 @@ class BlockGraph:
                 otherwise, and must lie strictly below the cube in ``z``. Default is None.
                 The same condition is given to every filled port, which a
                 ``ConditionalCorrelationSurface`` cannot then bind to a single cube.
+            state: For an ``INJECTION`` cube only, which single-qubit state to inject,
+                given to every filled port.
+                See :py:attr:`~tqec.computation.cube.Cube.state`.
 
         Raises:
             TQECError: if there is no port with the given label.
@@ -710,7 +717,7 @@ class BlockGraph:
             if label not in self._ports:
                 raise TQECError(f"There is no port with label {label}.")
             pos = self._ports[label]
-            fill_node = Cube(pos, kind, condition=condition)
+            fill_node = Cube(pos, kind, condition=condition, state=state)
             # Overwrite the node at the port position
             self._graph.add_node(pos, **{self._NODE_DATA_KEY: fill_node})
             for pipe in self.pipes_at(pos):

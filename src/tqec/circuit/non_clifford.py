@@ -1,12 +1,12 @@
 """Rendering a circuit whose gates stim cannot all represent.
 
-A state-injection cube can prepare a non-stabilizer state, which needs a gate
-stim has no name for: ``stim.Circuit("T 0")`` raises. Such a gate is compiled as
-the Clifford gate of the same rotation axis and half the angle, tagged with the
-gate it stands in for --- see :mod:`tqec.utils.injection_state` --- so the whole
-compile runs on an ordinary :class:`stim.Circuit`. What the tag buys is that the
-real gate can be put back at the one point it matters: when the circuit is
-serialised for something other than stim.
+A state-injection cube can prepare a non-stabilizer state, which needs a gate stim has
+no name for: ``stim.Circuit("T 0")`` raises. Such a gate is compiled as the Clifford
+gate of the same rotation axis and twice the angle (``S`` for ``T``), tagged with the
+gate it stands in for --- see :mod:`tqec.utils.injection_state` --- so the whole compile
+runs on an ordinary :class:`stim.Circuit`. What the tag buys is that the real gate can
+be put back at the one point it matters: when the circuit is serialised for something
+other than stim.
 
 The result is *text*, deliberately. It is not parseable by
 :class:`stim.Circuit`, which is the honest signal that it describes a

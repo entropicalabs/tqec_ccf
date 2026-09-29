@@ -267,3 +267,16 @@ def test_building_an_invalid_graph_is_allowed_until_validate() -> None:
     assert graph[_ABOVE].is_injection_cube
     with pytest.raises(TQECError, match="pipe must go up"):
         graph.validate()
+
+
+@pytest.mark.parametrize("fill", ["fill_port", "fill_ports"])
+def test_filling_a_port_with_an_injection_cube_keeps_its_state(fill: str) -> None:
+    graph = BlockGraph("port to fill")
+    graph.add_cube(Position3D(0, 0, 0), "PORT", "in")
+    graph.add_cube(Position3D(0, 0, 1), "ZXZ")
+    graph.add_pipe(Position3D(0, 0, 0), Position3D(0, 0, 1))
+    if fill == "fill_port":
+        graph.fill_port("in", "I", state="T")
+    else:
+        graph.fill_ports({"in": cube_kind_from_string("I")}, state="T")
+    assert graph[Position3D(0, 0, 0)].state == "T"
