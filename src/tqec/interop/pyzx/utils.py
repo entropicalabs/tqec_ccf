@@ -45,8 +45,8 @@ def cube_kind_to_zx(kind: CubeKind) -> tuple[VertexType, FractionLike]:
 
     The conversion is as follows:
 
-    - Port -> BOUNDARY spider with phase 0.
-    - YHalfCube -> Z spider with phase 1/2.
+    - ``LeafCubeKind.PORT`` -> BOUNDARY spider with phase 0.
+    - ``LeafCubeKind.Y_HALF_CUBE`` -> Z spider with phase 1/2.
     - ZXCube -> Z spider with phase 0 if it has only one Z basis boundary,
         otherwise X spider with phase 0.
 
@@ -55,6 +55,11 @@ def cube_kind_to_zx(kind: CubeKind) -> tuple[VertexType, FractionLike]:
 
     Returns:
         A tuple of vertex type and spider phase.
+
+    Raises:
+        NotImplementedError: if ``kind`` is a conditional cube kind, which has
+            no single spider.
+        TQECError: if ``kind`` is not a recognised cube kind.
 
     """
     if isinstance(kind, ZXCube):

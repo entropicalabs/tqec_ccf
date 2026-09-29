@@ -57,3 +57,20 @@ def test_cube_from_dict() -> None:
         "label": "",
     }
     assert Cube.from_dict(cube_dict) == Cube(Position3D(0, 0, 0), ZXCube.from_str("ZXZ"))
+
+
+def test_zx_cube_all_kinds() -> None:
+    assert ZXCube.all_kinds() == [
+        ZXCube.ZXZ,
+        ZXCube.XZZ,
+        ZXCube.ZXX,
+        ZXCube.XZX,
+        ZXCube.XXZ,
+        ZXCube.ZZX,
+    ]
+
+
+@pytest.mark.parametrize("basis", [Basis.X, Basis.Z])
+def test_zx_cube_with_one_basis_everywhere_is_rejected(basis: Basis) -> None:
+    with pytest.raises(TQECError, match="same basis along all axes"):
+        ZXCube((basis, basis, basis))

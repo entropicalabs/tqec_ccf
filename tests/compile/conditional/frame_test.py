@@ -1,4 +1,4 @@
-"""Unit tests for ``PauliFrameTracker`` (Stage 1 stub: identity propagation)."""
+"""Unit tests for ``PauliFrameTracker`` (identity propagation only)."""
 
 from __future__ import annotations
 

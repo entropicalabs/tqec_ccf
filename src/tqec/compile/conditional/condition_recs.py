@@ -10,23 +10,26 @@ lives **strictly below** the cube's z-layer (enforced at
 each ``(LayoutPosition3D, AbstractObservable)`` pair (the
 :class:`AbstractObservable` is pre-compiled by
 :func:`compile_block_graph` from the cube's surface, when the
-:class:`BlockGraph` context is in scope), returns the list of negative
-``rec`` offsets in the frame of the IfBlock emission point (start of
-the conditional cube's first leaf moment).
+:class:`BlockGraph` context is in scope), returns the **absolute** indices
+of the measurements whose XOR is the condition, counted from the first
+measurement of the whole circuit.
 
-Per-z-slice contributing qubits come from
-:meth:`ObservableBuilder.build` for each
-:class:`ObservableComponent` (bottom stabilisers, top readouts,
-realignment); per-leaf
-:meth:`MeasurementRecordsMap.from_scheduled_circuit` provides local
-rec offsets, then a "tail shift" (count of measurements after the
-contributing leaf, up to the IfBlock point) translates each local
-offset into the IfBlock frame.
+Absolute indices, rather than ``rec`` offsets, because one condition is shared
+by every ``IF`` a conditional cube emits (gates, detectors, observables), and
+each of those sits after a different number of measurements. The
+:class:`~tqec.compile.conditional.circuit.IfBlock` keeps them absolute and
+:meth:`~tqec.compile.conditional.circuit.ConditionalCircuit.to_stim_text`
+converts them to ``rec`` offsets at the position of each block.
+
+Per-z-slice contributing qubits come from :meth:`ObservableBuilder.build` for
+each :class:`ObservableComponent` (bottom stabilisers, top readouts,
+realignment). :func:`leaf_measurement_spans` gives each leaf's position in the
+circuit's measurement sequence, counting every repetition of a
+:class:`~tqec.compile.blocks.layers.composed.repeated.RepeatedLayer`.
 """
 
 from __future__ import annotations
 
-import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -43,79 +46,91 @@ if TYPE_CHECKING:
     from tqec.compile.tree.tree import LayerTree
 
 
-@dataclass
-class _LeafEntry:
-    """Per-leaf bookkeeping for tail-shift accounting."""
+@dataclass(frozen=True)
+class LeafMeasurements:
+    """Where a leaf's measurements sit in the measurement sequence of the circuit.
 
-    leaf: LayerNode
-    z: int
-    position_in_subtree: int
-    leaves_in_subtree: int
+    Attributes:
+        start: absolute index of the leaf's first measurement. For a leaf that
+            is repeated, this is its *last* repetition, the one whose records
+            later rounds refer to.
+        count: number of measurements the leaf performs, per repetition.
+        records: the leaf's own measurement records.
+        repeated: whether the leaf sits inside a repeated layer.
+
+    """
+
+    start: int
+    count: int
     records: MeasurementRecordsMap
-    num_measurements: int
+    repeated: bool
+
+    def absolute_index(self, qubit: GridQubit) -> int | None:
+        """Return the absolute index of the last measurement of ``qubit``, if any."""
+        if qubit not in self.records:
+            return None
+        return self.start + self.count + self.records[qubit][-1]
+
+    @property
+    def end(self) -> int:
+        """Absolute index just past the leaf's last measurement."""
+        return self.start + self.count
 
 
-def _get_ordered_leaves(root: LayerNode) -> list[LayerNode]:
+def leaf_measurement_spans(root: LayerNode, k: int) -> dict[int, LeafMeasurements]:
+    """Locate every leaf of the tree in the circuit's measurement sequence.
+
+    Walks the tree in time order, counting a
+    :class:`~tqec.compile.blocks.layers.composed.repeated.RepeatedLayer` body
+    once per repetition at ``k``, which is how the final circuit performs it.
+
+    Args:
+        root: root of the tree. Its first measurement has index 0.
+        k: scaling factor.
+
+    Returns:
+        a mapping from ``id(leaf)`` to that leaf's :class:`LeafMeasurements`.
+
+    Raises:
+        TQECError: if a leaf has not been annotated with its circuit yet.
+
+    """
+    spans: dict[int, LeafMeasurements] = {}
+
+    def walk(node: LayerNode, start: int, repeated: bool) -> int:
+        if node.is_leaf:
+            circuit = node.get_annotations(k).circuit
+            if circuit is None:
+                raise TQECError(
+                    "Cannot locate measurements before the leaves have been "
+                    "annotated with their circuits."
+                )
+            records = MeasurementRecordsMap.from_scheduled_circuit(circuit)
+            count = circuit.get_circuit().num_measurements
+            spans[id(node)] = LeafMeasurements(start, count, records, repeated)
+            return count
+        repetitions = node.repetitions
+        if repetitions is not None:
+            (body,) = node.children
+            reps = repetitions.integer_eval(k)
+            # Measure the body once, then place it at its last repetition.
+            per_repetition = walk(body, start, True)
+            walk(body, start + (reps - 1) * per_repetition, True)
+            return reps * per_repetition
+        total = 0
+        for child in node.children:
+            total += walk(child, start + total, repeated)
+        return total
+
+    walk(root, 0, False)
+    return spans
+
+
+def ordered_leaves(root: LayerNode) -> list[LayerNode]:
     """Return the leaves of the subtree in time order."""
     if root.is_leaf:
         return [root]
-    return [n for child in root.children for n in _get_ordered_leaves(child)]
-
-
-def _collect_pre_cond_entries(
-    tree_root: LayerNode, k: int, cond_z: int
-) -> tuple[list[_LeafEntry], list[list[LayerNode]]]:
-    """Collect the leaf entries of the subtrees below ``cond_z``, in time order.
-
-    Walk subtrees at ``z < cond_z`` in time order, returning per-leaf
-    entries plus the per-z list of ordered leaves (needed by the
-    component dispatch).
-    """
-    entries: list[_LeafEntry] = []
-    subtree_leaves: list[list[LayerNode]] = []
-    for z, subtree in enumerate(tree_root.children):
-        if z >= cond_z:
-            break
-        leaves = _get_ordered_leaves(subtree)
-        subtree_leaves.append(leaves)
-        for pos_in_subtree, leaf in enumerate(leaves):
-            circuit = leaf.get_annotations(k).circuit
-            if circuit is None:
-                raise TQECError(
-                    "resolve_condition_recs: leaf at z={z}, position {pos_in_subtree} "
-                    "has no circuit annotation. Run circuit annotation before "
-                    "condition resolution."
-                )
-            records = MeasurementRecordsMap.from_scheduled_circuit(circuit)
-            num = sum(len(o) for o in records.mapping.values())
-            entries.append(
-                _LeafEntry(
-                    leaf=leaf,
-                    z=z,
-                    position_in_subtree=pos_in_subtree,
-                    leaves_in_subtree=len(leaves),
-                    records=records,
-                    num_measurements=num,
-                )
-            )
-    return entries, subtree_leaves
-
-
-def _compute_tail_shifts(entries: list[_LeafEntry]) -> list[int]:
-    """Return, per entry, the count of measurements between it and the IfBlock.
-
-    Return ``shifts`` where ``shifts[i]`` is the count of measurements
-    that happen *after* ``entries[i]`` and up to the IfBlock emission
-    point (which is the moment immediately after the last entry). A
-    qubit measured at ``entries[i]`` with local offset ``-r`` translates
-    to IfBlock-frame offset ``-r - shifts[i]``.
-    """
-    shifts: list[int] = [0] * len(entries)
-    running = 0
-    for i in range(len(entries) - 1, -1, -1):
-        shifts[i] = running
-        running += entries[i].num_measurements
-    return shifts
+    return [n for child in root.children for n in ordered_leaves(child)]
 
 
 def _qubits_for_component(
@@ -131,30 +146,24 @@ def _qubits_for_component(
 
 
 def _resolve_one(
-    cond_pos: LayoutPosition3D,
     obs: AbstractObservable,
-    entries: list[_LeafEntry],
     subtree_leaves: list[list[LayerNode]],
-    tail_shifts: list[int],
+    spans: dict[int, LeafMeasurements],
     k: int,
     observable_builder: ObservableBuilder,
 ) -> list[int]:
-    entry_by_leaf_id: dict[int, tuple[_LeafEntry, int]] = {
-        id(e.leaf): (e, i) for i, e in enumerate(entries)
-    }
-    recs: list[int] = []
+    """Return the sorted absolute indices of the measurements ``obs`` reads."""
+    indices: list[int] = []
 
     def collect(leaf: LayerNode, qubits: set[GridQubit]) -> None:
-        entry, idx = entry_by_leaf_id[id(leaf)]
-        shift = tail_shifts[idx]
+        span = spans[id(leaf)]
         for q in qubits:
-            if q not in entry.records:
-                # qubit named by builder but not measured in this leaf
-                # (builder may emit stretched-stabiliser placeholders);
-                # skip exactly like get_observable_with_measurement_records.
-                continue
-            local = entry.records[q][-1]
-            recs.append(local - shift)
+            # The builder may name a qubit this leaf does not measure (a
+            # stretched-stabiliser placeholder); skip it, exactly like
+            # get_observable_with_measurement_records.
+            index = span.absolute_index(q)
+            if index is not None:
+                indices.append(index)
 
     for z, leaves in enumerate(subtree_leaves):
         obs_slice = obs.slice_at_z(z)
@@ -181,7 +190,12 @@ def _resolve_one(
         if top_qubits:
             collect(readout_leaf, top_qubits)
 
-    return sorted(recs)
+    return sorted(indices)
+
+
+def _leaves_below(tree: LayerTree, z_index: int) -> list[list[LayerNode]]:
+    """Return the time-ordered leaves of each z-subtree strictly below ``z_index``."""
+    return [ordered_leaves(subtree) for subtree in tree._root.children[:z_index]]
 
 
 def resolve_surface_condition_recs(
@@ -190,42 +204,43 @@ def resolve_surface_condition_recs(
     obs: AbstractObservable,
     anchor_z: int,
     observable_builder: ObservableBuilder,
+    min_z: int = 0,
     *,
     debug_label: str = "<surface-anchored condition>",
 ) -> list[int]:
-    """Resolve a surface-anchored condition to ``rec`` offsets.
+    """Resolve a surface-anchored condition to absolute measurement indices.
 
-    Resolve a surface-anchored condition (no associated conditional cube)
-    to a list of ``rec`` offsets, computed at an IfBlock that lives on the
-    leaf at z = ``anchor_z`` (exclusive — so the condition's measurements
-    must live at z < anchor_z).
+    A surface-anchored condition has no conditional cube of its own; it reads
+    the measurements of every z-layer strictly below ``anchor_z``. Uses the same
+    machinery as :func:`resolve_condition_recs`.
 
-    Mirrors :func:`resolve_condition_recs` but for a single condition that
-    is not tied to a cube position. Uses the same machinery
-    (``_collect_pre_cond_entries`` + ``_compute_tail_shifts`` +
-    ``_resolve_one``) keyed purely on ``anchor_z``.
+    Args:
+        tree: the layer tree, with its leaves annotated with their circuits.
+        k: scaling factor.
+        obs: the condition, compiled to an abstract observable.
+        anchor_z: absolute z of the first layer the condition may not read.
+        observable_builder: builder lowering ``obs`` to measured qubits.
+        min_z: smallest z of the computation, the z of the tree's first layer.
+        debug_label: how to name the condition in an error message.
+
+    Returns:
+        the sorted absolute indices (0 for the circuit's first measurement) of
+        the measurements whose XOR is the condition.
+
+    Raises:
+        TQECError: if the condition reads no measurement at all.
+
     """
-    entries, subtree_leaves = _collect_pre_cond_entries(tree._root, k, anchor_z)
-    tail_shifts = _compute_tail_shifts(entries)
-    recs = _resolve_one(
-        # cond_pos is only used for diagnostics inside _resolve_one (none here)
-        None,  # type: ignore[arg-type]
-        obs,
-        entries,
-        subtree_leaves,
-        tail_shifts,
-        k,
-        observable_builder,
-    )
-    if not recs:
-        warnings.warn(
-            f"resolve_surface_condition_recs: {debug_label} resolved to no "
-            f"measurement records in any leaf at z<{anchor_z}. Falling back "
-            "to placeholder rec[-1]; the IF branch selection is meaningless.",
-            stacklevel=2,
+    spans = leaf_measurement_spans(tree._root, k)
+    indices = _resolve_one(obs, _leaves_below(tree, anchor_z - min_z), spans, k, observable_builder)
+    if not indices:
+        raise TQECError(
+            f"{debug_label} reads no measurement in any layer below z={anchor_z}, "
+            "so no IF can be conditioned on it. This happens when the surface only "
+            "crosses data qubits that a temporal pipe carries on instead of "
+            "measuring."
         )
-        recs = [-1]
-    return recs
+    return indices
 
 
 def resolve_condition_recs(
@@ -233,50 +248,48 @@ def resolve_condition_recs(
     k: int,
     conditional_observables: dict[LayoutPosition3D, AbstractObservable],
     observable_builder: ObservableBuilder,
+    min_z: int = 0,
 ) -> dict[LayoutPosition3D, list[int]]:
-    """Resolve each abstract observable to ``rec`` offsets in the IfBlock frame.
+    """Resolve each conditional cube's condition to absolute measurement indices.
 
-    Resolve each pre-compiled :class:`AbstractObservable` to a list of
-    ``rec`` offsets in the IfBlock emission frame.
-
-    For each ``(cond_pos, obs)`` pair:
-
-    1. Walk the leaves of subtrees at ``z < cond_pos.z`` to collect
-       per-leaf :class:`MeasurementRecordsMap` and per-leaf measurement
-       counts.
-    2. For each z-slice and each observable component (bottom
-       stabilisers, top readouts, realignment), invoke
-       :meth:`ObservableBuilder.build` on the appropriate leaf to derive
-       the contributing qubits, then look up each qubit's local rec
-       offset and shift it into the IfBlock emission frame.
+    For each ``(cond_pos, obs)`` pair, walks the leaves of the layers strictly
+    below ``cond_pos.z``, lowers each z-slice and observable component (bottom
+    stabilisers, top readouts, realignment) to measured qubits with
+    :meth:`ObservableBuilder.build`, and locates each measurement in the
+    circuit with :func:`leaf_measurement_spans`.
 
     Causality (every surface node lives at ``z < cube.z``) is enforced
     upstream at :meth:`Cube.__post_init__`; no defensive re-check here.
 
+    Args:
+        tree: the layer tree, with its leaves annotated with their circuits.
+        k: scaling factor.
+        conditional_observables: each conditional cube's condition, compiled to
+            an abstract observable.
+        observable_builder: builder lowering the conditions to measured qubits.
+        min_z: smallest z of the computation, the z of the tree's first layer.
+
     Returns:
-        ``dict`` mapping each ``cond_pos`` to a sorted list of negative
-        ``rec`` offsets (the IF/ELSE condition is their XOR).
+        ``dict`` mapping each ``cond_pos`` to the sorted absolute indices (0
+        for the circuit's first measurement) of the measurements whose XOR
+        selects the branch.
+
+    Raises:
+        TQECError: if a condition reads no measurement at all.
 
     """
+    spans = leaf_measurement_spans(tree._root, k)
     result: dict[LayoutPosition3D, list[int]] = {}
     for cond_pos, obs in conditional_observables.items():
-        entries, subtree_leaves = _collect_pre_cond_entries(tree._root, k, cond_pos.z)
-        tail_shifts = _compute_tail_shifts(entries)
-        recs = _resolve_one(
-            cond_pos, obs, entries, subtree_leaves, tail_shifts, k, observable_builder
+        indices = _resolve_one(
+            obs, _leaves_below(tree, cond_pos.z - min_z), spans, k, observable_builder
         )
-        if not recs:
-            warnings.warn(
-                f"resolve_condition_recs: surface for conditional cube at "
-                f"{cond_pos} resolved to no measurement records in any "
-                "pre-cond leaf. This likely means the surface picks "
-                "data-qubit readouts that are absorbed by a temporal pipe, "
-                "or otherwise targets a measurement that does not exist in "
-                "z<cond_z. Falling back to placeholder rec[-1] so emission "
-                "produces syntactically valid Stim text; the resulting "
-                "IF/ELSE branch selection is meaningless.",
-                stacklevel=2,
+        if not indices:
+            raise TQECError(
+                f"The condition of the conditional cube at {cond_pos} reads no "
+                "measurement in any layer below it, so its IF/ELSE branch cannot "
+                "be selected. This happens when the surface only crosses data "
+                "qubits that a temporal pipe carries on instead of measuring."
             )
-            recs = [-1]
-        result[cond_pos] = recs
+        result[cond_pos] = indices
     return result

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from tests.compile.conditional._conditions import add_condition_source
 from tqec.compile.compile import compile_block_graph
 from tqec.compile.convention import FIXED_BULK_CONVENTION
 from tqec.computation.block_graph import BlockGraph
@@ -26,17 +27,18 @@ def test_two_conditional_cubes_distinct_z_emits_separate_ifblocks() -> None:
     a0 = Position3D(0, 0, 0)
     a1 = Position3D(0, 0, 1)
     g.add_cube(a0, _INIT_KIND)
-    g.add_cube(a1, ConditionalLeafCubeKind.XZX_XZZ, condition=_placeholder_condition(a0))
+    g.add_cube(Position3D(2, 0, 0), _INIT_KIND)  # b0, added first so the source lands beside it
+    condition = add_condition_source(g)
+    g.add_cube(a1, ConditionalLeafCubeKind.XZX_XZZ, condition=condition)
     g.add_pipe(a0, a1)
     # Column B: z=0 init -> z=1 mid -> z=2 mid -> z=3 conditional (leaf).
     b0 = Position3D(2, 0, 0)
     b1 = Position3D(2, 0, 1)
     b2 = Position3D(2, 0, 2)
     b3 = Position3D(2, 0, 3)
-    g.add_cube(b0, _INIT_KIND)
     g.add_cube(b1, _INIT_KIND)
     g.add_cube(b2, _INIT_KIND)
-    g.add_cube(b3, ConditionalLeafCubeKind.XZX_XZZ, condition=_placeholder_condition(b2))
+    g.add_cube(b3, ConditionalLeafCubeKind.XZX_XZZ, condition=condition)
     g.add_pipe(b0, b1)
     g.add_pipe(b1, b2)
     g.add_pipe(b2, b3)

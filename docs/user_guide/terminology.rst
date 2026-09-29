@@ -98,20 +98,29 @@ When connected with two or more spatial pipes, they form **spatial junctions**:
 The circuits that implement these spatial cubes are more complex than the circuits for the other cubes, and special care needs to be taken to avoid
 the hook errors from decreasing the circuit-level code distance.
 
-:py:class:`~tqec.computation.YHalfCube`
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+``LeafCubeKind.Y_HALF_CUBE``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 A green cube representing inplace Y-basis logical initialization or measurement as proposed in `this paper <https://quantum-journal.org/papers/q-2024-04-08-1310/>`_.
 The cube's function, whether for initialization or measurement, is determined by its connection to other cubes, either upwards or downwards.
 
-A ``YHalfCube`` occupies :math:`\approx d^3 /2` spacetime volume, where :math:`d` is the code distance.
+A Y half cube occupies :math:`\approx d^3 /2` spacetime volume, where :math:`d` is the code distance.
 
-:py:class:`~tqec.computation.Port`
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+``LeafCubeKind.PORT``
+~~~~~~~~~~~~~~~~~~~~~
 
 A port is a special type of cube that represents the input or output of a logical computation.
 It functions as a virtual cube, serving only as a placeholder for other sources or sinks of logical information.
 Therefore, ports are not visualized in spacetime diagrams and occupy zero spacetime volume.
+
+:py:class:`~tqec.computation.cube.ConditionalLeafCubeKind`
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A conditional cube is one of two :py:class:`~tqec.computation.cube.ZXCube` kinds, chosen
+at runtime: ``ZXZ_ZXX`` is a ``ZXZ`` cube when its condition is 0 and a ``ZXX`` cube when
+it is 1. The condition is the parity of a correlation surface measured strictly below the
+cube, passed as ``condition=`` to :py:meth:`~tqec.computation.block_graph.BlockGraph.add_cube`.
+See :doc:`current_limitations` for what is supported.
 
 .. _pipe:
 

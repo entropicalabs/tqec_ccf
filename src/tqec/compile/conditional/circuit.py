@@ -4,8 +4,8 @@ Vanilla ``stim.Circuit`` (1.15) has no notion of an ``IF`` block, so the
 conditional-cube compilation path emits its output via this thin wrapper.
 ``ConditionalCircuit`` mirrors a useful subset of ``stim.Circuit.append``
 and adds :meth:`append_if` for explicit ``IF(rec[-k]) { ... } ELSE { ... }``
-blocks.  :meth:`to_stim_text` serialises to the Stim text dialect used by
-``loom-weave``'s parser; :meth:`to_stim_circuit_strict` round-trips back to
+blocks.  :meth:`to_stim_text` serialises to Stim text extended with those
+blocks; :meth:`to_stim_circuit_strict` round-trips back to
 ``stim.Circuit`` and raises if any ``IfBlock`` is still present.
 
 The :func:`remap_entry_qubit_indices` helper rewrites qubit-target indices on
@@ -30,11 +30,22 @@ if TYPE_CHECKING:
 class IfBlock:
     """An ``IF(rec[-k]^rec[-j]^...) { ... } ELSE { ... }`` block.
 
-    ``condition_recs`` is the list of negative ``rec`` offsets whose XOR
-    selects the ``then_body`` branch at the point the block is emitted. A
-    single-element list renders as ``IF(rec[-k])``; multiple offsets render
-    as ``IF(rec[-a]^rec[-b]^...)``. ``else_body`` is optional; when absent,
-    only the ``IF`` arm is rendered.
+    ``condition_recs`` lists the measurements whose XOR selects the
+    ``then_body`` branch, in one of two forms:
+
+    * negative ``rec`` offsets, relative to the point the block is emitted,
+      rendered as given;
+    * non-negative *absolute* measurement indices (0 for the first measurement
+      of the circuit being rendered). They are converted to ``rec`` offsets
+      when the enclosing :class:`ConditionalCircuit` is rendered, from the
+      number of measurements that precede the block there. The compiler uses
+      this form: one condition is shared by every ``IF`` of a conditional
+      cube, and each of them sits after a different number of measurements.
+
+    The two forms cannot be mixed within one block. A single-element list
+    renders as ``IF(rec[-k])``; multiple offsets render as
+    ``IF(rec[-a]^rec[-b]^...)``. ``else_body`` is optional; when absent, only
+    the ``IF`` arm is rendered.
     """
 
     condition_recs: list[int]
@@ -44,6 +55,11 @@ class IfBlock:
     def __post_init__(self) -> None:
         if not self.condition_recs:
             raise ValueError("IfBlock requires at least one condition rec offset.")
+        if len({r < 0 for r in self.condition_recs}) > 1:
+            raise ValueError(
+                "IfBlock condition_recs mixes relative rec offsets (negative) with "
+                f"absolute measurement indices (non-negative): {self.condition_recs}."
+            )
 
     def append(self, entry: CircuitEntry) -> None:
         """Append an entry to the ``then_body`` (``IF`` arm)."""
@@ -138,7 +154,7 @@ class ConditionalCircuit:
     def to_stim_text(self) -> str:
         """Serialise to Stim text with ``IF(rec[-k]) { ... } ELSE { ... }`` blocks."""
         lines: list[str] = []
-        _render(self._entries, lines, indent=0)
+        _render(self._entries, lines, indent=0, measurements_before=0)
         return "\n".join(lines)
 
     def to_stim_circuit_strict(self) -> stim.Circuit:
@@ -189,17 +205,72 @@ def remap_entry_qubit_indices(
     return stim.CircuitInstruction(entry.name, new_targets, list(entry.gate_args_copy()))
 
 
-def _render(entries: list[CircuitEntry], lines: list[str], indent: int) -> None:
+def _measured_qubits(entry: CircuitEntry) -> list[int]:
+    """Return the qubits ``entry`` measures, one per measurement, in record order.
+
+    For an :class:`IfBlock` this is the sequence of either branch, which the
+    Equal Measurement Count and Canonical Emission Order assumptions make
+    identical: every later ``rec`` offset, and the branch-zero measurement
+    records the detectors of both branches are built from, depend on it.
+
+    Raises:
+        ValueError: if the two branches of an :class:`IfBlock` measure a
+            different number of qubits, or different qubits in some position.
+
+    """
+    if isinstance(entry, IfBlock):
+        then_qubits = [q for e in entry.then_body for q in _measured_qubits(e)]
+        if entry.else_body is not None:
+            else_qubits = [q for e in entry.else_body for q in _measured_qubits(e)]
+            if else_qubits != then_qubits:
+                raise ValueError(
+                    "The two branches of an IfBlock do not measure the same qubits "
+                    f"in the same order ({then_qubits} vs {else_qubits}), so no later "
+                    "rec offset can be branch-independent."
+                )
+        return then_qubits
+    circuit = stim.Circuit()
+    circuit.append(entry)
+    if circuit.num_measurements == 0:
+        return []
+    qubits = [t.qubit_value for t in entry.targets_copy() if t.is_qubit_target]
+    if len(qubits) != circuit.num_measurements:
+        # A multi-qubit measurement (e.g. MPP): its records are not per qubit,
+        # so only the count is meaningful. Represent each record by -1.
+        return [-1] * circuit.num_measurements
+    return [q for q in qubits if q is not None]
+
+
+def _rendered_condition(condition_recs: list[int], measurements_before: int) -> list[int]:
+    """Return ``condition_recs`` as ``rec`` offsets at a point after ``measurements_before``."""
+    if condition_recs[0] < 0:
+        return list(condition_recs)
+    late = [index for index in condition_recs if index >= measurements_before]
+    if late:
+        raise ValueError(
+            f"An IF condition refers to measurement(s) {late}, but only "
+            f"{measurements_before} measurements precede the IF block."
+        )
+    return [index - measurements_before for index in condition_recs]
+
+
+def _render(
+    entries: list[CircuitEntry], lines: list[str], indent: int, measurements_before: int
+) -> int:
+    """Render ``entries`` into ``lines`` and return the measurements performed so far."""
     pad = "  " * indent
     for entry in entries:
         if isinstance(entry, IfBlock):
-            cond = "^".join(f"rec[{r}]" for r in entry.condition_recs)
+            condition = _rendered_condition(entry.condition_recs, measurements_before)
+            cond = "^".join(f"rec[{r}]" for r in condition)
             lines.append(f"{pad}IF({cond}) {{")
-            _render(entry.then_body, lines, indent + 1)
+            _render(entry.then_body, lines, indent + 1, measurements_before)
             if entry.else_body is not None:
                 lines.append(f"{pad}}} ELSE {{")
-                _render(entry.else_body, lines, indent + 1)
+                _render(entry.else_body, lines, indent + 1, measurements_before)
             lines.append(f"{pad}}}")
         else:
             text = str(entry).strip()
             lines.extend(f"{pad}{line}" for line in text.splitlines())
+        measurements_before += len(_measured_qubits(entry))
+    return measurements_before

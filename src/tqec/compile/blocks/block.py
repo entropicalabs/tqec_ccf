@@ -206,10 +206,9 @@ class ConditionalBlock(Block):
 
     Carries two sibling :class:`Block` instances --- one per branch of the
     enclosing :class:`~tqec.computation.cube.ConditionalLeafCubeKind`.
-    Downstream emission code is expected to special-case this type to produce
-    ``IF/ELSE`` wrapped Stim output.  Until that wiring lands, the inherited
-    :class:`Block` API exposes the false-branch layer sequence so vanilla
-    emission still produces a one-branch circuit.
+    The inherited :class:`Block` API exposes the zero branch's layer sequence,
+    so plain emission produces a one-branch circuit; ``IF``/``ELSE`` emission
+    reads both branches through :attr:`block_if_zero` and :attr:`block_if_one`.
 
     Construction enforces the Equal Measurement Count assumption structurally:
     both branches must share the same plaquette-meas signature per layer.
@@ -226,7 +225,7 @@ class ConditionalBlock(Block):
         Args:
             block_if_zero: the block executed when the condition evaluates to 0.
             block_if_one: the block executed when the condition evaluates to 1.
-            condition: the correlation surface whose Z outcome selects the branch.
+            condition: the correlation surface whose parity selects the branch.
 
         Raises:
             TQECError: if the two branches differ in their number of layers or
@@ -264,7 +263,7 @@ class ConditionalBlock(Block):
 
     @property
     def condition(self) -> CorrelationSurface:
-        """Correlation surface whose Z outcome selects the active branch."""
+        """Correlation surface whose parity selects the active branch."""
         return self._condition
 
     @override

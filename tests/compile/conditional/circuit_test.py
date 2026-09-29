@@ -72,3 +72,65 @@ def test_to_stim_circuit_strict_roundtrip_when_no_branches() -> None:
     c.append("M", [0])
     sc = c.to_stim_circuit_strict()
     assert len(sc) == 2
+
+
+def test_absolute_condition_is_rendered_relative_to_each_block() -> None:
+    """One absolute condition, shared by two IF blocks, reads the same measurement."""
+    c = ConditionalCircuit()
+    c.append("M", [0, 1])
+    c.append_if(IfBlock(condition_recs=[1], then_body=[stim.CircuitInstruction("X", [2])]))
+    c.append("M", [3, 4, 5])
+    c.append_if(IfBlock(condition_recs=[1], then_body=[stim.CircuitInstruction("X", [2])]))
+    ifs = [line for line in c.to_stim_text().splitlines() if line.startswith("IF")]
+    assert ifs == ["IF(rec[-1]) {", "IF(rec[-4]) {"]
+
+
+def test_absolute_condition_counts_measurements_inside_if_blocks() -> None:
+    c = ConditionalCircuit()
+    c.append("M", [0])
+    c.append_if(
+        IfBlock(
+            condition_recs=[0],
+            then_body=[stim.CircuitInstruction("M", [1])],
+            else_body=[stim.CircuitInstruction("MX", [1])],
+        )
+    )
+    c.append_if(IfBlock(condition_recs=[0], then_body=[stim.CircuitInstruction("X", [2])]))
+    ifs = [line for line in c.to_stim_text().splitlines() if line.startswith("IF")]
+    assert ifs == ["IF(rec[-1]) {", "IF(rec[-2]) {"]
+
+
+def test_absolute_condition_on_a_future_measurement_is_rejected() -> None:
+    c = ConditionalCircuit()
+    c.append("M", [0])
+    c.append_if(IfBlock(condition_recs=[1]))
+    with pytest.raises(ValueError, match="only 1 measurements precede"):
+        c.to_stim_text()
+
+
+def test_ifblock_rejects_mixed_relative_and_absolute_condition() -> None:
+    with pytest.raises(ValueError, match="mixes relative"):
+        IfBlock(condition_recs=[-1, 3])
+
+
+@pytest.mark.parametrize(
+    "else_body",
+    [
+        [stim.CircuitInstruction("R", [0])],
+        [stim.CircuitInstruction("M", [1])],
+    ],
+    ids=["different-count", "different-qubit"],
+)
+def test_branches_measuring_differently_are_rejected(
+    else_body: list[stim.CircuitInstruction],
+) -> None:
+    c = ConditionalCircuit()
+    c.append_if(
+        IfBlock(
+            condition_recs=[-1],
+            then_body=[stim.CircuitInstruction("M", [0])],
+            else_body=list(else_body),
+        )
+    )
+    with pytest.raises(ValueError, match="do not measure the same qubits"):
+        c.to_stim_text()

@@ -7,7 +7,8 @@ import re
 import pytest
 import stim
 
-from tools.resolve import resolve_if_else
+from tests.compile.conditional._conditions import add_condition_source
+from tools.resolve import resolve_if_else, resolve_if_else_by_measurement
 from tqec.compile.blocks.block import ConditionalBlock
 from tqec.compile.compile import _resolve_conditional_cubes, compile_block_graph
 from tqec.compile.convention import FIXED_BULK_CONVENTION
@@ -130,6 +131,27 @@ def test_invalid_outcome_raises() -> None:
         resolve_if_else(text, conditions={-1: 2})
 
 
+def _absolute_condition_indices(text: str) -> list[list[int]]:
+    """Return, for each IF block of ``text``, the absolute indices its condition reads."""
+    circuit_so_far: list[str] = []
+    result: list[list[int]] = []
+    in_else = False
+    for raw in text.splitlines():
+        line = raw.strip()
+        match = re.match(r"IF\((.*)\) \{", line)
+        if match:
+            measured = stim.Circuit("\n".join(circuit_so_far)).num_measurements
+            offsets = [int(r) for r in re.findall(r"rec\[(-?\d+)\]", match.group(1))]
+            result.append([measured + r for r in offsets])
+        elif line.startswith("} ELSE {"):
+            in_else = True
+        elif line == "}":
+            in_else = False
+        elif line and not in_else:
+            circuit_so_far.append(line)
+    return result
+
+
 def test_resolve_matches_inplace_branch_compile() -> None:
     """Reproduce the per-branch compiled circuit by resolving the IF/ELSE text.
 
@@ -143,23 +165,19 @@ def test_resolve_matches_inplace_branch_compile() -> None:
     """
     p_cond = Position3D(0, 0, 1)
     p_init = Position3D(0, 0, 0)
-    # Causal surface (z=0, below cond cube at z=1) — Cube.__post_init__
-    # rejects condition surfaces that reach z >= cube.z.
-    cond = CorrelationSurface(
-        span=frozenset([ZXEdge(ZXNode(p_init, Basis.Z), ZXNode(p_init, Basis.Z))])
-    )
     pair = ConditionalLeafCubeKind.XZX_XZZ
 
     g = BlockGraph("resolve roundtrip")
     g.add_cube(p_init, pair.value[0].name)
-    g.add_cube(p_cond, pair, condition=cond)
+    # Causal surface (z=0, below cond cube at z=1) — Cube.__post_init__
+    # rejects condition surfaces that reach z >= cube.z.
+    g.add_cube(p_cond, pair, condition=add_condition_source(g))
     g.add_pipe(p_init, p_cond)
     cg = compile_block_graph(g, FIXED_BULK_CONVENTION, observables=None)
     text = cg.generate_conditional_stim_text(k=1)
-    # Extract the rec the resolver chose for branch-fixing below.
-    _m = re.search(r"IF\(([^)]+)\)", text)
-    assert _m is not None
-    _rec = int(_m.group(1).split("^")[0].strip().lstrip("rec[").rstrip("]"))
+    # The measurement the condition starts with: the key of every IF block the
+    # conditional cube emits, whatever rec offset each one renders it at.
+    ((condition_start,),) = {tuple(sorted(recs))[:1] for recs in _absolute_condition_indices(text)}
 
     # In-place: temporarily replace the ConditionalBlock with one of its
     # sub-blocks and call the normal generate_stim_circuit; restore after.
@@ -177,11 +195,11 @@ def test_resolve_matches_inplace_branch_compile() -> None:
             cg._blocks[cond_pos] = original_block
             cg._conditional_blocks = original_cond
 
-    resolved_zero = resolve_if_else(text, conditions={_rec: 0})
+    resolved_zero = resolve_if_else_by_measurement(text, {condition_start: 0})
     reference_zero = _inplace(0)
     _assert_circuits_equivalent_modulo_detector_order(resolved_zero, reference_zero)
 
-    resolved_one = resolve_if_else(text, conditions={_rec: 1})
+    resolved_one = resolve_if_else_by_measurement(text, {condition_start: 1})
     reference_one = _inplace(1)
     _assert_circuits_equivalent_modulo_detector_order(resolved_one, reference_one)
 

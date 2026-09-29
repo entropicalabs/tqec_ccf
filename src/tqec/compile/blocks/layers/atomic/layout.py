@@ -333,7 +333,10 @@ class LayoutLayer(BaseLayer):
             a :class:`ConditionalCircuit` representing the layer.
 
         Raises:
-            TQECError: if :attr:`conditional_layers` is empty.
+            TQECError: if :attr:`conditional_layers` is empty, or if the two
+                branches do not share the same template structure.
+            NotImplementedError: if a layer of either branch is not a
+                :class:`~tqec.compile.blocks.layers.atomic.plaquettes.PlaquetteLayer`.
 
         """
         if not self._conditional_layers:

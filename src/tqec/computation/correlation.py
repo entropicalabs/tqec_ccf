@@ -107,7 +107,8 @@ class ConditionalCorrelationSurface:
     each resolution must equal ``S ⊕ XOR_i (key[i] · Δ_i)`` for some shared
     baseline ``S`` and per-condition flip-deltas ``Δ_i``. Inputs that violate
     this constraint (AND-structured observables that need nested IF/ELSE) are
-    rejected at compile time.
+    rejected when the circuit is generated, by
+    :meth:`~tqec.compile.graph.TopologicalComputationGraph.generate_conditional_stim_text`.
 
     """
 

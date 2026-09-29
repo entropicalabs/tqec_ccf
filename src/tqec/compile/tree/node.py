@@ -35,8 +35,8 @@ def _append_stim_circuit_to_conditional(circuit: stim.Circuit, target: Condition
     """Flatten a ``stim.Circuit`` into plain entries on ``target``.
 
     Flatten a ``stim.Circuit`` (no nested blocks) into plain entries on
-    ``target``. ``stim.CircuitRepeatBlock`` is rendered as a flat repetition —
-    ``ConditionalCircuit`` has no native REPEAT primitive at this stage.
+    ``target``. ``stim.CircuitRepeatBlock`` is rendered as a flat repetition,
+    since ``ConditionalCircuit`` has no REPEAT primitive.
     """
     for inst in circuit:
         if isinstance(inst, stim.CircuitRepeatBlock):
@@ -264,12 +264,16 @@ class LayerNode:
 
         Return ``True`` iff this node (or any descendant) holds a
         :class:`ConditionalCircuit` annotation that actually surfaces an
-        :class:`IfBlock`. Stabiliser-round leaves that happen to be
+        :class:`IfBlock`, or conditional detectors or observables, which are
+        ``IfBlock`` entries too. Stabiliser-round leaves that happen to be
         byte-identical across branches are reported as non-conditional so the
         :class:`RepeatedLayer` fast path can still expand them as plain stim.
         """
         if self.is_leaf:
-            cc = self.get_annotations(k).conditional_circuit
+            annotations = self.get_annotations(k)
+            if annotations.conditional_detectors or annotations.conditional_observables:
+                return True
+            cc = annotations.conditional_circuit
             if cc is None:
                 return False
             return any(isinstance(e, IfBlock) for e in cc.entries)
@@ -286,10 +290,9 @@ class LayerNode:
         ``RepeatedLayer`` bodies without conditional descendants are ingested
         as plain ``stim.Circuit`` content.
 
-        Detector / observable annotations are appended at each leaf in the
-        same positions as the branch-zero path (they originate from the
-        branch-zero ``ScheduledCircuit`` until Stage A commit 4 brings
-        per-branch detector annotation).
+        Detector and observable annotations are appended at each leaf in the
+        same positions as on the plain path; those that differ between
+        branches are emitted as :class:`IfBlock` entries.
 
         Args:
             k: scaling parameter.
@@ -301,8 +304,8 @@ class LayerNode:
 
         Raises:
             TQECError: when a :class:`RepeatedLayer` body contains a
-                conditional descendant. Current fixtures never hit this case;
-                Stage A keeps the LCM-expansion path out of scope.
+                conditional descendant: an ``IfBlock`` inside a repeated round
+                is not supported.
 
         """
         if isinstance(self._layer, LayoutLayer):
