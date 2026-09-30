@@ -73,8 +73,11 @@ class Block(SequencedLayers):
         leading layers: the block is end-aligned, its last round staying flush
         with the end of the slice.
 
-        A Y-basis *initialisation* needs this: its last rounds hand the full patch
-        to the pipe above, so they have to be the slice's last rounds. Padding it
+        Two kinds of block want this. A state-injection cube prepares a state
+        that is not fault-tolerantly encoded, so every extra round it is held for
+        is extra exposure --- injecting as late as possible is strictly better.
+        A Y-basis *initialisation* needs it outright: its last rounds hand the
+        full patch to the pipe above, so they have to be the slice's last rounds. Padding it
         like a memory cube instead inserts degenerate-patch rounds *after* the
         patch has grown back to full size, and the circuit stops being
         deterministic.
@@ -381,9 +384,10 @@ def _merge_mismatched_block_layers(
     handled one of three ways:
 
     - a block that resets every data qubit it touches before using it
-      (:attr:`Block.acquires_its_qubits` --- a Y-basis initialisation) owns no
-      live state before its own rounds, so it is **end-aligned**: absent from the
-      leading merged layers, with its last round flush with the end of the slice;
+      (:attr:`Block.acquires_its_qubits` --- a Y-basis initialisation or a
+      state-injection cube) owns no live state before its own rounds, so it is
+      **end-aligned**: absent from the leading merged layers, with its last round
+      flush with the end of the slice;
     - a block that measures out its data qubits
       (:attr:`Block.releases_its_qubits` --- a Y-basis measurement cap) is
       finished when its layers run out, so it is start-aligned and simply
@@ -396,7 +400,9 @@ def _merge_mismatched_block_layers(
     This lets a Y cube coexist with a continuing memory cube whatever their
     relative lengths: at small ``k`` the Y cube outlasts the column and the
     column is padded; at larger ``k`` the column outlasts it, and the Y cube
-    occupies only the end (an initialisation) or the start (a cap) of the slice.
+    occupies only the end (an initialisation) or the start (a cap) of the slice. It
+    also lets an injection cube, whose height is a constant two rounds, sit
+    beside a ``2k+1`` column.
 
     A block claiming both properties has no live state on either side, so either
     alignment is sound; ``acquires_its_qubits`` wins, so the choice is a stated

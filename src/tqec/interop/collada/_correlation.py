@@ -45,13 +45,16 @@ class CorrelationSurfaceTransformationHelper:
             # Do not add surfaces in ports or Y Half Cubes
             if cube.is_port or cube.is_y_cube:
                 continue
-            # Conditional leaf cubes have a branch-dependent in-cube geometry, so the
-            # generic ZXCube logic does not apply. The surface piece keeps its basis
-            # color; only the cube's flipping (top) wall is drawn gray, and that is
-            # handled when rendering the cube itself.
-            if isinstance(cube.kind, ConditionalLeafCubeKind):
+            # Some leaf cubes have no basis-derived in-cube geometry, so the generic
+            # ZXCube logic does not apply and the piece is drawn from the incident
+            # pipe's plane instead:
+            #  - a conditional leaf cube's geometry is branch-dependent (only its
+            #    flipping top wall is drawn gray, when the cube itself is rendered);
+            #  - an injection cube's faces carry no basis at all, since the injected
+            #    state is not a stabilizer state.
+            if isinstance(cube.kind, ConditionalLeafCubeKind) or cube.is_injection_cube:
                 transformations.extend(
-                    self._compute_conditional_cube_transformations(
+                    self._compute_basisless_leaf_cube_transformations(
                         pos, correlation_surface.edges_at(pos)
                     )
                 )
@@ -65,18 +68,22 @@ class CorrelationSurfaceTransformationHelper:
             )
         return transformations
 
-    def _compute_conditional_cube_transformations(
+    def _compute_basisless_leaf_cube_transformations(
         self,
         v: Position3D,
         correlation_edges: set[ZXEdge],
     ) -> list[TransformationResult]:
-        """Compute the in-cube surface pieces for a conditional leaf cube.
+        """Compute the in-cube surface pieces for a leaf cube with no wall bases.
 
-        A ``ConditionalLeafCubeKind`` only appears at the leaves of the block graph,
-        so at most one correlation edge touches it. The generic ``ZXCube`` logic
-        cannot be used because the in-cube geometry is branch-dependent, so the piece
-        is drawn as a single square following the plane of the incident pipe's
-        surface, keeping the correlation basis color.
+        Serves a ``ConditionalLeafCubeKind``, whose in-cube geometry is
+        branch-dependent, and an ``INJECTION`` cube, whose faces carry no basis
+        because the injected state is not a stabilizer state. Either way the
+        generic ``ZXCube`` logic cannot be used.
+
+        Both only appear at the leaves of the block graph, so at most one
+        correlation edge touches them, and the piece is drawn as a single square
+        following the plane of the incident pipe's surface, keeping the
+        correlation basis color.
         """
         scaled_pos = self._scale_position(v)
         transformations: list[TransformationResult] = []

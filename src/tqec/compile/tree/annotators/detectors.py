@@ -377,8 +377,9 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
         # the previous round has no template to compute against. That happens
         # above a Y-basis *initialisation*, whose last round hands its
         # ``end_spec`` forward exactly as the measurement cap's transition round
-        # does -- so the seam is closed from that spec instead, and the template
-        # path is skipped for this one round.
+        # does, and above the state-injection encoder, which prepares the
+        # stabilizers rather than measuring them -- so the seam is closed from
+        # that spec instead, and the template path is skipped for this one round.
         if self._pending_end_specs:
             # The seam always comes from the spec. Whether the *rest* of this
             # round can still use the template path depends on the previous
@@ -510,6 +511,14 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
         )
         self._pending_end_specs = {pos: outgoing} if outgoing is not None else {}
 
+        if raw_total == 0:
+            # A raw round that measures nothing -- the state-injection encoder --
+            # contributes no measurement records, so leaving it off the lookback
+            # stack shifts no offsets and keeps the window unbroken. Pushing it
+            # would instead blind ``lookback`` to the round that follows, which
+            # is the round carrying the encoder's detectors (see
+            # ``_emit_seam_against_raw_round``).
+            return
         # Push this slice's own records so later rounds can look back through it.
         # A raw round has neither template nor plaquettes, hence the ``None``s:
         # the fixed-radius detector computation cannot see through such a round
@@ -653,10 +662,20 @@ class AnnotateDetectorsOnLayerNode(NodeWalker):
         ancilla. Pairing the two gives the seam detectors, and consumes the
         pending specs.
 
+        Raw rounds that hand a spec forward include the last round of a Y-basis
+        initialisation and the state-injection encoder. The encoder measures
+        nothing, so its spec lists no preparing coordinates and each detector is
+        this round's single ancilla measurement.
+
         Args:
             annotations: annotations of this round.
             positions: the positions whose pending specs to close, all of which
                 this round holds as plaquettes. ``None`` closes every pending spec.
+
+        Raises:
+            TQECError: if this round does not measure a stabilizer a raw round
+                reported as prepared, i.e. the raw round does not match the
+                patch above it.
 
         """
         assert annotations.circuit is not None
