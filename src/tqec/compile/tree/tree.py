@@ -120,6 +120,19 @@ class LayerTree:
         """Return the conditional-cube blocks indexed by ``LayoutPosition3D``."""
         return self._conditional_blocks
 
+    def walk(self, walker: NodeWalker) -> None:
+        """Walk the tree depth-first, calling ``walker`` on every node.
+
+        Note the tree carries its annotations per scaling factor, so a walker that
+        reads them --- circuits, detectors --- only sees what a prior
+        :meth:`generate_circuit` call at that same ``k`` put there.
+
+        Args:
+            walker: structure that will be called on each explored node.
+
+        """
+        self._root.walk(walker)
+
     def to_dict(self) -> dict[str, Any]:
         """Return a dictionary representation of ``self``."""
         return {  # pragma: no cover
@@ -379,7 +392,15 @@ class LayerTree:
 
         Returns:
             a ``stim.Circuit`` instance implementing the computation described
-            by ``self``.
+            by ``self``. If the computation injects a non-Clifford state (``T``
+            or ``T_DAG``), the injected gate is a tagged Clifford stand-in such as
+            ``S[T]``: stim ignores the tag and simulates the stand-in, i.e. the
+            wrong state. Check with
+            :func:`~tqec.circuit.non_clifford.has_non_clifford_gates`, and render
+            the real gate with
+            :func:`~tqec.circuit.non_clifford.render_with_non_clifford_gates`, as
+            :meth:`~tqec.compile.graph.TopologicalComputationGraph.generate_stim_text`
+            does.
 
         """
         if isinstance(database_path, str):

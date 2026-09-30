@@ -64,6 +64,7 @@ class TQECColor(Enum):
     X_CORRELATION = "X_CORRELATION"
     Z_CORRELATION = "Z_CORRELATION"
     CONDITIONAL = "CONDITIONAL"
+    INJECTION = "INJECTION"
 
     @property
     def rgba(self) -> RGBA:
@@ -91,4 +92,7 @@ _RGBA_BY_COLOR: dict[TQECColor, RGBA] = {
     TQECColor.X_CORRELATION: RGBA(255, 0, 0, 0.8),
     TQECColor.Z_CORRELATION: RGBA(0, 0, 255, 0.8),
     TQECColor.CONDITIONAL: RGBA(128, 128, 128, 1.0),
+    # Magenta: an injection cube's faces carry no basis, since the injected
+    # state is not a stabilizer state, so they get their own colour.
+    TQECColor.INJECTION: RGBA(255, 0, 255, 1.0),
 }

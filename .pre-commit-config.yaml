@@ -1,3 +1,6 @@
+# tests/_vendor holds third-party code kept verbatim (see tests/_vendor/NOTICE.md),
+# so no hook may rewrite it.
+exclude: ^tests/_vendor/
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
