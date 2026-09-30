@@ -2,14 +2,16 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from functools import cached_property
-from typing import Final
+from typing import TYPE_CHECKING, Final, cast
 
 from typing_extensions import override
 
 from tqec.compile.blocks.enums import SpatialBlockBorder, TemporalBlockBorder
 from tqec.compile.blocks.layers.atomic.base import BaseLayer
 from tqec.compile.blocks.layers.atomic.layout import LayoutLayer
+from tqec.compile.blocks.layers.atomic.plaquettes import PlaquetteLayer
 from tqec.compile.blocks.layers.composed.base import BaseComposedLayer
+from tqec.compile.blocks.layers.composed.repeated import RepeatedLayer
 from tqec.compile.blocks.layers.composed.sequenced import SequencedLayers
 from tqec.compile.blocks.layers.merge import (
     contains_only_base_layers,
@@ -18,8 +20,16 @@ from tqec.compile.blocks.layers.merge import (
     merge_composed_layers,
 )
 from tqec.compile.blocks.positioning import LayoutPosition2D
+from tqec.templates.base import RectangularTemplate
 from tqec.utils.exceptions import TQECError
 from tqec.utils.scale import LinearFunction, PhysicalQubitScalable2D
+
+if TYPE_CHECKING:
+    from tqec.computation.correlation import CorrelationSurface
+
+_MEASUREMENT_INSTR_NAMES: Final[frozenset[str]] = frozenset(
+    {"M", "MX", "MY", "MZ", "MR", "MRX", "MRY", "MRZ"}
+)
 
 
 class Block(SequencedLayers):
@@ -35,6 +45,71 @@ class Block(SequencedLayers):
     scaling in only 2 dimension with ``k``).
 
     """
+
+    @property
+    def releases_its_qubits(self) -> bool:
+        """Whether the block's last layer measures out every data qubit it owns.
+
+        A block that does is finished when its layers run out: in a merged slice
+        whose duration is set by a longer neighbour, its position can simply be
+        **absent** from the trailing layers rather than padded with idle rounds.
+        A block that does not (an ordinary memory cube, whose patch carries a
+        logical state onwards to the next z-layer) must stay present for the
+        whole slice and is padded instead.
+
+        Defaults to ``False``, which is always the safe answer --- padding is
+        physics-preserving either way, just longer.
+
+        """
+        return False
+
+    @property
+    def acquires_its_qubits(self) -> bool:
+        """Whether the block resets every data qubit it touches before using it.
+
+        The time-reverse of :attr:`releases_its_qubits`. A block that does owns no
+        live state *before* its own rounds, so in a merged slice whose duration is
+        set by a longer neighbour its position can simply be **absent** from the
+        leading layers: the block is end-aligned, its last round staying flush
+        with the end of the slice.
+
+        Two kinds of block want this. A state-injection cube prepares a state
+        that is not fault-tolerantly encoded, so every extra round it is held for
+        is extra exposure --- injecting as late as possible is strictly better.
+        A Y-basis *initialisation* needs it outright: its last rounds hand the
+        full patch to the pipe above, so they have to be the slice's last rounds. Padding it
+        like a memory cube instead inserts degenerate-patch rounds *after* the
+        patch has grown back to full size, and the circuit stops being
+        deterministic.
+
+        What an implementer has to check is that no qubit is used before the
+        block resets it, across *all* its rounds, not just the first one: a
+        block whose patch grows (a Y initialisation's degenerate patch) touches
+        new qubits in later rounds, and each of those rounds must reset them.
+
+        Note absence means those physical qubits carry **no idling noise** during
+        the leading rounds. That is right for a block satisfying the condition
+        above --- the qubits hold no state --- and it is what a released block
+        already does at the trailing end. A hardware-faithful idling model would
+        need a real idle layer instead.
+
+        Defaults to ``False``, i.e. start-aligned and padded, the safe answer.
+
+        """
+        return False
+
+    @property
+    def declared_template(self) -> RectangularTemplate | None:
+        """The block's spatial footprint, when the block states it itself.
+
+        A block's template is normally recovered from its
+        :class:`~tqec.compile.blocks.layers.atomic.plaquettes.PlaquetteLayer`
+        layers. A block built only from raw circuits (the Y-basis measurement
+        cap) has none, so it declares the footprint here instead. ``None`` for
+        every ordinary block.
+
+        """
+        return None
 
     @override
     def with_spatial_borders_trimmed(self, borders: Iterable[SpatialBlockBorder]) -> Block:
@@ -125,29 +200,275 @@ class Block(SequencedLayers):
         raise NotImplementedError(f"Cannot hash efficiently a {type(self).__name__}.")
 
 
+def _plaquette_layer_meas_signature(layer: PlaquetteLayer) -> dict[int, int]:
+    """Per-plaquette-index measurement-instruction count for a plaquette layer."""
+    return {
+        idx: sum(
+            len(inst.target_groups())
+            for moment in plaquette.circuit.moments
+            for inst in moment.instructions
+            if inst.name in _MEASUREMENT_INSTR_NAMES
+        )
+        for idx, plaquette in layer.plaquettes.collection.items()
+    }
+
+
+def _block_meas_signature(block: Block) -> list[dict[int, int]]:
+    """Per-layer plaquette-meas signature for a block.
+
+    Recurses into :class:`RepeatedLayer` once; each entry in the returned list
+    corresponds to one element in ``block.layer_sequence``.  Two blocks whose
+    signatures match produce structurally identical measurement schedules
+    under Canonical Emission Order.
+    """
+    sig: list[dict[int, int]] = []
+    for layer in block.layer_sequence:
+        if isinstance(layer, PlaquetteLayer):
+            sig.append(_plaquette_layer_meas_signature(layer))
+        elif isinstance(layer, RepeatedLayer):
+            inner = layer.internal_layer
+            if isinstance(inner, PlaquetteLayer):
+                sig.append(_plaquette_layer_meas_signature(inner))
+            else:
+                sig.append({})
+        else:
+            sig.append({})
+    return sig
+
+
+class ConditionalBlock(Block):
+    """Block whose execution depends on a runtime measurement outcome.
+
+    Carries two sibling :class:`Block` instances --- one per branch of the
+    enclosing :class:`~tqec.computation.cube.ConditionalLeafCubeKind`.
+    The inherited :class:`Block` API exposes the zero branch's layer sequence,
+    so plain emission produces a one-branch circuit; ``IF``/``ELSE`` emission
+    reads both branches through :attr:`block_if_zero` and :attr:`block_if_one`.
+
+    Construction enforces the Equal Measurement Count assumption structurally:
+    both branches must share the same plaquette-meas signature per layer.
+    """
+
+    def __init__(
+        self,
+        block_if_zero: Block,
+        block_if_one: Block,
+        condition: CorrelationSurface,
+    ) -> None:
+        """Create a conditional block from its two branches.
+
+        Args:
+            block_if_zero: the block executed when the condition evaluates to 0.
+            block_if_one: the block executed when the condition evaluates to 1.
+            condition: the correlation surface whose parity selects the branch.
+
+        Raises:
+            TQECError: if the two branches differ in their number of layers or
+                in their per-layer measurement signature.
+
+        """
+        if len(block_if_zero.layer_sequence) != len(block_if_one.layer_sequence):
+            raise TQECError(
+                f"{type(self).__name__} requires both branches to have the "
+                f"same number of layers.  Got {len(block_if_zero.layer_sequence)} "
+                f"vs {len(block_if_one.layer_sequence)}."
+            )
+        sig_zero = _block_meas_signature(block_if_zero)
+        sig_one = _block_meas_signature(block_if_one)
+        if sig_zero != sig_one:
+            raise TQECError(
+                f"{type(self).__name__} requires both branches to share the "
+                "same per-layer measurement signature (Equal Measurement Count "
+                f"assumption).  zero={sig_zero}  one={sig_one}."
+            )
+        super().__init__(block_if_zero.layer_sequence, block_if_zero.trimmed_spatial_borders)
+        self._block_if_zero = block_if_zero
+        self._block_if_one = block_if_one
+        self._condition = condition
+
+    @property
+    def block_if_zero(self) -> Block:
+        """The Block executed when the condition evaluates to zero."""
+        return self._block_if_zero
+
+    @property
+    def block_if_one(self) -> Block:
+        """The Block executed when the condition evaluates to one."""
+        return self._block_if_one
+
+    @property
+    def condition(self) -> CorrelationSurface:
+        """Correlation surface whose parity selects the active branch."""
+        return self._condition
+
+    @override
+    def with_spatial_borders_trimmed(
+        self, borders: Iterable[SpatialBlockBorder]
+    ) -> ConditionalBlock:
+        borders = tuple(borders)
+        return ConditionalBlock(
+            self._block_if_zero.with_spatial_borders_trimmed(borders),
+            self._block_if_one.with_spatial_borders_trimmed(borders),
+            self._condition,
+        )
+
+    @override
+    def with_temporal_borders_replaced(
+        self,
+        border_replacements: Mapping[TemporalBlockBorder, BaseLayer | None],
+    ) -> ConditionalBlock | None:
+        if not border_replacements:
+            return self
+        new_zero = self._block_if_zero.with_temporal_borders_replaced(border_replacements)
+        new_one = self._block_if_one.with_temporal_borders_replaced(border_replacements)
+        if new_zero is None or new_one is None:
+            return None
+        return ConditionalBlock(new_zero, new_one, self._condition)
+
+
+def _flatten_block_layers(block: Block, k: int) -> list[BaseLayer]:
+    """Expand a block's layer sequence into one atomic layer per timestep.
+
+    Every ``RepeatedLayer`` is unrolled at the concrete scaling factor ``k``.
+    """
+    flat: list[BaseLayer] = []
+    for layer in block.layer_sequence:
+        if isinstance(layer, RepeatedLayer):
+            internal = layer.internal_layer
+            if not isinstance(internal, BaseLayer):
+                raise NotImplementedError(
+                    "Flattening a RepeatedLayer whose internal layer is composed "
+                    "is not supported for mismatched-schedule merges."
+                )
+            flat.extend([internal] * layer.repetitions.integer_eval(k))
+        elif isinstance(layer, BaseLayer):
+            flat.append(layer)
+        else:
+            raise NotImplementedError(
+                f"Cannot flatten layer of type {type(layer).__name__} for a "
+                "mismatched-schedule merge."
+            )
+    return flat
+
+
+def _block_pad_body(block: Block) -> BaseLayer:
+    """Return the bulk round used to pad a block shorter than the merged slice.
+
+    That round is the internal layer of the block's (single) ``RepeatedLayer``.
+    Padding with an extra copy of this round is physics-preserving: for a memory
+    cube it is another memory round before the final measurement; for a Y cap it
+    is another boundary (padding) round on the degenerate patch before the
+    transversal final round.
+    """
+    repeated = [layer for layer in block.layer_sequence if isinstance(layer, RepeatedLayer)]
+    if len(repeated) != 1:
+        raise NotImplementedError(
+            "Padding a block for a mismatched-schedule merge requires exactly one "
+            f"RepeatedLayer to draw the bulk round from; found {len(repeated)}."
+        )
+    internal = repeated[0].internal_layer
+    if not isinstance(internal, BaseLayer):
+        raise NotImplementedError("RepeatedLayer internal layer must be atomic to pad.")
+    return internal
+
+
+def _merge_mismatched_block_layers(
+    blocks_in_parallel: Mapping[LayoutPosition2D, Block],
+    scalable_qubit_shape: PhysicalQubitScalable2D,
+    k: int,
+) -> list[LayoutLayer | BaseComposedLayer]:
+    """Merge parallel blocks whose temporal schedules do not match.
+
+    Each block is flattened at the concrete ``k``. The merged slice runs for
+    ``max`` rounds over the parallel blocks, and a block shorter than the slice is
+    handled one of three ways:
+
+    - a block that resets every data qubit it touches before using it
+      (:attr:`Block.acquires_its_qubits` --- a Y-basis initialisation or a
+      state-injection cube) owns no live state before its own rounds, so it is
+      **end-aligned**: absent from the leading merged layers, with its last round
+      flush with the end of the slice;
+    - a block that measures out its data qubits
+      (:attr:`Block.releases_its_qubits` --- a Y-basis measurement cap) is
+      finished when its layers run out, so it is start-aligned and simply
+      **absent** from the trailing merged layers;
+    - a block that does neither (an ordinary memory cube, carrying a logical
+      state onwards to the next z-layer) must stay present for the whole slice,
+      so it is start-aligned and **padded** with extra bulk rounds inserted just
+      before its final border round, so that round stays last.
+
+    This lets a Y cube coexist with a continuing memory cube whatever their
+    relative lengths: at small ``k`` the Y cube outlasts the column and the
+    column is padded; at larger ``k`` the column outlasts it, and the Y cube
+    occupies only the end (an initialisation) or the start (a cap) of the slice. It
+    also lets an injection cube, whose height is a constant two rounds, sit
+    beside a ``2k+1`` column.
+
+    A block claiming both properties has no live state on either side, so either
+    alignment is sound; ``acquires_its_qubits`` wins, so the choice is a stated
+    rule rather than whichever branch happens to be tested first.
+    """
+    flats = {pos: _flatten_block_layers(block, k) for pos, block in blocks_in_parallel.items()}
+    duration = max(len(flat) for flat in flats.values())
+    # Round index at which each block's first layer is played.
+    offsets: dict[LayoutPosition2D, int] = dict.fromkeys(flats, 0)
+    for pos, flat in flats.items():
+        block = blocks_in_parallel[pos]
+        extra = duration - len(flat)
+        if not extra:
+            continue
+        if block.acquires_its_qubits:
+            # End-aligned: the block does not exist yet during the leading rounds.
+            offsets[pos] = extra
+        elif block.releases_its_qubits:
+            # A block that measures out its data qubits is done when its layers
+            # run out; it is simply absent from the trailing merged layers.
+            continue
+        else:
+            body = _block_pad_body(block)
+            flats[pos] = flat[:-1] + [body] * extra + flat[-1:]
+    merged: list[LayoutLayer | BaseComposedLayer] = []
+    for i in range(duration):
+        layers: dict[LayoutPosition2D, BaseLayer] = {}
+        for pos, flat in flats.items():
+            index = i - offsets[pos]
+            if 0 <= index < len(flat):
+                layers[pos] = flat[index]
+        merged.append(merge_base_layers(layers, scalable_qubit_shape))
+    return merged
+
+
 def merge_parallel_block_layers(
     blocks_in_parallel: Mapping[LayoutPosition2D, Block],
     scalable_qubit_shape: PhysicalQubitScalable2D,
+    k: int | None = None,
 ) -> list[LayoutLayer | BaseComposedLayer]:
     """Merge several stacks of layers executed in parallel into one stack of larger layers.
 
     Args:
-        blocks_in_parallel: a 2-dimensional arrangement of blocks. Each of the
-            provided block MUST have the exact same duration (also called
-            "temporal footprint", or number of atomic layers).
+        blocks_in_parallel: a 2-dimensional arrangement of blocks. Blocks that
+            share the exact same temporal schedule are merged into a scalable
+            structure. Blocks with mismatched schedules (a Y-basis measurement
+            cap alongside a continuing memory cube) are flattened and merged at
+            the concrete ``k`` (which must then be provided).
         scalable_qubit_shape: scalable shape of a scalable qubit. Considered
             valid across the whole domain.
+        k: scaling factor. Only consulted when the provided blocks have
+            mismatched temporal schedules, in which case it is required.
 
     Returns:
         a stack of layers representing the same slice of computation as the
         provided ``blocks_in_parallel``.
 
     Raises:
-        TQECError: if two items from the provided ``blocks_in_parallel`` do
-            not have the same temporal footprint.
-        NotImplementedError: if the provided blocks cannot be merged due to a
-            code branch not being implemented yet (and not due to a logical
-            error making the blocks unmergeable).
+        TQECError: if a conditional block's two branches do not share the same
+            layer structure.
+        NotImplementedError: if the provided blocks have mismatched schedules but
+            no ``k`` was provided to flatten them; if a mismatched-schedule merge
+            meets a block it cannot flatten or pad (a composed ``RepeatedLayer``
+            body, or not exactly one ``RepeatedLayer``); or if the blocks cannot
+            be merged due to a code branch not being implemented yet (and not due
+            to a logical error making the blocks unmergeable).
 
     """
     if not blocks_in_parallel:
@@ -157,20 +478,60 @@ def merge_parallel_block_layers(
         for block in blocks_in_parallel.values()
     )
     if len(internal_layers_schedules) != 1:
-        raise NotImplementedError(
-            "merge_parallel_block_layers only supports merging blocks that have "
-            "layers with a matching temporal schedule. Found the following "
-            "different temporal schedules in the provided blocks: "
-            f"{internal_layers_schedules}."
-        )
+        if k is None:
+            raise NotImplementedError(
+                "merge_parallel_block_layers only supports merging blocks that "
+                "have layers with a matching temporal schedule, unless a concrete "
+                "k is provided to flatten them. Found the following different "
+                f"temporal schedules in the provided blocks: {internal_layers_schedules}."
+            )
+        return _merge_mismatched_block_layers(blocks_in_parallel, scalable_qubit_shape, k)
     schedule: Final = next(iter(internal_layers_schedules))
     merged_layers: list[LayoutLayer | BaseComposedLayer] = []
     for i in range(len(schedule)):
         layers = {pos: block.layer_sequence[i] for pos, block in blocks_in_parallel.items()}
+        # Branch-``one`` alternates for ConditionalBlock cubes at this
+        # timestep. ``layers[pos]`` already holds the zero-branch slice
+        # via Block.__init__'s alias.
+        conditional_one_layers: dict[LayoutPosition2D, BaseLayer | BaseComposedLayer] = {
+            pos: block.block_if_one.layer_sequence[i]
+            for pos, block in blocks_in_parallel.items()
+            if isinstance(block, ConditionalBlock)
+        }
         if contains_only_base_layers(layers):
-            merged_layers.append(merge_base_layers(layers, scalable_qubit_shape))
+            cond_base: dict[LayoutPosition2D, BaseLayer] = {}
+            for pos, alt in conditional_one_layers.items():
+                if not isinstance(alt, BaseLayer):
+                    raise TQECError(
+                        f"ConditionalBlock at {pos}: branch-one layer at "
+                        f"timestep {i} is not a BaseLayer while the zero "
+                        "side is. Both branches must share structure."
+                    )
+                cond_base[pos] = alt
+            merged_layers.append(
+                merge_base_layers(
+                    cast(dict[LayoutPosition2D, BaseLayer], layers),
+                    scalable_qubit_shape,
+                    conditional_layers=cond_base or None,
+                )
+            )
         elif contains_only_composed_layers(layers):
-            merged_layers.append(merge_composed_layers(layers, scalable_qubit_shape))
+            cond_composed: dict[LayoutPosition2D, BaseComposedLayer] = {}
+            for pos, alt in conditional_one_layers.items():
+                if not isinstance(alt, BaseComposedLayer):
+                    raise TQECError(
+                        f"ConditionalBlock at {pos}: branch-one layer at "
+                        f"timestep {i} is not a BaseComposedLayer while "
+                        "the zero side is."
+                    )
+                cond_composed[pos] = alt
+            merged_layers.append(
+                merge_composed_layers(
+                    cast(dict[LayoutPosition2D, BaseComposedLayer], layers),
+                    scalable_qubit_shape,
+                    conditional_layers=cond_composed or None,
+                )
+            )
         else:
             raise RuntimeError(
                 f"Found a mix of {BaseLayer.__name__} instances and "

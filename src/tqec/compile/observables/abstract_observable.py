@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from collections import Counter
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -133,10 +134,60 @@ class AbstractObservable:
         )
 
 
+@dataclass(frozen=True)
+class _ConditionBinding:
+    """How one condition surface anchors into the BlockGraph."""
+
+    surface_index: int
+    anchor_z: int
+    cube_position: Position3D | None
+
+
+@dataclass
+class ConditionalAbstractObservable:
+    """A truth-table of :class:`AbstractObservable` instances over N conditions.
+
+    Drives flat-XOR per-branch ``OBSERVABLE_INCLUDE`` emission: at every leaf
+    in the layer tree, all ``2 ** N`` branches are independently lowered to
+    qubit sets via the :class:`ObservableBuilder`. The shared baseline emits
+    as a plain ``OBSERVABLE_INCLUDE`` on the trunk; each per-condition flip-
+    delta is wrapped in a single ``IF(rec_i) { OBSERVABLE_INCLUDE Δ_i }``
+    block (no ELSE).
+
+    Each condition is anchored either to an existing conditional cube
+    (binding's ``cube_position`` is set) or directly to a past measurement
+    string (surface-anchored — no cube required). Only XOR-decomposable
+    observables are supported; non-decomposable inputs (AND-structured) are
+    rejected when the circuit is generated, by
+    :meth:`~tqec.compile.graph.TopologicalComputationGraph.generate_conditional_stim_text`.
+
+    Attributes:
+        branches: maps each outcome tuple in ``{False, True} ** N`` to the
+            observable lowered from that resolution's correlation surface.
+        condition_bindings: parallel to the bit order of every key in
+            ``branches``. ``condition_bindings[i]`` carries the i-th
+            condition's IfBlock anchor z and an optional cube position.
+        resolved_conditions: pre-compiled :class:`AbstractObservable` per
+            condition, which the resolver lowers to measurements.
+        condition_recs: filled in by
+            :meth:`~tqec.compile.graph.TopologicalComputationGraph.generate_conditional_stim_text`.
+            ``condition_recs[i]`` holds the absolute indices of the measurements
+            gating the i-th condition's IfBlock (see
+            :class:`~tqec.compile.conditional.circuit.IfBlock`).
+
+    """
+
+    branches: dict[tuple[bool, ...], AbstractObservable]
+    condition_bindings: tuple[_ConditionBinding, ...]
+    resolved_conditions: tuple[AbstractObservable, ...]
+    condition_recs: tuple[tuple[int, ...], ...] | None = None
+
+
 def compile_correlation_surface_to_abstract_observable(
     block_graph: BlockGraph,
     correlation_surface: CorrelationSurface,
     include_temporal_hadamard_pipes: bool = False,
+    _skip_validation: bool = False,
 ) -> AbstractObservable:
     """Compile a ``CorrelationSurface`` into an ``AbstractObservable`` in the block graph.
 
@@ -210,16 +261,29 @@ def compile_correlation_surface_to_abstract_observable(
     """
     # 0. Handle single node edge case
     if correlation_surface.is_single_node:
-        # single stability experiment
-        cube = block_graph.cubes[0]
+        # A single node: a memory or stability experiment on one cube, or the
+        # condition of a conditional cube, which may name any cube of a larger
+        # graph -- so take the node's own cube, not the graph's first one.
+        (position,) = correlation_surface.positions
+        cube = block_graph[position]
         cube_with_arms = CubeWithArms(cube)
         if cube.is_spatial:
             return AbstractObservable(bottom_stabilizer_cubes=frozenset([cube_with_arms]))
         # single memory experiment
         return AbstractObservable(top_readout_cubes=frozenset([cube_with_arms]))
 
-    pg = block_graph.to_zx_graph()
-    _check_correlation_surface_validity(correlation_surface, pg)
+    if _skip_validation:
+        pass
+    elif any(cube.is_conditional for cube in block_graph.cubes):
+        warnings.warn(
+            "BlockGraph contains conditional cubes; skipping correlation-surface "
+            "validity check (pyzx ZX conversion does not support "
+            "ConditionalLeafCubeKind).",
+            stacklevel=2,
+        )
+    else:
+        pg = block_graph.to_zx_graph()
+        _check_correlation_surface_validity(correlation_surface, pg)
 
     endpoints_to_edge: dict[frozenset[Position3D], list[ZXEdge]] = {}
     for edge in correlation_surface.span:

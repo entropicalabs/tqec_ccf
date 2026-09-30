@@ -1,25 +1,36 @@
 """Defines :func:`~.compile.compile_block_graph`."""
 
+import warnings
+from dataclasses import replace
 from typing import Final, Literal
 
+from tqec.compile.blocks.block import Block
 from tqec.compile.blocks.layers.atomic.base import BaseLayer
 from tqec.compile.blocks.layers.atomic.plaquettes import PlaquetteLayer
+from tqec.compile.blocks.layers.atomic.raw import RawCircuitLayer
 from tqec.compile.blocks.layers.composed.base import BaseComposedLayer
 from tqec.compile.blocks.layers.composed.repeated import RepeatedLayer
 from tqec.compile.blocks.layers.composed.sequenced import SequencedLayers
+from tqec.compile.blocks.positioning import LayoutPosition3D
 from tqec.compile.convention import FIXED_BULK_CONVENTION, Convention
 from tqec.compile.graph import TopologicalComputationGraph
 from tqec.compile.observables.abstract_observable import (
     AbstractObservable,
+    ConditionalAbstractObservable,
+    _ConditionBinding,
     compile_correlation_surface_to_abstract_observable,
 )
 from tqec.compile.specs.base import CubeSpec, PipeSpec
 from tqec.computation.block_graph import BlockGraph
-from tqec.computation.correlation import CorrelationSurface
-from tqec.computation.cube import Cube
+from tqec.computation.correlation import (
+    ConditionalCorrelationSurface,
+    CorrelationSurface,
+    find_correlation_surfaces,
+)
+from tqec.computation.cube import ConditionalLeafCubeKind, Cube
 from tqec.templates.base import RectangularTemplate
 from tqec.utils.exceptions import TQECError
-from tqec.utils.position import BlockPosition3D, Direction3D
+from tqec.utils.position import BlockPosition3D, Direction3D, Position3D
 from tqec.utils.scale import LinearFunction, PhysicalQubitScalable2D
 
 _DEFAULT_SCALABLE_QUBIT_SHAPE: Final = PhysicalQubitScalable2D(
@@ -29,9 +40,110 @@ _DEFAULT_SCALABLE_QUBIT_SHAPE: Final = PhysicalQubitScalable2D(
 _DEFAULT_BLOCK_REPETITIONS: LinearFunction = LinearFunction(2, -1)
 
 
+def _resolve_conditional_cubes(
+    bg: BlockGraph, branch_assignment: "dict[Position3D, int] | int"
+) -> BlockGraph:
+    """Return a copy of the graph with every conditional cube fixed to one branch.
+
+    Return a BlockGraph copy in which every conditional cube is replaced by
+    one of its branch kinds.
+
+    ``branch_assignment`` may be:
+
+    - an ``int`` (legacy single-branch path): every conditional cube takes the
+      same branch index.
+    - a ``dict[Position3D, int]`` mapping each conditional cube's position to
+      its selected branch index (0 or 1). Cubes not present in the dict are
+      left unchanged — caller must include every conditional cube it cares
+      about.
+
+    The result has only ZXCube-kinded cubes, so the existing observable-
+    compilation helper (which asserts ZXCube) can consume it directly.
+    """
+    new_bg = BlockGraph(bg.name)
+    is_legacy_int = isinstance(branch_assignment, int)
+    for cube in bg.cubes:
+        kind = cube.kind
+        # ``isinstance`` rather than ``cube.is_conditional``: it narrows ``kind``
+        # to the pair of ZXCube kinds indexed just below.
+        if isinstance(kind, ConditionalLeafCubeKind):
+            if is_legacy_int:
+                idx = branch_assignment  # type: ignore[assignment]
+            else:
+                idx = branch_assignment[cube.position]  # type: ignore[index]
+            # The chosen branch is an unconditional ZXCube, so the condition that
+            # selected it is spent and must not travel with the cube.
+            new_bg.insert_cube(replace(cube, kind=kind.value[idx], condition=None))
+            continue
+        new_bg.insert_cube(cube)
+    for pipe in bg.pipes:
+        new_bg.add_pipe(pipe.u.position, pipe.v.position, pipe.kind)
+    return new_bg
+
+
+def _classify_conditions(
+    bg: BlockGraph, surface: "ConditionalCorrelationSurface"
+) -> tuple[_ConditionBinding, ...]:
+    """Bind each condition of a surface to a conditional cube or an anchor position.
+
+    Bind each entry of ``surface.conditions`` either to an existing
+    conditional cube (when ``Cube.condition == surface.conditions[i]``) or to
+    a surface-anchored position derived from the condition's max measurement
+    z.
+
+    Returns one :class:`_ConditionBinding` per surface condition, ordered the
+    same as ``surface.conditions`` — that ordering defines the bit order of
+    every key in ``surface.resolutions``.
+
+    Raises:
+        TQECError: if a condition matches more than one conditional cube
+            (ambiguous binding), or if a surface-anchored condition spans an
+            empty position range.
+
+    """
+    bindings: list[_ConditionBinding] = []
+    for i, cond in enumerate(surface.conditions):
+        matches = [c.position for c in bg.cubes if c.is_conditional and c.condition == cond]
+        if len(matches) > 1:
+            raise TQECError(
+                f"ConditionalCorrelationSurface.conditions[{i}] matches "
+                f"multiple conditional cubes at {matches}; conditions must be "
+                "uniquely identifying."
+            )
+        if len(matches) == 1:
+            cube_pos = matches[0]
+            bindings.append(
+                _ConditionBinding(
+                    surface_index=i,
+                    anchor_z=cube_pos.z,
+                    cube_position=cube_pos,
+                )
+            )
+        else:
+            # Surface-anchored: condition gates an observable without a
+            # corresponding conditional cube. anchor_z = max-z reached by
+            # any node in the condition's surface, +1 so the rec offset is
+            # strictly in the past at the emission leaf.
+            zs = [node.position.z for edge in cond.span for node in (edge.u, edge.v)]
+            if not zs:
+                raise TQECError(
+                    f"ConditionalCorrelationSurface.conditions[{i}] has an "
+                    "empty span; surface-anchored conditions must reference "
+                    "at least one measurement."
+                )
+            bindings.append(
+                _ConditionBinding(
+                    surface_index=i,
+                    anchor_z=max(zs) + 1,
+                    cube_position=None,
+                )
+            )
+    return tuple(bindings)
+
+
 def _get_template_from_layer(
     root: BaseLayer | BaseComposedLayer,
-) -> RectangularTemplate:
+) -> RectangularTemplate | None:
     """Get a unique template from any given layer.
 
     This helper function try its best to recover the template a given layer uses.
@@ -49,6 +161,13 @@ def _get_template_from_layer(
 
     """
     if isinstance(root, BaseLayer):
+        if isinstance(root, RawCircuitLayer):
+            # A raw-circuit layer (e.g. one round of the Y-basis measurement cap)
+            # carries no Template. It is skipped when recovering a block's
+            # template; a block that mixes raw layers with plaquette layers (a Y
+            # cap once its junction round has been prepended) yields the
+            # plaquette layer's template for the temporal-pipe junction.
+            return None
         if not isinstance(root, PlaquetteLayer):
             raise TQECError(
                 f"Trying to get the Template from a {type(root).__name__} "
@@ -56,13 +175,25 @@ def _get_template_from_layer(
             )
         return root.template
     elif isinstance(root, SequencedLayers):
-        possible_templates = {_get_template_from_layer(layer) for layer in root.layer_sequence}
+        # A block built only from raw layers (the Y-basis measurement cap) has no
+        # plaquette layer to recover a template from, so it declares its spatial
+        # footprint directly. Checked before walking the layers, which would
+        # otherwise find nothing and raise.
+        if isinstance(root, Block) and root.declared_template is not None:
+            return root.declared_template
+        possible_templates = {
+            template
+            for layer in root.layer_sequence
+            if (template := _get_template_from_layer(layer)) is not None
+        }
         if len(possible_templates) > 1:
             raise TQECError(
                 "Multiple possible Template found:\n  -"
                 + "\n  -".join(type(t).__name__ for t in possible_templates)
                 + "\nWhich is not supported at the moment."
             )
+        if not possible_templates:
+            raise TQECError("No Template found among the layers of a block.")
         return next(iter(possible_templates))
     elif isinstance(root, RepeatedLayer):
         return _get_template_from_layer(root.internal_layer)
@@ -73,7 +204,9 @@ def _get_template_from_layer(
 def compile_block_graph(
     block_graph: BlockGraph,
     convention: Convention = FIXED_BULK_CONVENTION,
-    observables: list[CorrelationSurface] | Literal["auto"] | None = "auto",
+    observables: (
+        list[CorrelationSurface | ConditionalCorrelationSurface] | Literal["auto"] | None
+    ) = "auto",
     block_temporal_height: LinearFunction = _DEFAULT_BLOCK_REPETITIONS,
 ) -> TopologicalComputationGraph:
     """Compile a block graph.
@@ -87,7 +220,10 @@ def compile_block_graph(
             determined from the block graph. If a list of correlation surfaces
             is provided, only those surfaces will be compiled into observables
             and included in the compiled circuit. If set to ``None``, no
-            observables will be included in the compiled circuit.
+            observables will be included in the compiled circuit. Entries may be
+            :class:`~tqec.computation.correlation.ConditionalCorrelationSurface`;
+            those are only emitted by
+            :meth:`~tqec.compile.graph.TopologicalComputationGraph.generate_conditional_stim_text`.
         block_temporal_height: the number of rounds of stabilizer measurements
             (ignoring one layer for initialization and another for final measurement).
             Defaults to `2k-1`.
@@ -144,24 +280,100 @@ def compile_block_graph(
 
     # 0. Get the abstract observables to be included in the compiled circuit.
     obs_included: list[AbstractObservable] = []
+    cond_obs_included: list[ConditionalAbstractObservable] = []
     if observables is not None:
         if observables == "auto":
-            observables = block_graph.find_correlation_surfaces()
+            # Deliberately not ``block_graph.find_correlation_surfaces()``: that
+            # raises when the graph has no deterministic observable, which is the
+            # right answer for a user asking for one explicitly but not here.
+            # ``"auto"`` means "include whatever deterministic observables exist",
+            # and a computation may legitimately have none -- a Y-basis
+            # measurement cap reads out at random by construction.
+            observables = find_correlation_surfaces(block_graph.to_zx_graph())
         else:
             observables = [cs.shift_by(dz=-minz) for cs in observables]
         include_temporal_hadamard_pipes = convention.name == "fixed_bulk"
-        obs_included = [
-            compile_correlation_surface_to_abstract_observable(
-                block_graph, surface, include_temporal_hadamard_pipes
-            )
-            for surface in observables
-        ]
+        for surface in observables:
+            if isinstance(surface, ConditionalCorrelationSurface):
+                warnings.warn(
+                    "ConditionalCorrelationSurface: the per-branch resolutions "
+                    "are not checked to be valid correlation surfaces of the "
+                    "graph with each branch substituted in.",
+                    stacklevel=2,
+                )
+                # Bind each surface condition either to an existing
+                # conditional cube (Cube.condition match) or to a past
+                # measurement string (surface-anchored). Ordering of bindings
+                # follows surface.conditions; it defines the bit order of
+                # resolution keys.
+                bindings = _classify_conditions(block_graph, surface)
+                cube_bits = [i for i, b in enumerate(bindings) if b.cube_position is not None]
+                # Compile every truth-table resolution against a graph that
+                # has cube-anchored bits resolved per the key (surface-anchored
+                # bits don't affect the BlockGraph topology).
+                branches: dict[tuple[bool, ...], AbstractObservable] = {}
+                for key, resolution in surface.resolutions.items():
+                    if cube_bits:
+                        assignment = {
+                            bindings[i].cube_position: int(key[i])  # type: ignore[misc]
+                            for i in cube_bits
+                        }
+                        bg_for_compile = _resolve_conditional_cubes(block_graph, assignment)
+                    else:
+                        bg_for_compile = block_graph
+                    branches[key] = compile_correlation_surface_to_abstract_observable(
+                        bg_for_compile,
+                        resolution,
+                        include_temporal_hadamard_pipes,
+                        _skip_validation=True,
+                    )
+                # Pre-compile each condition surface into an AbstractObservable
+                # so the resolver can derive rec offsets at emission time.
+                resolved_conditions = tuple(
+                    compile_correlation_surface_to_abstract_observable(
+                        block_graph,
+                        surface.conditions[b.surface_index],
+                        include_temporal_hadamard_pipes,
+                        _skip_validation=True,
+                    )
+                    for b in bindings
+                )
+                cond_obs_included.append(
+                    ConditionalAbstractObservable(
+                        branches=branches,
+                        condition_bindings=bindings,
+                        resolved_conditions=resolved_conditions,
+                    )
+                )
+            else:
+                obs_included.append(
+                    compile_correlation_surface_to_abstract_observable(
+                        block_graph, surface, include_temporal_hadamard_pipes
+                    )
+                )
+
+    # 0.5 Pre-compile each conditional cube's condition surface into an
+    # AbstractObservable. Doing it here (where the BlockGraph is in scope)
+    # lets the resolver run at emission time without needing the BlockGraph.
+    conditional_observables = {
+        LayoutPosition3D.from_block_position(
+            BlockPosition3D(cube.position.x, cube.position.y, cube.position.z)
+        ): compile_correlation_surface_to_abstract_observable(
+            block_graph,
+            cube.condition,
+            include_temporal_hadamard_pipes=(convention.name == "fixed_bulk"),
+        )
+        for cube in block_graph.cubes
+        if cube.is_conditional and cube.condition is not None
+    }
 
     # 1. Create topological computation graph
     graph = TopologicalComputationGraph(
         _DEFAULT_SCALABLE_QUBIT_SHAPE,
         observables=obs_included,
         observable_builder=convention.triplet.observable_builder,
+        conditional_observables=conditional_observables,
+        conditional_abstract_observables=cond_obs_included,
     )
 
     # 2. Add cubes to the graph

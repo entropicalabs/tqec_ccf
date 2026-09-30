@@ -5,7 +5,7 @@ from fractions import Fraction
 from pyzx.graph.graph_s import GraphS
 from pyzx.utils import EdgeType, FractionLike, VertexType, vertex_is_zx
 
-from tqec.computation.cube import CubeKind, Port, ZXCube
+from tqec.computation.cube import ConditionalLeafCubeKind, CubeKind, LeafCubeKind, ZXCube
 from tqec.utils.enums import Basis, Pauli
 from tqec.utils.exceptions import TQECError
 
@@ -45,8 +45,8 @@ def cube_kind_to_zx(kind: CubeKind) -> tuple[VertexType, FractionLike]:
 
     The conversion is as follows:
 
-    - Port -> BOUNDARY spider with phase 0.
-    - YHalfCube -> Z spider with phase 1/2.
+    - ``LeafCubeKind.PORT`` -> BOUNDARY spider with phase 0.
+    - ``LeafCubeKind.Y_HALF_CUBE`` -> Z spider with phase 1/2.
     - ZXCube -> Z spider with phase 0 if it has only one Z basis boundary,
         otherwise X spider with phase 0.
 
@@ -56,15 +56,32 @@ def cube_kind_to_zx(kind: CubeKind) -> tuple[VertexType, FractionLike]:
     Returns:
         A tuple of vertex type and spider phase.
 
+    Raises:
+        NotImplementedError: if ``kind`` is a conditional cube kind, which has
+            no single spider.
+        TQECError: if ``kind`` is not a recognised cube kind.
+
     """
     if isinstance(kind, ZXCube):
-        if sum(basis == Basis.Z for basis in kind.as_tuple()) == 1:
-            return VertexType.Z, 0
-        return VertexType.X, 0
-    if isinstance(kind, Port):
+        match kind.normal_basis:
+            case Basis.Z:
+                return VertexType.Z, 0
+            case Basis.X:
+                return VertexType.X, 0
+    if kind is LeafCubeKind.PORT:
         return VertexType.BOUNDARY, 0
-    else:  # isinstance(kind, YHalfCube)
+    if kind is LeafCubeKind.Y_HALF_CUBE:
         return VertexType.Z, Fraction(1, 2)
+    if kind is LeafCubeKind.INJECTION:
+        # The injected state is not a stabilizer state, so it is not a spider of
+        # any phase. It enters the ZX diagram as an open boundary, the same way a
+        # Port does, and the state it carries is tracked outside the diagram.
+        return VertexType.BOUNDARY, 0
+    if isinstance(kind, ConditionalLeafCubeKind):
+        raise NotImplementedError(
+            "Conversion of conditional cube to PyZX vertex type and phase is not implemented."
+        )
+    raise TQECError(f"Cannot convert cube kind {kind} to PyZX vertex type and phase.")
 
 
 def zx_to_pauli(g: GraphS, v: int) -> Pauli:

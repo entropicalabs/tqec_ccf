@@ -7,6 +7,7 @@ import math
 import pathlib
 from collections.abc import Iterable, Mapping
 from copy import deepcopy
+from dataclasses import replace
 from io import BytesIO
 from typing import TYPE_CHECKING, Any, cast
 
@@ -14,11 +15,17 @@ import numpy as np
 from networkx import Graph, is_connected
 from networkx.utils import graphs_equal
 
-from tqec.computation.correlation import find_correlation_surfaces
-from tqec.computation.cube import Cube, CubeKind, Port, YHalfCube, ZXCube, cube_kind_from_string
+from tqec.computation.correlation import CorrelationSurface, find_correlation_surfaces
+from tqec.computation.cube import (
+    Cube,
+    CubeKind,
+    ZXCube,
+    cube_kind_from_string,
+)
 from tqec.computation.pipe import Pipe, PipeKind
 from tqec.utils.enums import Basis
 from tqec.utils.exceptions import TQECError
+from tqec.utils.injection_state import DEFAULT_INJECTION_STATE
 from tqec.utils.position import Direction3D, Position3D, SignedDirection3D
 
 if TYPE_CHECKING:
@@ -91,7 +98,11 @@ class BlockGraph:
 
     @property
     def num_half_y_cubes(self) -> int:
-        """Number of half Y cubes in the graph."""
+        """Number of half Y cubes in the graph.
+
+        A conditional cube is not one: each of its branches is a full
+        :class:`~tqec.computation.cube.ZXCube`.
+        """
         return len([node for node in self.cubes if node.is_y_cube])
 
     @property
@@ -178,7 +189,14 @@ class BlockGraph:
         if not self.has_pipe_between(pos1, pos2):
             raise TQECError(f"No pipe between {pos1} and {pos2}.")
 
-    def add_cube(self, position: Position3D, kind: CubeKind | str, label: str = "") -> Position3D:
+    def add_cube(
+        self,
+        position: Position3D,
+        kind: CubeKind | str,
+        label: str = "",
+        condition: CorrelationSurface | None = None,
+        state: str = DEFAULT_INJECTION_STATE,
+    ) -> Position3D:
         """Add a cube to the graph.
 
         Args:
@@ -186,6 +204,11 @@ class BlockGraph:
             kind: The kind of the cube. It can be a :py:class:`~tqec.computation.cube.CubeKind`
                 instance or a string representation of the cube kind.
             label: The label of the cube. Default is None.
+            condition: For a conditional cube kind, the correlation surface whose parity
+                selects the branch. Required for a conditional kind, must be ``None``
+                otherwise, and must lie strictly below the cube in ``z``. Default is None.
+            state: For an ``INJECTION`` cube only, which single-qubit state to inject.
+                See :py:attr:`~tqec.computation.cube.Cube.state`.
 
         Returns:
             The position of the cube added to the graph.
@@ -193,20 +216,49 @@ class BlockGraph:
         Raises:
             TQECError: If there is already a cube at the same position, or
                 if the cube kind is not recognized, or if the cube is a port and
-                there is already a port with the same label in the graph.
+                there is already a port with the same label in the graph, or if
+                ``condition`` is missing for a conditional kind, given for any other
+                kind, or not strictly below the cube, or if ``state`` is not one of
+                :data:`~tqec.utils.injection_state.INJECTION_STATES` or is set on a
+                cube that is not an ``INJECTION`` cube.
 
         """
-        if position in self:
-            raise TQECError(f"Cube already exists at position {position}.")
         if isinstance(kind, str):
             kind = cube_kind_from_string(kind)
-        if kind == Port() and label in self._ports:
-            raise TQECError(f"There is already a port with the same label {label} in the graph.")
+        # Keyword, so a future field reorder cannot land silently in this slot.
+        return self.insert_cube(Cube(position, kind, label, condition, state=state))
 
-        self._graph.add_node(position, **{self._NODE_DATA_KEY: Cube(position, kind, label)})
-        if kind == Port():
-            self._ports[label] = position
-        return position
+    def insert_cube(self, cube: Cube) -> Position3D:
+        """Add an already-built cube to the graph, keeping every one of its attributes.
+
+        Prefer this over :py:meth:`add_cube` whenever a cube is being *copied*
+        from another graph --- shifting, rotating, composing, deserialising. Those
+        callers used to re-list the fields they wanted to carry over, which
+        silently dropped any attribute they had not been updated for.
+
+        Args:
+            cube: the cube to add. Use :py:func:`dataclasses.replace` to derive it
+                from an existing cube when only its position or kind changes.
+
+        Returns:
+            The position of the cube added to the graph.
+
+        Raises:
+            TQECError: If there is already a cube at the same position, or if the
+                cube is a port and there is already a port with the same label in
+                the graph.
+
+        """
+        if cube.position in self:
+            raise TQECError(f"Cube already exists at position {cube.position}.")
+        if cube.is_port and cube.label in self._ports:
+            raise TQECError(
+                f"There is already a port with the same label {cube.label} in the graph."
+            )
+        self._graph.add_node(cube.position, **{self._NODE_DATA_KEY: cube})
+        if cube.is_port:
+            self._ports[cube.label] = cube.position
+        return cube.position
 
     def add_pipe(
         self, pos1: Position3D, pos2: Position3D, kind: PipeKind | str | None = None
@@ -364,33 +416,69 @@ class BlockGraph:
                     f"Port at {cube.position} does not have exactly one pipe connected."
                 )
             return
-        # time-like Y
-        if cube.is_y_cube:
+
+        # State injection hands its state upward, so it caps a temporal pipe from
+        # below and does nothing else. Unlike a Y cube --- which is general (Y-basis
+        # initialisation as well as measurement, and may attach to a Port) --- an
+        # injection cube has no time-reversed counterpart, so the direction is a
+        # property of the kind and belongs here rather than in the lowering.
+        if cube.is_injection_cube:
             if len(pipes) != 1:
                 raise TQECError(
-                    f"Y Half Cube at {cube.position} does not have exactly one pipe connected."
+                    f"{cube.kind} at {cube.position} does not have exactly one pipe connected."
                 )
-            if not pipes[0].direction == Direction3D.Z:
-                raise TQECError(f"Y Half Cube at {cube.position} has non-timelike pipes connected.")
+            if pipes[0].direction != Direction3D.Z:
+                raise TQECError(
+                    f"{cube.kind} at {cube.position} has a non-timelike pipe connected. "
+                    "An injection cube can only be connected by a temporal pipe."
+                )
+            if pipes[0].u.position != cube.position:
+                raise TQECError(
+                    f"{cube.kind} at {cube.position} has its pipe below it. An injection "
+                    "cube prepares a state and hands it upward, so its pipe must go up."
+                )
+            # Which cube receives the state is a fact about the graph, so it is
+            # checked here rather than left to the lowering, where it used to
+            # surface as a NotImplementedError only at compile time.
+            if not isinstance(pipes[0].v.kind, ZXCube):
+                raise TQECError(
+                    f"{cube.kind} at {cube.position} hands its state to a "
+                    f"{pipes[0].v.kind} cube at {pipes[0].v.position}. An injection cube "
+                    "must sit directly below a regular cube."
+                )
             return
 
-        assert isinstance(cube.kind, ZXCube)
-        # Check the color matching conditions
-        pipes_by_direction: dict[Direction3D, list[Pipe]] = {}
-        for pipe in pipes:
-            pipes_by_direction.setdefault(pipe.direction, []).append(pipe)
-        for direction in Direction3D.all_directions():
-            # the pair of faces are shadowed in the direction
-            # we do not care about the colors of shadowed faces
-            if len(pipes_by_direction.get(direction, [])) == 2:
+        # time-like Y and conditional
+        if cube.is_y_cube or cube.is_conditional:
+            if len(pipes) != 1:
+                raise TQECError(
+                    f"{cube.kind} at {cube.position} does not have exactly one pipe connected."
+                )
+            if not pipes[0].direction == Direction3D.Z:
+                raise TQECError(f"{cube.kind} at {cube.position} has non-timelike pipes connected.")
+            return
+
+        for kind in cube.kind.value if cube.is_conditional else (cube.kind,):
+            if not isinstance(kind, ZXCube):
                 continue
-            # faces at the same plane should have the same color
-            cube_color = cube.kind.get_basis_along(direction)
-            for ortho_dir in direction.orthogonal_directions:
-                for pipe in pipes_by_direction.get(ortho_dir, []):
-                    pipe_color = pipe.kind.get_basis_along(direction, pipe.at_head(cube.position))
-                    if pipe_color != cube_color:
-                        raise TQECError(f"Cube {cube} has mismatched colors with pipe {pipe}.")
+            # Check the color matching conditions
+            pipes_by_direction: dict[Direction3D, list[Pipe]] = {}
+            for pipe in pipes:
+                pipes_by_direction.setdefault(pipe.direction, []).append(pipe)
+            for direction in Direction3D.all_directions():
+                # the pair of faces are shadowed in the direction
+                # we do not care about the colors of shadowed faces
+                if len(pipes_by_direction.get(direction, [])) == 2:
+                    continue
+                # faces at the same plane should have the same color
+                cube_color = kind.get_basis_along(direction)
+                for ortho_dir in direction.orthogonal_directions:
+                    for pipe in pipes_by_direction.get(ortho_dir, []):
+                        pipe_color = pipe.kind.get_basis_along(
+                            direction, pipe.at_head(cube.position)
+                        )
+                        if pipe_color != cube_color:
+                            raise TQECError(f"Cube {cube} has mismatched colors with pipe {pipe}.")
 
     def to_zx_graph(self) -> PositionedZX:
         """Convert the block graph to a positioned PyZX graph.
@@ -511,7 +599,16 @@ class BlockGraph:
         """
         new_graph = BlockGraph()
         for cube in self.cubes:
-            new_graph.add_cube(cube.position.shift_by(dx=dx, dy=dy, dz=dz), cube.kind, cube.label)
+            shifted_condition = (
+                cube.condition.shift_by(dx=dx, dy=dy, dz=dz) if cube.condition is not None else None
+            )
+            new_graph.insert_cube(
+                replace(
+                    cube,
+                    position=cube.position.shift_by(dx=dx, dy=dy, dz=dz),
+                    condition=shifted_condition,
+                )
+            )
         for pipe in self.pipes:
             u, v = pipe.u, pipe.v
             new_graph.add_pipe(
@@ -540,13 +637,77 @@ class BlockGraph:
             )
         return correlation_surfaces
 
-    def fill_ports(self, fill: Mapping[str, CubeKind] | CubeKind) -> None:
+    def fill_port(
+        self,
+        port: str | Position3D,
+        kind: CubeKind | str,
+        condition: CorrelationSurface | None = None,
+        state: str = DEFAULT_INJECTION_STATE,
+    ) -> None:
+        """Fill a single port at the specified position with a cube of the given kind.
+
+        Args:
+            port: The label or position of the port to fill.
+            kind: The cube kind to fill the port with.
+            condition: For a conditional cube kind, the correlation surface whose parity
+                selects the branch. Required for a conditional kind, must be ``None``
+                otherwise, and must lie strictly below the cube in ``z``. Default is None.
+            state: For an ``INJECTION`` cube only, which single-qubit state to inject.
+                See :py:attr:`~tqec.computation.cube.Cube.state`.
+
+        Raises:
+            TQECError: if there is no port with the given label or position.
+
+        """
+        if isinstance(port, Position3D):
+            pos = port
+            self._check_cube_exists(pos)
+            if not self[pos].is_port:
+                raise TQECError(f"The cube at position {pos} is not a port.")
+            label = self[pos].label
+        elif isinstance(port, str):
+            label = port
+            if label not in self._ports:
+                raise TQECError(f"There is no port with label {label}.")
+            pos = self._ports[label]
+        else:
+            raise TQECError(f"Invalid port specification: {port}")
+
+        if isinstance(kind, str):
+            kind = cube_kind_from_string(kind)
+
+        fill_node = Cube(pos, kind, label, condition, state=state)
+        self._graph.add_node(pos, **{self._NODE_DATA_KEY: fill_node})
+        for pipe in self.pipes_at(pos):
+            self._graph.remove_edge(pipe.u.position, pipe.v.position)
+            other = pipe.u if pipe.v.position == pos else pipe.v
+            self._graph.add_edge(
+                other.position,
+                pos,
+                **{self._EDGE_DATA_KEY: Pipe(other, fill_node, pipe.kind)},
+            )
+        self._ports.pop(label)
+
+    def fill_ports(
+        self,
+        fill: Mapping[str, CubeKind] | CubeKind,
+        condition: CorrelationSurface | None = None,
+        state: str = DEFAULT_INJECTION_STATE,
+    ) -> None:
         """Fill the ports at specified positions with cubes of the given kind.
 
         Args:
             fill: A mapping from the label of the ports to the cube kind to fill.
                 If a single kind is given, all the ports will be filled with the
                 same kind.
+            condition: For a conditional cube kind, the correlation surface whose parity
+                selects the branch. Required for a conditional kind, must be ``None``
+                otherwise, and must lie strictly below the cube in ``z``. Default is None.
+                The same condition is given to every filled port, which a
+                ``ConditionalCorrelationSurface`` cannot then bind to a single cube.
+            state: For an ``INJECTION`` cube only, which single-qubit state to inject,
+                given to every filled port.
+                See :py:attr:`~tqec.computation.cube.Cube.state`.
 
         Raises:
             TQECError: if there is no port with the given label.
@@ -558,7 +719,7 @@ class BlockGraph:
             if label not in self._ports:
                 raise TQECError(f"There is no port with label {label}.")
             pos = self._ports[label]
-            fill_node = Cube(pos, kind)
+            fill_node = Cube(pos, kind, condition=condition, state=state)
             # Overwrite the node at the port position
             self._graph.add_node(pos, **{self._NODE_DATA_KEY: fill_node})
             for pipe in self.pipes_at(pos):
@@ -650,14 +811,14 @@ class BlockGraph:
                     )
                 # choose Z basis boundary for the walls that can have arbitrary boundary
                 bases.append(b1 or b2 or Basis.Z)
-            cube_kind = ZXCube(*bases)
+            cube_kind = ZXCube(tuple(bases))
             composed_g.fill_ports({label: cube_kind})
         # Compose the graphs
         for cube in shifted_g.cubes:
             # Connecting ports have been filled
             if cube.position in composed_g:
                 continue
-            composed_g.add_cube(cube.position, cube.kind, cube.label)
+            composed_g.insert_cube(cube)
         for pipe in shifted_g.pipes:
             u, v = pipe.u.position, pipe.v.position
             composed_g.add_pipe(u, v, pipe.kind)
@@ -705,7 +866,35 @@ class BlockGraph:
         for cube in self.cubes:
             rotated_kind = rotate_block_kind_by_matrix(cube.kind, rotation_matrix)
             rotated_pos = rotate_position_by_matrix(cube.position, rotation_matrix)
-            rotated.add_cube(rotated_pos, cast(CubeKind, rotated_kind), cube.label)
+            rotated_condition = None
+            if cube.condition is not None:
+                from tqec.computation.correlation import (  # noqa: PLC0415
+                    CorrelationSurface,
+                    ZXEdge,
+                    ZXNode,
+                )
+
+                rotated_condition = CorrelationSurface(
+                    span=frozenset(
+                        ZXEdge(
+                            ZXNode(
+                                rotate_position_by_matrix(e.u.position, rotation_matrix), e.u.basis
+                            ),
+                            ZXNode(
+                                rotate_position_by_matrix(e.v.position, rotation_matrix), e.v.basis
+                            ),
+                        )
+                        for e in cube.condition.span
+                    )
+                )
+            rotated.insert_cube(
+                replace(
+                    cube,
+                    position=rotated_pos,
+                    kind=cast(CubeKind, rotated_kind),
+                    condition=rotated_condition,
+                )
+            )
             pos_map[cube.position] = rotated_pos
 
         for pipe in self.pipes:
@@ -793,7 +982,7 @@ class BlockGraph:
         new_graph = BlockGraph(self.name)
         for cube in self.cubes:
             new_cube = fixed_cubes.get(cube, cube)
-            new_graph.add_cube(cube.position, new_cube.kind, new_cube.label)
+            new_graph.insert_cube(replace(cube, kind=new_cube.kind))
         for pipe in self.pipes:
             new_graph.add_pipe(pipe.u.position, pipe.v.position, pipe.kind)
         return new_graph
@@ -824,11 +1013,7 @@ class BlockGraph:
         """Construct a block graph from a dictionary representation."""
         graph = BlockGraph(data["name"])
         for cube in data["cubes"]:
-            graph.add_cube(
-                position=Position3D(*cube["position"]),
-                kind=cube["kind"],
-                label=cube["label"],
-            )
+            graph.insert_cube(Cube.from_dict(cube))
         for pipe in data["pipes"]:
             graph.add_pipe(
                 pos1=Position3D(*pipe["u"]),
@@ -963,16 +1148,21 @@ class BlockGraph:
                 )
 
             for cube in matching_cubes:
-                updated_cube = Cube(position=cube.position, kind=cube.kind, label=new_label)
-                self._graph.add_node(cube.position, **{self._NODE_DATA_KEY: updated_cube})
+                # ``replace`` rather than a field-by-field rebuild: the latter
+                # already dropped ``condition`` and would now drop ``state`` too.
+                self._graph.add_node(
+                    cube.position,
+                    **{self._NODE_DATA_KEY: replace(cube, label=new_label)},
+                )
 
 
 def block_kind_from_str(string: str) -> BlockKind:
     """Parse a block kind from a string."""
-    string = string.upper()
-    if "O" in string:
-        return PipeKind.from_str(string)
-    elif string == "Y":
-        return YHalfCube()
-    else:
-        return ZXCube.from_str(string)
+    string = string.strip().upper()
+    try:
+        return cube_kind_from_string(string)
+    except TQECError:
+        try:
+            return PipeKind.from_str(string)
+        except TQECError:
+            raise TQECError(f"Unknown block kind string: {string}")

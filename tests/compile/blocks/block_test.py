@@ -10,6 +10,7 @@ from tqec.compile.blocks.layers.atomic.base import BaseLayer
 from tqec.compile.blocks.layers.atomic.layout import LayoutLayer
 from tqec.compile.blocks.layers.atomic.plaquettes import PlaquetteLayer
 from tqec.compile.blocks.layers.atomic.raw import RawCircuitLayer
+from tqec.compile.blocks.layers.composed.base import BaseComposedLayer
 from tqec.compile.blocks.layers.composed.repeated import RepeatedLayer
 from tqec.compile.blocks.layers.composed.sequenced import SequencedLayers
 from tqec.compile.blocks.positioning import LayoutPosition2D
@@ -289,3 +290,108 @@ def test_merge_parallel_block_layers(
         ),
         LayoutLayer({b00: plaquette_layer, b01: plaquette_layer2}, logical_qubit_shape),
     ]
+
+
+class _AcquiringBlock(Block):
+    """A block whose first round resets everything it touches."""
+
+    @property
+    def acquires_its_qubits(self) -> bool:
+        return True
+
+
+class _ReleasingBlock(Block):
+    """A block whose last round measures everything it owns out."""
+
+    @property
+    def releases_its_qubits(self) -> bool:
+        return True
+
+
+def _mismatched_slice(
+    short: Block,
+    plaquette_layer: PlaquetteLayer,
+    logical_qubit_shape: PhysicalQubitScalable2D,
+) -> tuple[LayoutPosition2D, LayoutPosition2D, list[LayoutLayer | BaseComposedLayer]]:
+    """Merge a two-round ``short`` block beside a five-round column at ``k = 2``."""
+    b00 = LayoutPosition2D.from_block_position(BlockPosition2D(0, 0))
+    b01 = LayoutPosition2D.from_block_position(BlockPosition2D(0, 1))
+    tall = Block(
+        [
+            plaquette_layer,
+            RepeatedLayer(plaquette_layer, LinearFunction(2, -1)),
+            plaquette_layer,
+        ]
+    )
+    return b00, b01, merge_parallel_block_layers({b00: tall, b01: short}, logical_qubit_shape, 2)
+
+
+def test_merge_mismatched_end_aligns_an_acquiring_block(
+    base_layers: list[BaseLayer], logical_qubit_shape: PhysicalQubitScalable2D
+) -> None:
+    plaquette_layer, plaquette_layer2, raw_layer = base_layers
+    short = _AcquiringBlock([raw_layer, plaquette_layer2])
+    b00, b01, merged = _mismatched_slice(short, plaquette_layer, logical_qubit_shape)
+    assert len(merged) == 5
+    # Absent from the leading rounds, and flush with the end of the slice.
+    positions = [sorted(map(str, layer.layers)) for layer in merged]  # type: ignore[union-attr]
+    assert positions[:3] == [[str(b00)]] * 3
+    assert merged[3].layers == {b00: plaquette_layer, b01: raw_layer}  # type: ignore[union-attr]
+    assert merged[4].layers == {b00: plaquette_layer, b01: plaquette_layer2}  # type: ignore[union-attr]
+
+
+def test_merge_mismatched_start_aligns_a_releasing_block(
+    base_layers: list[BaseLayer], logical_qubit_shape: PhysicalQubitScalable2D
+) -> None:
+    plaquette_layer, plaquette_layer2, raw_layer = base_layers
+    short = _ReleasingBlock([raw_layer, plaquette_layer2])
+    b00, b01, merged = _mismatched_slice(short, plaquette_layer, logical_qubit_shape)
+    assert len(merged) == 5
+    # The mirror case: present at the start, absent from the trailing rounds.
+    assert merged[0].layers == {b00: plaquette_layer, b01: raw_layer}  # type: ignore[union-attr]
+    assert merged[1].layers == {b00: plaquette_layer, b01: plaquette_layer2}  # type: ignore[union-attr]
+    positions = [sorted(map(str, layer.layers)) for layer in merged]  # type: ignore[union-attr]
+    assert positions[2:] == [[str(b00)]] * 3
+
+
+def test_merge_mismatched_prefers_end_alignment_when_a_block_claims_both(
+    base_layers: list[BaseLayer], logical_qubit_shape: PhysicalQubitScalable2D
+) -> None:
+    plaquette_layer, plaquette_layer2, raw_layer = base_layers
+
+    class _Both(_AcquiringBlock):
+        @property
+        def releases_its_qubits(self) -> bool:
+            return True
+
+    _, b01, merged = _mismatched_slice(
+        _Both([raw_layer, plaquette_layer2]), plaquette_layer, logical_qubit_shape
+    )
+    # Either alignment is sound for such a block; the rule is that acquiring wins.
+    assert b01 not in merged[0].layers  # type: ignore[union-attr]
+    assert b01 in merged[4].layers  # type: ignore[union-attr]
+
+
+def test_merge_mismatched_pads_a_block_that_does_neither(
+    plaquette_layer: PlaquetteLayer, logical_qubit_shape: PhysicalQubitScalable2D
+) -> None:
+    # A block that carries a logical state onwards has to stay present for the
+    # whole slice, so it is padded rather than aligned to either end.
+    short = Block(
+        [plaquette_layer, RepeatedLayer(plaquette_layer, LinearFunction(1, -1)), plaquette_layer]
+    )
+    _, b01, merged = _mismatched_slice(short, plaquette_layer, logical_qubit_shape)
+    assert len(merged) == 5
+    assert all(b01 in layer.layers for layer in merged)  # type: ignore[union-attr]
+
+
+def test_merge_mismatched_cannot_pad_a_block_without_a_bulk_round(
+    base_layers: list[BaseLayer], logical_qubit_shape: PhysicalQubitScalable2D
+) -> None:
+    plaquette_layer, plaquette_layer2, raw_layer = base_layers
+    # Neither aligned nor scalable: there is no round that is safe to repeat, so
+    # padding cannot be guessed and the merge says so.
+    with pytest.raises(NotImplementedError, match="exactly one"):
+        _mismatched_slice(
+            Block([raw_layer, plaquette_layer2]), plaquette_layer, logical_qubit_shape
+        )
