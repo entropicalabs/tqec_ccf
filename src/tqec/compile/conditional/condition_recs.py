@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING
 
 from tqec.circuit.measurement_map import MeasurementRecordsMap
 from tqec.compile.blocks.layers.atomic.layout import LayoutLayer
+from tqec.compile.blocks.layers.atomic.raw import RawCircuitLayer
 from tqec.compile.observables.abstract_observable import AbstractObservable
 from tqec.compile.observables.builder import ObservableBuilder, ObservableComponent
 from tqec.utils.exceptions import TQECError
@@ -44,6 +45,7 @@ if TYPE_CHECKING:
     from tqec.compile.blocks.positioning import LayoutPosition3D
     from tqec.compile.tree.node import LayerNode
     from tqec.compile.tree.tree import LayerTree
+    from tqec.templates.layout import LayoutTemplate
 
 
 @dataclass(frozen=True)
@@ -133,6 +135,31 @@ def ordered_leaves(root: LayerNode) -> list[LayerNode]:
     return [n for child in root.children for n in ordered_leaves(child)]
 
 
+def plaquette_template(node: LayerNode) -> LayoutTemplate | None:
+    """Return the plaquette template of a leaf.
+
+    A leaf mixing raw rounds (a Y cube, an injection cube) with plaquette rounds
+    is tolerated: the raw positions carry no template and are dropped. Returns
+    ``None`` when the leaf is entirely raw (a lone Y cap).
+    """
+    layout = node._layer
+    assert isinstance(layout, LayoutLayer)
+    raw_positions = {
+        pos for pos, layer in layout.layers.items() if isinstance(layer, RawCircuitLayer)
+    }
+    if not raw_positions:
+        template, _ = layout.to_template_and_plaquettes()
+        return template
+    plaquette_layers = {
+        pos: layer for pos, layer in layout.layers.items() if pos not in raw_positions
+    }
+    if not plaquette_layers:
+        return None
+    sub = LayoutLayer(plaquette_layers, layout.element_shape)
+    template, _ = sub.to_template_and_plaquettes()
+    return template
+
+
 def _qubits_for_component(
     k: int,
     leaf: LayerNode,
@@ -140,8 +167,9 @@ def _qubits_for_component(
     component: ObservableComponent,
     observable_builder: ObservableBuilder,
 ) -> set[GridQubit]:
-    assert isinstance(leaf._layer, LayoutLayer)
-    template, _ = leaf._layer.to_template_and_plaquettes()
+    template = plaquette_template(leaf)
+    if template is None:
+        return set()
     return observable_builder.build(k, template, obs_slice, component)
 
 

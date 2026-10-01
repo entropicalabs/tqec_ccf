@@ -22,11 +22,12 @@ from tqec.compile.specs.base import CubeSpec
 from tqec.compile.specs.library.generators.fixed_bulk import FixedBulkConventionGenerator
 from tqec.compile.tree.node import LayerNode
 from tqec.compile.tree.tree import LayerTree
-from tqec.computation.cube import LeafCubeKind, ZXCube
+from tqec.computation.correlation import CorrelationSurface, ZXEdge, ZXNode
+from tqec.computation.cube import ConditionalLeafCubeKind, LeafCubeKind, ZXCube
 from tqec.computation.pipe import PipeKind
 from tqec.plaquette.compilation.base import IdentityPlaquetteCompiler
 from tqec.plaquette.rpng.translators.default import DefaultRPNGTranslator
-from tqec.utils.enums import Orientation
+from tqec.utils.enums import Basis, Orientation
 from tqec.utils.noise_model import NoiseModel
 from tqec.utils.position import BlockPosition3D, Direction3D, Position3D
 
@@ -816,3 +817,30 @@ def test_y_cube_on_a_hadamard_pipe_is_rejected() -> None:
     g.add_pipe(below, cap, PipeKind.from_str("ZXOH"))
     with pytest.raises(NotImplementedError, match="Hadamard temporal pipe"):
         compile_block_graph(g, observables=[]).generate_stim_circuit(k=1)
+
+
+def test_condition_reads_a_slice_holding_a_y_initialisation() -> None:
+    """A condition read from a z-slice that also holds a Y-basis initialisation.
+
+    At ``k = 1`` the initialisation outlasts the memory cubes beside it, so the
+    slice's first round already carries its raw round. That round has no
+    plaquette template: the resolver has to drop it, as the observable
+    annotator does, rather than ask the whole round for a template.
+    """
+    graph = BlockGraph("condition beside a Y initialisation")
+    graph.add_cube(Position3D(0, 0, 0), "Y")
+    graph.add_cube(Position3D(0, 0, 1), "ZXZ")
+    graph.add_pipe(Position3D(0, 0, 0), Position3D(0, 0, 1))
+    graph.add_cube(Position3D(1, 0, 0), "ZXZ")
+    graph.add_cube(Position3D(1, 0, 1), "ZXZ")
+    graph.add_pipe(Position3D(1, 0, 0), Position3D(1, 0, 1))
+    graph.add_cube(Position3D(2, 0, 0), "ZXZ")  # a lone cube the condition reads
+    condition = CorrelationSurface(
+        span=frozenset(
+            [ZXEdge(ZXNode(Position3D(2, 0, 0), Basis.Z), ZXNode(Position3D(2, 0, 0), Basis.Z))]
+        )
+    )
+    graph.add_cube(Position3D(1, 0, 2), ConditionalLeafCubeKind.ZXZ_ZXX, condition=condition)
+    graph.add_pipe(Position3D(1, 0, 1), Position3D(1, 0, 2))
+    text = compile_block_graph(graph, observables=None).generate_stim_text(1)
+    assert "} ELSE {" in text

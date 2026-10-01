@@ -5,10 +5,14 @@ import stim
 from tqec.circuit.measurement_map import MeasurementRecordsMap
 from tqec.circuit.qubit import GridQubit
 from tqec.compile.blocks.layers.atomic.layout import LayoutLayer
-from tqec.compile.blocks.layers.atomic.raw import FlowSpecLayer, RawCircuitLayer
+from tqec.compile.blocks.layers.atomic.raw import FlowSpecLayer
 from tqec.compile.blocks.positioning import LayoutCubePosition2D
 from tqec.compile.conditional.circuit import IfBlock
-from tqec.compile.conditional.condition_recs import leaf_measurement_spans, ordered_leaves
+from tqec.compile.conditional.condition_recs import (
+    leaf_measurement_spans,
+    ordered_leaves,
+    plaquette_template,
+)
 from tqec.compile.observables.abstract_observable import (
     AbstractObservable,
     ConditionalAbstractObservable,
@@ -19,33 +23,7 @@ from tqec.compile.observables.builder import (
     get_observable_with_measurement_records,
 )
 from tqec.compile.tree.node import LayerNode
-from tqec.templates.layout import LayoutTemplate
 from tqec.utils.exceptions import TQECError
-
-
-def _template_from_node(node: LayerNode) -> LayoutTemplate | None:
-    """Return the plaquette template of a leaf.
-
-    A leaf mixing raw Y-cap rounds with plaquette rounds is tolerated: the raw
-    positions carry no template and are dropped. Returns ``None`` when the leaf
-    is entirely raw (a lone Y cap).
-    """
-    layout = node._layer
-    assert isinstance(layout, LayoutLayer)
-    raw_positions = {
-        pos for pos, layer in layout.layers.items() if isinstance(layer, RawCircuitLayer)
-    }
-    if not raw_positions:
-        template, _ = layout.to_template_and_plaquettes()
-        return template
-    plaquette_layers = {
-        pos: layer for pos, layer in layout.layers.items() if pos not in raw_positions
-    }
-    if not plaquette_layers:
-        return None
-    sub = LayoutLayer(plaquette_layers, layout.element_shape)
-    template, _ = sub.to_template_and_plaquettes()
-    return template
 
 
 def _annotate_y_cube_readouts(
@@ -366,7 +344,7 @@ def _annotate_observable_at_node(
     assert circuit is not None
     measurement_record = MeasurementRecordsMap.from_scheduled_circuit(circuit)
     assert isinstance(node._layer, LayoutLayer)
-    template = _template_from_node(node)
+    template = plaquette_template(node)
     if template is None:
         return
     # Y cubes contribute via their transition-round logical readout, handled by
