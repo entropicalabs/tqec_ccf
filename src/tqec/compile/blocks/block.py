@@ -407,7 +407,22 @@ def _merge_mismatched_block_layers(
     A block claiming both properties has no live state on either side, so either
     alignment is sound; ``acquires_its_qubits`` wins, so the choice is a stated
     rule rather than whichever branch happens to be tested first.
+
+    Raises:
+        NotImplementedError: if one of the blocks is a :class:`ConditionalBlock`.
+            Its second branch would have to be flattened and aligned alongside
+            the first, and the layers it lands in mix raw and plaquette rounds,
+            which the conditional emission does not support.
     """
+    conditional = [
+        pos for pos, block in blocks_in_parallel.items() if isinstance(block, ConditionalBlock)
+    ]
+    if conditional:
+        raise NotImplementedError(
+            "A conditional cube cannot share its z-slice with a cube of a different "
+            "temporal schedule (an injection cube or a Y cube), found one at "
+            f"{conditional}. Move it to a z-slice of its own."
+        )
     flats = {pos: _flatten_block_layers(block, k) for pos, block in blocks_in_parallel.items()}
     duration = max(len(flat) for flat in flats.values())
     # Round index at which each block's first layer is played.
