@@ -260,3 +260,16 @@ def test_conditional_observable_reaching_an_unbound_conditional_cube_is_rejected
     with pytest.raises(TQECError, match="none of its conditions is theirs"):
         compile_block_graph(g, FIXED_BULK_CONVENTION, observables=[only_a])
 
+
+def test_conditional_observable_read_beside_a_y_initialisation() -> None:
+    """A conditional observable read in a z-slice that holds a Y initialisation.
+
+    At ``k = 1`` the initialisation outlasts the memory cubes beside it, so the
+    slice's first round carries its raw round, which has no plaquette template.
+    """
+    g, cond_obs = _build_graph()
+    g.add_cube(Position3D(5, 0, 0), "Y")
+    g.add_cube(Position3D(5, 0, 1), "ZXZ")
+    g.add_pipe(Position3D(5, 0, 0), Position3D(5, 0, 1))
+    cg = compile_block_graph(g, FIXED_BULK_CONVENTION, observables=[cond_obs])
+    assert "OBSERVABLE_INCLUDE(0)" in cg.generate_stim_text(k=1)

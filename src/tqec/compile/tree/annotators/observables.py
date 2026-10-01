@@ -258,9 +258,18 @@ def annotate_conditional_observable(
 
     for z_idx, leaves in enumerate(subtree_leaves):
         slice_by_key = {key: obs.slice_at_z(z_idx) for key, obs in branches.items()}
+        if any(c.cube.is_y_cube for sl in slice_by_key.values() for c in sl.top_readout_cubes):
+            raise NotImplementedError(
+                "A ConditionalCorrelationSurface ending on a Y-basis measurement "
+                "is not supported: the Y readout is only emitted for a plain "
+                "correlation surface."
+            )
         for anchor_leaf, component in _anchor_actions(leaves, list(slice_by_key.values())):
-            assert isinstance(anchor_leaf._layer, LayoutLayer)
-            template, _ = anchor_leaf._layer.to_template_and_plaquettes()
+            # A raw round (an injection cube, a Y initialisation) holds no
+            # plaquette, so no part of the observable is read in it.
+            template = plaquette_template(anchor_leaf)
+            if template is None:
+                continue
             qubits_by_key = {
                 key: observable_builder.build(k, template, sl, component)
                 for key, sl in slice_by_key.items()
