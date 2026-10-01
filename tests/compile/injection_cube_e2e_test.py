@@ -656,4 +656,3 @@ def test_conditional_cube_beside_an_injection_cube_is_rejected() -> None:
     compiled = compile_block_graph(graph, FIXED_BULK_CONVENTION, observables=None)
     with pytest.raises(NotImplementedError, match="cannot share its z-slice"):
         compiled.generate_stim_text(1)
-

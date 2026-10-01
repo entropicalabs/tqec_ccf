@@ -413,6 +413,7 @@ def _merge_mismatched_block_layers(
             Its second branch would have to be flattened and aligned alongside
             the first, and the layers it lands in mix raw and plaquette rounds,
             which the conditional emission does not support.
+
     """
     conditional = [
         pos for pos, block in blocks_in_parallel.items() if isinstance(block, ConditionalBlock)
