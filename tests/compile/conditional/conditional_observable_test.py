@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 
+import pytest
+
 from tests.compile.conditional._conditions import add_condition_source
 from tqec.compile.compile import compile_block_graph
 from tqec.compile.convention import FIXED_BULK_CONVENTION
@@ -16,6 +18,7 @@ from tqec.computation.correlation import (
 )
 from tqec.computation.cube import ConditionalLeafCubeKind
 from tqec.utils.enums import Basis
+from tqec.utils.exceptions import TQECError
 from tqec.utils.position import Position3D
 
 
@@ -227,3 +230,33 @@ def test_conditional_observable_flat_form_has_no_else() -> None:
         text,
     )
     assert not paired, "flat-XOR emission must not produce IF/ELSE pairs for observables"
+
+
+def test_conditional_observable_leaves_an_unrelated_conditional_cube_alone() -> None:
+    """A conditional observable beside a conditional cube it does not read.
+
+    Each resolution is compiled against the graph with the surface's own cubes
+    fixed to their branch; any other conditional cube has to be fixed to some
+    branch too, instead of being looked up in the surface's assignment.
+    """
+    g, cond_obs = _build_graph()
+    lower, upper = Position3D(5, 0, 2), Position3D(5, 0, 3)
+    g.add_cube(lower, "ZXZ")
+    g.add_cube(upper, ConditionalLeafCubeKind.ZXX_ZXZ, condition=add_condition_source(g))
+    g.add_pipe(lower, upper)
+    cg = compile_block_graph(g, FIXED_BULK_CONVENTION, observables=[cond_obs])
+    assert "OBSERVABLE_INCLUDE(0)" in cg.generate_stim_text(k=1)
+
+
+def test_conditional_observable_reaching_an_unbound_conditional_cube_is_rejected() -> None:
+    g, cond_obs = _build_multi_cube_graph()
+    only_a = ConditionalCorrelationSurface(
+        conditions=cond_obs.conditions[:1],
+        resolutions={
+            (False,): cond_obs.resolutions[(False, False)],
+            (True,): cond_obs.resolutions[(True, False)],
+        },
+    )
+    with pytest.raises(TQECError, match="none of its conditions is theirs"):
+        compile_block_graph(g, FIXED_BULK_CONVENTION, observables=[only_a])
+

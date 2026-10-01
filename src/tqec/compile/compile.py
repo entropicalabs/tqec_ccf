@@ -53,9 +53,10 @@ def _resolve_conditional_cubes(
     - an ``int`` (legacy single-branch path): every conditional cube takes the
       same branch index.
     - a ``dict[Position3D, int]`` mapping each conditional cube's position to
-      its selected branch index (0 or 1). Cubes not present in the dict are
-      left unchanged — caller must include every conditional cube it cares
-      about.
+      its selected branch index (0 or 1). A conditional cube not present in the
+      dict takes branch 0: the caller only lists the cubes it cares about, and
+      must not read the others (a surface that does is rejected upstream, in
+      :func:`compile_block_graph`).
 
     The result has only ZXCube-kinded cubes, so the existing observable-
     compilation helper (which asserts ZXCube) can consume it directly.
@@ -70,7 +71,7 @@ def _resolve_conditional_cubes(
             if is_legacy_int:
                 idx = branch_assignment  # type: ignore[assignment]
             else:
-                idx = branch_assignment[cube.position]  # type: ignore[index]
+                idx = branch_assignment.get(cube.position, 0)  # type: ignore[union-attr]
             # The chosen branch is an unconditional ZXCube, so the condition that
             # selected it is spent and must not travel with the cube.
             new_bg.insert_cube(replace(cube, kind=kind.value[idx], condition=None))
@@ -308,6 +309,23 @@ def compile_block_graph(
                 # resolution keys.
                 bindings = _classify_conditions(block_graph, surface)
                 cube_bits = [i for i, b in enumerate(bindings) if b.cube_position is not None]
+                # Every other conditional cube is fixed to an arbitrary branch
+                # below, which is only sound if no resolution reaches it.
+                bound = {bindings[i].cube_position for i in cube_bits}
+                unbound = {
+                    cube.position
+                    for cube in block_graph.cubes
+                    if cube.is_conditional and cube.position not in bound
+                }
+                for key, resolution in surface.resolutions.items():
+                    reached = unbound & resolution.positions
+                    if reached:
+                        raise TQECError(
+                            f"The resolution {key} of a ConditionalCorrelationSurface "
+                            f"reaches the conditional cube(s) at {sorted(reached)}, "
+                            "but none of its conditions is theirs. Add their "
+                            "conditions to the surface."
+                        )
                 # Compile every truth-table resolution against a graph that
                 # has cube-anchored bits resolved per the key (surface-anchored
                 # bits don't affect the BlockGraph topology).
