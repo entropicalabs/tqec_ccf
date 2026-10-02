@@ -144,19 +144,12 @@ def plaquette_template(node: LayerNode) -> LayoutTemplate | None:
     """
     layout = node._layer
     assert isinstance(layout, LayoutLayer)
-    raw_positions = {
-        pos for pos, layer in layout.layers.items() if isinstance(layer, RawCircuitLayer)
-    }
-    if not raw_positions:
-        template, _ = layout.to_template_and_plaquettes()
-        return template
-    plaquette_layers = {
-        pos: layer for pos, layer in layout.layers.items() if pos not in raw_positions
-    }
-    if not plaquette_layers:
+    plaquette_positions = [
+        pos for pos, layer in layout.layers.items() if not isinstance(layer, RawCircuitLayer)
+    ]
+    if not plaquette_positions:
         return None
-    sub = LayoutLayer(plaquette_layers, layout.element_shape)
-    template, _ = sub.to_template_and_plaquettes()
+    template, _ = layout.to_template_and_plaquettes(plaquette_positions)
     return template
 
 
