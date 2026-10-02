@@ -632,16 +632,17 @@ def test_stim_text_keeps_the_non_clifford_gate_beside_a_conditional_cube() -> No
     assert "S[T]" not in text
 
 
-def test_conditional_cube_beside_an_injection_cube_is_rejected() -> None:
-    """A conditional cube in the same z-slice as an injection cube.
+@pytest.mark.parametrize("kind", ["I", "Y"])
+def test_conditional_cube_beside_a_cube_of_another_schedule_is_rejected(kind: str) -> None:
+    """A conditional cube in the same z-slice as an injection cube or a Y cube.
 
-    The injection cube's constant height makes the slice a mismatched-schedule
-    merge, which flattens every block. That merge used to keep only the first
-    branch of the conditional cube, so the slice silently compiled to one
-    branch with no ``IF``/``ELSE`` at all.
+    Either one makes the slice a mismatched-schedule merge, which flattens every
+    block. That merge used to keep only the first branch of the conditional
+    cube, so the slice silently compiled to one branch with no ``IF``/``ELSE``
+    at all. It is now rejected when the graph is compiled, naming both cubes.
     """
-    graph = BlockGraph("conditional cube beside an injection cube")
-    graph.add_cube(Position3D(0, 0, 2), "I", state="T")
+    graph = BlockGraph(f"conditional cube beside a {kind} cube")
+    graph.add_cube(Position3D(0, 0, 2), kind)
     graph.add_cube(Position3D(0, 0, 3), "ZXZ")
     graph.add_pipe(Position3D(0, 0, 2), Position3D(0, 0, 3))
     graph.add_cube(Position3D(1, 0, 1), "ZXZ")
@@ -653,6 +654,8 @@ def test_conditional_cube_beside_an_injection_cube_is_rejected() -> None:
     )
     graph.add_cube(Position3D(1, 0, 2), ConditionalLeafCubeKind.ZXZ_ZXX, condition=condition)
     graph.add_pipe(Position3D(1, 0, 1), Position3D(1, 0, 2))
-    compiled = compile_block_graph(graph, FIXED_BULK_CONVENTION, observables=None)
-    with pytest.raises(NotImplementedError, match="cannot share its z-slice"):
-        compiled.generate_stim_text(1)
+    with pytest.raises(
+        NotImplementedError,
+        match=r"conditional cube at \(1,0,2\) shares its z-slice with .*\(0,0,2\)",
+    ):
+        compile_block_graph(graph, FIXED_BULK_CONVENTION, observables=None)

@@ -19,7 +19,7 @@ from tqec.compile.blocks.layers.merge import (
     merge_base_layers,
     merge_composed_layers,
 )
-from tqec.compile.blocks.positioning import LayoutPosition2D
+from tqec.compile.blocks.positioning import LayoutCubePosition2D, LayoutPosition2D
 from tqec.templates.base import RectangularTemplate
 from tqec.utils.exceptions import TQECError
 from tqec.utils.scale import LinearFunction, PhysicalQubitScalable2D
@@ -415,14 +415,19 @@ def _merge_mismatched_block_layers(
             which the conditional emission does not support.
 
     """
-    conditional = [
-        pos for pos, block in blocks_in_parallel.items() if isinstance(block, ConditionalBlock)
-    ]
+    conditional: list[str] = []
+    for pos, block in blocks_in_parallel.items():
+        if isinstance(block, ConditionalBlock):
+            assert isinstance(pos, LayoutCubePosition2D), "A conditional block is a cube."
+            block_position = pos.to_block_position()
+            conditional.append(f"({block_position.x},{block_position.y})")
     if conditional:
+        # compile_block_graph rejects this case up front, with the cubes' 3D
+        # positions; this guards a graph built without it.
         raise NotImplementedError(
             "A conditional cube cannot share its z-slice with a cube of a different "
-            "temporal schedule (an injection cube or a Y cube), found one at "
-            f"{conditional}. Move it to a z-slice of its own."
+            "temporal schedule (an injection cube or a Y cube), found one at the "
+            f"(x, y) position(s) {', '.join(conditional)}. Move it to a z-slice of its own."
         )
     flats = {pos: _flatten_block_layers(block, k) for pos, block in blocks_in_parallel.items()}
     duration = max(len(flat) for flat in flats.values())

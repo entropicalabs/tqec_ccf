@@ -7,6 +7,7 @@ import re
 import pytest
 
 from tests.compile.conditional._conditions import add_condition_source
+from tests.compile.conditional._records import measured_coordinates
 from tqec.compile.compile import compile_block_graph
 from tqec.compile.convention import FIXED_BULK_CONVENTION
 from tqec.computation.block_graph import BlockGraph
@@ -237,15 +238,21 @@ def test_conditional_observable_leaves_an_unrelated_conditional_cube_alone() -> 
 
     Each resolution is compiled against the graph with the surface's own cubes
     fixed to their branch; any other conditional cube has to be fixed to some
-    branch too, instead of being looked up in the surface's assignment.
+    branch too, instead of being looked up in the surface's assignment. That
+    choice is only for the observable: the other cube keeps both its branches.
     """
     g, cond_obs = _build_graph()
+    alone = compile_block_graph(g, FIXED_BULK_CONVENTION, observables=[cond_obs])
+    else_alone = alone.generate_stim_text(k=1).count("} ELSE {")
     lower, upper = Position3D(5, 0, 2), Position3D(5, 0, 3)
     g.add_cube(lower, "ZXZ")
     g.add_cube(upper, ConditionalLeafCubeKind.ZXX_ZXZ, condition=add_condition_source(g))
     g.add_pipe(lower, upper)
-    cg = compile_block_graph(g, FIXED_BULK_CONVENTION, observables=[cond_obs])
-    assert "OBSERVABLE_INCLUDE(0)" in cg.generate_stim_text(k=1)
+    text = compile_block_graph(g, FIXED_BULK_CONVENTION, observables=[cond_obs]).generate_stim_text(
+        k=1
+    )
+    assert "OBSERVABLE_INCLUDE(0)" in text
+    assert text.count("} ELSE {") == 2 * else_alone
 
 
 def test_conditional_observable_reaching_an_unbound_conditional_cube_is_rejected() -> None:
@@ -257,8 +264,33 @@ def test_conditional_observable_reaching_an_unbound_conditional_cube_is_rejected
             (True,): cond_obs.resolutions[(True, False)],
         },
     )
-    with pytest.raises(TQECError, match="none of its conditions is theirs"):
+    with pytest.raises(TQECError, match=r"conditional cube\(s\) at \(2,0,3\), whose conditions"):
         compile_block_graph(g, FIXED_BULK_CONVENTION, observables=[only_a])
+
+
+def test_surface_anchored_observable_reaching_a_conditional_cube_is_rejected() -> None:
+    """A surface whose every condition is surface-anchored, reaching a conditional cube.
+
+    With no condition bound to a cube, the resolutions are compiled against the
+    graph as it is, conditional cubes included, so nothing fixed their branch.
+    """
+    g, cond_obs = _build_multi_cube_graph()
+    anchored = ConditionalCorrelationSurface(
+        conditions=(add_condition_source(g),),
+        resolutions={
+            (False,): cond_obs.resolutions[(False, False)],
+            (True,): cond_obs.resolutions[(True, False)],
+        },
+    )
+    with pytest.raises(TQECError, match="whose conditions are not among"):
+        compile_block_graph(g, FIXED_BULK_CONVENTION, observables=[anchored])
+
+
+def _with_y_initialisation(g: BlockGraph) -> BlockGraph:
+    g.add_cube(Position3D(5, 0, 0), "Y")
+    g.add_cube(Position3D(5, 0, 1), "ZXZ")
+    g.add_pipe(Position3D(5, 0, 0), Position3D(5, 0, 1))
+    return g
 
 
 def test_conditional_observable_read_beside_a_y_initialisation() -> None:
@@ -266,10 +298,64 @@ def test_conditional_observable_read_beside_a_y_initialisation() -> None:
 
     At ``k = 1`` the initialisation outlasts the memory cubes beside it, so the
     slice's first round carries its raw round, which has no plaquette template.
+    The observable must read the same measurements as without the Y cube.
     """
     g, cond_obs = _build_graph()
-    g.add_cube(Position3D(5, 0, 0), "Y")
-    g.add_cube(Position3D(5, 0, 1), "ZXZ")
-    g.add_pipe(Position3D(5, 0, 0), Position3D(5, 0, 1))
-    cg = compile_block_graph(g, FIXED_BULK_CONVENTION, observables=[cond_obs])
-    assert "OBSERVABLE_INCLUDE(0)" in cg.generate_stim_text(k=1)
+    plain = compile_block_graph(g, FIXED_BULK_CONVENTION, observables=[cond_obs])
+    beside = compile_block_graph(
+        _with_y_initialisation(g), FIXED_BULK_CONVENTION, observables=[cond_obs]
+    )
+    texts = [graph.generate_stim_text(k=1) for graph in (beside, plain)]
+    for outcome in (0, 1):
+        with_y, without_y = (measured_coordinates(text, outcome) for text in texts)
+        assert with_y == without_y
+        assert any(name == "OBS0" for name, _ in with_y)
+
+
+def _y_capped_column(g: BlockGraph) -> tuple[Position3D, Position3D]:
+    """Add a column capped by a Y-basis measurement beside ``g``; return its two cubes."""
+    below, cap = Position3D(5, 0, 0), Position3D(5, 0, 1)
+    g.add_cube(below, "ZXZ")
+    g.add_cube(cap, "Y")
+    g.add_pipe(below, cap)
+    return below, cap
+
+
+def test_conditional_observable_reading_a_y_measurement_is_rejected() -> None:
+    g, cond_obs = _build_graph()
+    below, cap = _y_capped_column(g)
+    y_readout = frozenset(
+        ZXEdge(ZXNode(below, basis), ZXNode(cap, basis)) for basis in (Basis.X, Basis.Z)
+    )
+    reading_y = ConditionalCorrelationSurface(
+        conditions=cond_obs.conditions,
+        resolutions={
+            key: CorrelationSurface(span=resolution.span | y_readout)
+            for key, resolution in cond_obs.resolutions.items()
+        },
+    )
+    with pytest.raises(
+        NotImplementedError, match=r"ends on the Y-basis measurement\(s\) at \(5,0,1\)"
+    ):
+        compile_block_graph(g, FIXED_BULK_CONVENTION, observables=[reading_y])
+
+
+def test_condition_reading_a_y_measurement_is_rejected() -> None:
+    """A conditional cube conditioned on a Y-basis measurement.
+
+    This used to fail with a bare ``AssertionError`` in the observable builder,
+    when the circuit was generated.
+    """
+    g = BlockGraph("condition on a Y measurement")
+    _, cap = _y_capped_column(g)
+    condition = CorrelationSurface(
+        span=frozenset([ZXEdge(ZXNode(cap, Basis.Z), ZXNode(cap, Basis.Z))])
+    )
+    for z in range(3):
+        g.add_cube(Position3D(0, 0, z), "ZXZ")
+        if z:
+            g.add_pipe(Position3D(0, 0, z - 1), Position3D(0, 0, z))
+    g.add_cube(Position3D(0, 0, 3), ConditionalLeafCubeKind.ZXZ_ZXX, condition=condition)
+    g.add_pipe(Position3D(0, 0, 2), Position3D(0, 0, 3))
+    with pytest.raises(NotImplementedError, match=r"conditional cube at \(0,0,3\) ends on the Y"):
+        compile_block_graph(g, FIXED_BULK_CONVENTION, observables=None)

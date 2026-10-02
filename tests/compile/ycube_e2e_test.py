@@ -14,6 +14,7 @@ from itertools import pairwise
 import pytest
 import stim
 
+from tests.compile.conditional._records import measured_coordinates
 from tqec import BlockGraph, compile_block_graph
 from tqec.compile.blocks.layers.atomic.layout import LayoutLayer
 from tqec.compile.blocks.layers.atomic.plaquettes import PlaquetteLayer
@@ -819,18 +820,13 @@ def test_y_cube_on_a_hadamard_pipe_is_rejected() -> None:
         compile_block_graph(g, observables=[]).generate_stim_circuit(k=1)
 
 
-def test_condition_reads_a_slice_holding_a_y_initialisation() -> None:
-    """A condition read from a z-slice that also holds a Y-basis initialisation.
-
-    At ``k = 1`` the initialisation outlasts the memory cubes beside it, so the
-    slice's first round already carries its raw round. That round has no
-    plaquette template: the resolver has to drop it, as the observable
-    annotator does, rather than ask the whole round for a template.
-    """
+def _conditional_cube_reading_a_lone_cube(with_y_initialisation: bool) -> BlockGraph:
     graph = BlockGraph("condition beside a Y initialisation")
-    graph.add_cube(Position3D(0, 0, 0), "Y")
+    if with_y_initialisation:
+        graph.add_cube(Position3D(0, 0, 0), "Y")
     graph.add_cube(Position3D(0, 0, 1), "ZXZ")
-    graph.add_pipe(Position3D(0, 0, 0), Position3D(0, 0, 1))
+    if with_y_initialisation:
+        graph.add_pipe(Position3D(0, 0, 0), Position3D(0, 0, 1))
     graph.add_cube(Position3D(1, 0, 0), "ZXZ")
     graph.add_cube(Position3D(1, 0, 1), "ZXZ")
     graph.add_pipe(Position3D(1, 0, 0), Position3D(1, 0, 1))
@@ -842,5 +838,26 @@ def test_condition_reads_a_slice_holding_a_y_initialisation() -> None:
     )
     graph.add_cube(Position3D(1, 0, 2), ConditionalLeafCubeKind.ZXZ_ZXX, condition=condition)
     graph.add_pipe(Position3D(1, 0, 1), Position3D(1, 0, 2))
-    text = compile_block_graph(graph, observables=None).generate_stim_text(1)
-    assert "} ELSE {" in text
+    return graph
+
+
+@pytest.mark.parametrize("k", [1, 2])
+def test_condition_reads_a_slice_holding_a_y_initialisation(k: int) -> None:
+    """A condition read from a z-slice that also holds a Y-basis initialisation.
+
+    At ``k = 1`` the initialisation outlasts the memory cubes beside it, so the
+    slice's first round already carries its raw round; at ``k = 2`` it is
+    end-aligned, and the raw round is in the slice's last rounds. That round has
+    no plaquette template: the resolver has to drop it, as the observable
+    annotator does, and read the same measurements as without the Y cube.
+    """
+    texts = [
+        compile_block_graph(
+            _conditional_cube_reading_a_lone_cube(with_y), observables=None
+        ).generate_stim_text(k)
+        for with_y in (True, False)
+    ]
+    for outcome in (0, 1):
+        with_y, without_y = (measured_coordinates(text, outcome) for text in texts)
+        assert with_y == without_y
+        assert with_y and all(name == "IF" and qubits for name, qubits in with_y)

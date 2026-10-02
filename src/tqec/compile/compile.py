@@ -1,6 +1,7 @@
 """Defines :func:`~.compile.compile_block_graph`."""
 
 import warnings
+from collections.abc import Iterable
 from dataclasses import replace
 from typing import Final, Literal
 
@@ -27,7 +28,7 @@ from tqec.computation.correlation import (
     CorrelationSurface,
     find_correlation_surfaces,
 )
-from tqec.computation.cube import ConditionalLeafCubeKind, Cube
+from tqec.computation.cube import ConditionalLeafCubeKind, Cube, LeafCubeKind
 from tqec.templates.base import RectangularTemplate
 from tqec.utils.exceptions import TQECError
 from tqec.utils.position import BlockPosition3D, Direction3D, Position3D
@@ -202,6 +203,68 @@ def _get_template_from_layer(
         raise NotImplementedError("Unknown layer type encountered:", type(root).__name__)
 
 
+def _positions(positions: Iterable[Position3D]) -> str:
+    """Format positions for an error message, sorted, as ``(x,y,z)``."""
+    return ", ".join(str(p) for p in sorted(positions))
+
+
+def _reject_conditional_cubes_beside_raw_cubes(bg: BlockGraph) -> None:
+    """Reject a conditional cube in the same z-slice as a Y cube or an injection cube.
+
+    Either cube gives the slice a temporal schedule of its own, and a slice of
+    mismatched schedules is flattened at the concrete ``k``, which the
+    conditional emission does not support. Checked here, rather than only when
+    the slice is merged, so that :func:`compile_block_graph` fails instead of
+    the first circuit generation, and with the cubes' own positions.
+
+    Raises:
+        NotImplementedError: if a conditional cube shares its z-slice with a Y
+            cube or an injection cube.
+
+    """
+    raw_by_z: dict[int, list[Position3D]] = {}
+    for cube in bg.cubes:
+        if cube.is_y_cube or cube.kind is LeafCubeKind.INJECTION:
+            raw_by_z.setdefault(cube.position.z, []).append(cube.position)
+    for cube in bg.cubes:
+        beside = raw_by_z.get(cube.position.z) if cube.is_conditional else None
+        if beside:
+            raise NotImplementedError(
+                f"The conditional cube at {cube.position} shares its z-slice with the "
+                f"Y or injection cube(s) at {_positions(beside)}, whose temporal schedule "
+                "differs from it. A conditional cube cannot sit in a z-slice of "
+                "mismatched schedules: move it to a z-slice of its own."
+            )
+
+
+def _reject_y_readout(observable: AbstractObservable, what: str, minz: int) -> None:
+    """Reject a conditional surface that reads a Y-basis measurement.
+
+    A Y cube's logical readout is its transition-round records, which only the
+    plain observable annotator emits; the condition resolver and the
+    conditional observable annotator would ask the observable builder for a
+    data readout on a cube that has none.
+
+    Args:
+        observable: the compiled surface, in the graph's shifted frame.
+        what: how to name the surface in the error message.
+        minz: the shift applied to the graph, added back to the positions reported.
+
+    Raises:
+        NotImplementedError: if the surface ends on a Y-basis measurement.
+
+    """
+    y_cubes = _positions(
+        c.cube.position.shift_by(dz=minz) for c in observable.top_readout_cubes if c.cube.is_y_cube
+    )
+    if y_cubes:
+        raise NotImplementedError(
+            f"{what} ends on the Y-basis measurement(s) at {y_cubes}. Reading a "
+            "Y-basis measurement is only supported in a plain correlation surface, "
+            "not in a condition or a ConditionalCorrelationSurface."
+        )
+
+
 def compile_block_graph(
     block_graph: BlockGraph,
     convention: Convention = FIXED_BULK_CONVENTION,
@@ -233,6 +296,15 @@ def compile_block_graph(
         A :class:`TopologicalComputationGraph` object that can be used to generate a
         ``stim.Circuit`` and scale easily.
 
+    Raises:
+        TQECError: if the graph has open ports or is not valid, or if a resolution
+            of a :class:`~tqec.computation.correlation.ConditionalCorrelationSurface`
+            reaches a conditional cube none of its conditions selects.
+        NotImplementedError: if a conditional cube shares its z-slice with a Y cube
+            or an injection cube, or if a condition or a
+            :class:`~tqec.computation.correlation.ConditionalCorrelationSurface`
+            reads a Y-basis measurement.
+
     """
     # All the ports should be filled before compiling the block graph.
     if block_graph.num_ports != 0:
@@ -250,6 +322,7 @@ def compile_block_graph(
     # the middle one can be replaced by a ZXX cube because the faces along the
     # x-axis are shadowed by the connected pipes.
     block_graph = block_graph.fix_shadowed_faces()
+    _reject_conditional_cubes_beside_raw_cubes(block_graph)
 
     # Set the minimum z of block graph to 0.(time starts from zero)
     minz = min(cube.position.z for cube in block_graph.cubes)
@@ -320,11 +393,12 @@ def compile_block_graph(
                 for key, resolution in surface.resolutions.items():
                     reached = unbound & resolution.positions
                     if reached:
+                        positions = _positions(p.shift_by(dz=minz) for p in reached)
                         raise TQECError(
                             f"The resolution {key} of a ConditionalCorrelationSurface "
-                            f"reaches the conditional cube(s) at {sorted(reached)}, "
-                            "but none of its conditions is theirs. Add their "
-                            "conditions to the surface."
+                            f"reaches the conditional cube(s) at {positions}, whose "
+                            "conditions are not among the surface's conditions. Add "
+                            "them to the surface's conditions."
                         )
                 # Compile every truth-table resolution against a graph that
                 # has cube-anchored bits resolved per the key (surface-anchored
@@ -356,6 +430,14 @@ def compile_block_graph(
                     )
                     for b in bindings
                 )
+                for key, branch in branches.items():
+                    _reject_y_readout(
+                        branch, f"The resolution {key} of a ConditionalCorrelationSurface", minz
+                    )
+                for i, condition in enumerate(resolved_conditions):
+                    _reject_y_readout(
+                        condition, f"Condition {i} of a ConditionalCorrelationSurface", minz
+                    )
                 cond_obs_included.append(
                     ConditionalAbstractObservable(
                         branches=branches,
@@ -384,6 +466,16 @@ def compile_block_graph(
         for cube in block_graph.cubes
         if cube.is_conditional and cube.condition is not None
     }
+    for cube in block_graph.cubes:
+        if cube.is_conditional and cube.condition is not None:
+            layout_position = LayoutPosition3D.from_block_position(
+                BlockPosition3D(cube.position.x, cube.position.y, cube.position.z)
+            )
+            _reject_y_readout(
+                conditional_observables[layout_position],
+                f"The condition of the conditional cube at {cube.position.shift_by(dz=minz)}",
+                minz,
+            )
 
     # 1. Create topological computation graph
     graph = TopologicalComputationGraph(
