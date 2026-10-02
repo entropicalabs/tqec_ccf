@@ -4,7 +4,7 @@ import pytest
 import stim
 
 from tqec.circuit.schedule.circuit import ScheduledCircuit
-from tqec.compile.blocks.block import Block, merge_parallel_block_layers
+from tqec.compile.blocks.block import Block, ConditionalBlock, merge_parallel_block_layers
 from tqec.compile.blocks.enums import SpatialBlockBorder, TemporalBlockBorder
 from tqec.compile.blocks.layers.atomic.base import BaseLayer
 from tqec.compile.blocks.layers.atomic.layout import LayoutLayer
@@ -14,6 +14,7 @@ from tqec.compile.blocks.layers.composed.base import BaseComposedLayer
 from tqec.compile.blocks.layers.composed.repeated import RepeatedLayer
 from tqec.compile.blocks.layers.composed.sequenced import SequencedLayers
 from tqec.compile.blocks.positioning import LayoutPosition2D
+from tqec.computation.correlation import CorrelationSurface
 from tqec.plaquette.plaquette import Plaquettes
 from tqec.plaquette.rpng.rpng import RPNGDescription
 from tqec.plaquette.rpng.translators.default import DefaultRPNGTranslator
@@ -395,3 +396,26 @@ def test_merge_mismatched_cannot_pad_a_block_without_a_bulk_round(
         _mismatched_slice(
             Block([raw_layer, plaquette_layer2]), plaquette_layer, logical_qubit_shape
         )
+
+
+def test_merge_mismatched_rejects_a_conditional_block(
+    base_layers: list[BaseLayer], logical_qubit_shape: PhysicalQubitScalable2D
+) -> None:
+    plaquette_layer, plaquette_layer2, raw_layer = base_layers
+
+    def column() -> Block:
+        return Block(
+            [
+                plaquette_layer,
+                RepeatedLayer(plaquette_layer, LinearFunction(2, -1)),
+                plaquette_layer,
+            ]
+        )
+
+    # Flattening would keep only the first branch, so the merge refuses.
+    conditional = ConditionalBlock(column(), column(), CorrelationSurface(span=frozenset()))
+    b00 = LayoutPosition2D.from_block_position(BlockPosition2D(0, 0))
+    b01 = LayoutPosition2D.from_block_position(BlockPosition2D(0, 1))
+    short = _AcquiringBlock([raw_layer, plaquette_layer2])
+    with pytest.raises(NotImplementedError, match=r"position\(s\) \(0,0\)\."):
+        merge_parallel_block_layers({b00: conditional, b01: short}, logical_qubit_shape, 2)
