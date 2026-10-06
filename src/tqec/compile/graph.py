@@ -43,7 +43,7 @@ For temporal pipes, the layers are replaced in-place within block instances.
 
 """
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Final
 
@@ -63,12 +63,14 @@ from tqec.compile.blocks.layers.atomic.base import BaseLayer
 from tqec.compile.blocks.layers.atomic.plaquettes import PlaquetteLayer
 from tqec.compile.blocks.layers.composed.sequenced import SequencedLayers
 from tqec.compile.blocks.positioning import (
+    LayoutCubePosition2D,
     LayoutPipePosition2D,
     LayoutPosition2D,
     LayoutPosition3D,
 )
 from tqec.compile.conditional.circuit import ConditionalCircuit
 from tqec.compile.conditional.condition_recs import resolve_condition_recs
+from tqec.compile.conditional.noise import noisy_conditional_circuit
 from tqec.compile.detectors.database import DetectorDatabase
 from tqec.compile.observables.abstract_observable import (
     AbstractObservable,
@@ -84,7 +86,7 @@ from tqec.templates.enums import TemplateBorder
 from tqec.utils.exceptions import TQECError
 from tqec.utils.noise_model import NoiseModel
 from tqec.utils.paths import DEFAULT_DETECTOR_DATABASE_PATH
-from tqec.utils.position import BlockPosition3D, Direction3D, SignedDirection3D
+from tqec.utils.position import BlockPosition3D, Direction3D, Position3D, SignedDirection3D
 from tqec.utils.scale import PhysicalQubitScalable2D
 
 
@@ -585,15 +587,23 @@ class TopologicalComputationGraph:
         )
         # If provided, apply the noise model.
         if noise_model is not None:
-            noiseless_qubits: dict[int, frozenset[int]] = {}
-            if noiseless_injection:
-                qubit_map = tree._get_annotation(k).qubit_map
-                assert qubit_map is not None
-                finder = InjectionMomentFinder(k, qubit_map)
-                tree.walk(finder)
-                noiseless_qubits = finder.noiseless_qubits
+            noiseless_qubits = (
+                self._injection_noiseless_qubits(tree, k) if noiseless_injection else {}
+            )
             circuit = noise_model.noisy_circuit(circuit, noiseless_qubits=noiseless_qubits)
         return circuit
+
+    @staticmethod
+    def _injection_noiseless_qubits(tree: LayerTree, k: int) -> dict[int, frozenset[int]]:
+        """Return, for each moment an injection encoder occupies, the encoder's qubits.
+
+        ``tree`` must already have generated its circuit at scaling factor ``k``.
+        """
+        qubit_map = tree._get_annotation(k).qubit_map
+        assert qubit_map is not None
+        finder = InjectionMomentFinder(k, qubit_map)
+        tree.walk(finder)
+        return finder.noiseless_qubits
 
     def _non_clifford_injection_states(self) -> frozenset[str]:
         """Return the states of every injection cube stim cannot represent.
@@ -625,6 +635,17 @@ class TopologicalComputationGraph:
                 "a simulator that supports it."
             )
 
+    def _block_graph_position(self, position: LayoutPosition3D) -> Position3D:
+        """Return the position, in the block graph compiled, of the cube at ``position``."""
+        spatial = position.as_2d()
+        assert isinstance(spatial, LayoutCubePosition2D)
+        block = spatial.to_block_position()
+        return Position3D(block.x, block.y, position.z + self._z_offset)
+
+    def _conditional_cube_positions(self, positions: Iterable[LayoutPosition3D]) -> str:
+        """Return the block-graph positions of the cubes at ``positions``, for a message."""
+        return ", ".join(str(p) for p in sorted(map(self._block_graph_position, positions)))
+
     def _require_no_conditional_cubes(self, alternative: str) -> None:
         """Raise if the computation has a conditional cube.
 
@@ -637,7 +658,7 @@ class TopologicalComputationGraph:
 
         """
         if self._conditional_blocks:
-            positions = ", ".join(repr(p) for p in sorted(self._conditional_blocks, key=repr))
+            positions = self._conditional_cube_positions(self._conditional_blocks)
             raise TQECError(
                 f"This computation has conditional cube(s) at {positions}, whose "
                 "two branches cannot both be represented as a stim.Circuit. Use "
@@ -735,7 +756,11 @@ class TopologicalComputationGraph:
 
         Args:
             k: scale factor of the templates.
-            noise_model: noise model to be applied to the circuit.
+            noise_model: noise model to be applied to the circuit. With
+                conditional cubes, each arm of an ``IF``/``ELSE`` block is noised
+                in place, and the noise that follows a moment is put in an ``IF``
+                block of its own wherever the arms disagree on it --- see
+                :func:`~tqec.compile.conditional.noise.noisy_conditional_circuit`.
             manhattan_radius: radius considered to compute detectors.
                 Detectors are not computed and added to the circuit if this
                 argument is negative.
@@ -766,9 +791,7 @@ class TopologicalComputationGraph:
             the computation as Stim text.
 
         Raises:
-            TQECError: if ``noise_model`` is given for a graph with conditional
-                cubes (noise is applied to a ``stim.Circuit``, and the conditional
-                path never builds one); or, for a graph with conditional cubes,
+            TQECError: for a graph with conditional cubes,
                 if the compiled conditions do not match them, a ``z``-layer holds
                 more than one, a condition reads no measurement, a conditional
                 observable is not XOR-decomposable, or a conditional cube's
@@ -778,19 +801,20 @@ class TopologicalComputationGraph:
 
         """
         if self._conditional_blocks or self._conditional_abstract_observables:
-            if noise_model is not None:
-                raise TQECError(
-                    "generate_stim_text: a noise model cannot be applied to a "
-                    "graph with conditional cubes. Noise is applied to a "
-                    "stim.Circuit, and the IF/ELSE path never builds one."
-                )
-            circuit, _, _ = self._compile_conditional(
+            circuit, _, tree = self._compile_conditional(
                 k,
                 manhattan_radius=manhattan_radius,
                 detector_database=detector_database,
                 database_path=database_path,
                 reschedule_measurements=reschedule_measurements,
             )
+            if noise_model is not None:
+                noiseless_qubits = (
+                    self._injection_noiseless_qubits(tree, k) if noiseless_injection else {}
+                )
+                circuit = noisy_conditional_circuit(
+                    noise_model, circuit, noiseless_qubits=noiseless_qubits
+                )
             return rewrite_non_clifford_tags(circuit.to_stim_text())
         return render_with_non_clifford_gates(
             self._build_stim_circuit(
@@ -1041,11 +1065,11 @@ class TopologicalComputationGraph:
                     f"{position} must be 0 or 1, got {branch}."
                 )
             requested[layout_position] = branch
-        missing = sorted(set(self._conditional_blocks) - set(requested), key=repr)
+        missing = set(self._conditional_blocks) - set(requested)
         if missing:
             raise TQECError(
                 "generate_branch_circuit: no branch given for the conditional "
-                f"cube(s) at layout position(s) {missing}."
+                f"cube(s) at {self._conditional_cube_positions(missing)}."
             )
 
         circuit, cube_conditions, tree = self._compile_conditional(
@@ -1075,13 +1099,7 @@ class TopologicalComputationGraph:
         branch_circuit = circuit.resolve(outcomes)
         if noise_model is None:
             return branch_circuit
-        noiseless_qubits: dict[int, frozenset[int]] = {}
-        if noiseless_injection:
-            qubit_map = tree._get_annotation(k).qubit_map
-            assert qubit_map is not None
-            finder = InjectionMomentFinder(k, qubit_map)
-            tree.walk(finder)
-            noiseless_qubits = finder.noiseless_qubits
+        noiseless_qubits = self._injection_noiseless_qubits(tree, k) if noiseless_injection else {}
         return noise_model.noisy_circuit(branch_circuit, noiseless_qubits=noiseless_qubits)
 
     def generate_conditional_stim_text(

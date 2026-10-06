@@ -94,8 +94,10 @@ earlier. Its compiled form is Stim text with ``IF``/``ELSE`` blocks, produced by
 refuses such a computation. To simulate one,
 :meth:`~tqec.compile.graph.TopologicalComputationGraph.generate_branch_circuit`
 returns the ``stim.Circuit`` of a single branch, noisy if given a noise model;
-a logical error rate of the computation is an average over its branches. The
-following restrictions apply:
+a logical error rate of the computation is an average over its branches.
+``generate_stim_text`` takes a noise model too: each arm of an ``IF``/``ELSE``
+block is noised in place, so every branch of the text carries the noise it would
+on its own. The following restrictions apply:
 
 * only the four temporal-basis pairs (``ZXZ_ZXX``, ``XZZ_XZX``, ``ZXX_ZXZ``,
   ``XZX_XZZ``) exist; a pair that changes the spatial boundaries does not;
