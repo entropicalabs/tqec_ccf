@@ -11,8 +11,8 @@ arm's operations, and the idling of a qubit only one arm touches.
 
 Resolving the result to a branch gives the same noise as resolving first and
 applying :meth:`~tqec.utils.noise_model.NoiseModel.noisy_circuit`, up to the
-order of the noise channels that follow a moment, which act on distinct qubits
-and so commute.
+order of the noise channels that follow a moment, which are Pauli channels and
+so commute.
 """
 
 from __future__ import annotations
@@ -26,7 +26,6 @@ from tqec.compile.conditional.circuit import (
     CircuitEntry,
     ConditionalCircuit,
     IfBlock,
-    _absolute_condition,
     _measured_qubits,
 )
 from tqec.utils.noise_model import (
@@ -42,6 +41,7 @@ def noisy_conditional_circuit(
     noise_model: NoiseModel,
     circuit: ConditionalCircuit,
     *,
+    system_qubits: Set[int] | None = None,
     noiseless_qubits: Mapping[int, Set[int]] | None = None,
 ) -> ConditionalCircuit:
     """Return a noisy version of ``circuit``, keeping its ``IF``/``ELSE`` blocks.
@@ -52,6 +52,14 @@ def noisy_conditional_circuit(
             inside a moment (contain no ``TICK``), the blocks acting on qubits
             in one moment must share their condition, and a block acting on
             qubits must not hold another block.
+        system_qubits: all the qubits of the circuit, the ones eligible for
+            idling noise. Defaults to every qubit index below the highest one
+            used, in either arm of any block. A compiled circuit declares all
+            its qubits up front with ``QUBIT_COORDS``, so each of its branches
+            uses the same qubits; for a circuit where a qubit only appears in
+            one arm, pass the qubits explicitly for every branch to idle the
+            same ones as :meth:`~tqec.utils.noise_model.NoiseModel.noisy_circuit`
+            on that branch alone would.
         noiseless_qubits: for some moments, the qubits to leave untouched in
             that moment, as in
             :meth:`~tqec.utils.noise_model.NoiseModel.noisy_circuit`. Keys index
@@ -69,7 +77,8 @@ def noisy_conditional_circuit(
 
     """
     noiseless = noiseless_qubits if noiseless_qubits is not None else {}
-    system_qubits = set(range(_num_qubits(circuit.entries)))
+    if system_qubits is None:
+        system_qubits = set(range(_num_qubits(circuit.entries)))
     result = ConditionalCircuit(qubit_map=circuit.qubit_map)
     measurements_before = 0
     for index, moment in enumerate(_moments(circuit.entries)):
@@ -140,13 +149,15 @@ def _noisy_moment(
                 raise NotImplementedError(
                     "Cannot add noise to an IF block acting on qubits that holds another IF block."
                 )
-            absolute = list(_absolute_condition(entry, measured))
-            if condition is not None and absolute != condition:
+            # Keep the block's own order: a reader may key a block by its first rec.
+            absolute = [measured + r if r < 0 else r for r in entry.condition_recs]
+            if condition is not None and sorted(absolute) != sorted(condition):
                 raise NotImplementedError(
                     "Cannot add noise to a moment holding IF blocks with different "
                     f"conditions ({condition} and {absolute}) that act on qubits."
                 )
-            condition = absolute
+            if condition is None:
+                condition = absolute
         measured += len(_measured_qubits(entry))
 
     out: list[CircuitEntry] = []
@@ -237,8 +248,8 @@ def _append_if_arms_differ(
 ) -> None:
     """Append the noise channels both arms share, then an ``IF`` for the rest.
 
-    The channels follow a moment and act on distinct qubits, so they commute and
-    can be split per target (per pair, for a two-qubit channel) and regrouped.
+    The channels follow a moment and are Pauli channels, so they commute and can
+    be split per target (per pair, for a two-qubit channel) and regrouped.
     """
     then_pieces, else_pieces = Counter(_pieces(then_noise)), Counter(_pieces(else_noise))
     shared = then_pieces & else_pieces

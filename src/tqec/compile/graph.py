@@ -988,7 +988,7 @@ class TopologicalComputationGraph:
     def generate_branch_circuit(
         self,
         k: int,
-        branches: Mapping[BlockPosition3D, int],
+        branches: Mapping[Position3D, int],
         noise_model: NoiseModel | None = None,
         manhattan_radius: int = 2,
         detector_database: DetectorDatabase | None = None,
@@ -1005,13 +1005,20 @@ class TopologicalComputationGraph:
         that stim can sample and decode; a logical error rate of the whole
         computation is an average over its branches.
 
+        Each call compiles the computation anew, so going through all ``2**n``
+        branches of ``n`` conditional cubes costs ``2**n`` compilations.
+
         Args:
             k: scale factor of the templates.
             branches: the branch of every conditional cube, keyed by the cube's
                 position in the block graph: ``0`` for the first kind of its
                 :class:`~tqec.computation.cube.ConditionalLeafCubeKind` pair,
                 ``1`` for the second. Two cubes whose conditions read the same
-                measurements must be given the same branch.
+                measurements must be given the same branch. Other dependencies
+                between conditions are not checked: if the measurements one
+                cube reads are the XOR of those two others read, its branch is
+                fixed by theirs, and giving it another value yields the circuit
+                of a branch that never occurs.
             noise_model: noise model to be applied to the branch circuit.
             manhattan_radius: radius considered to compute detectors.
                 Detectors are not computed and added to the circuit if this
@@ -1058,6 +1065,12 @@ class TopologicalComputationGraph:
             if layout_position not in self._conditional_blocks:
                 raise TQECError(
                     f"generate_branch_circuit: there is no conditional cube at {position}."
+                )
+            if layout_position in requested:
+                raise TQECError(
+                    "generate_branch_circuit: the conditional cube at "
+                    f"{self._block_graph_position(layout_position)} is given a "
+                    "branch twice, under keys of different types."
                 )
             if branch not in (0, 1):
                 raise TQECError(

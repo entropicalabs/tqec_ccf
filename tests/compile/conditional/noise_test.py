@@ -37,6 +37,17 @@ _NOISE_MODELS = [
         ),
         id="with_waiting_for_m_or_r",
     ),
+    pytest.param(
+        NoiseModel(
+            idle_depolarization=1e-3,
+            additional_depolarization_waiting_for_m_or_r=1e-3,
+            any_clifford_1q_rule=NoiseModel.uniform_depolarizing(1e-3).any_clifford_1q_rule,
+            any_clifford_2q_rule=NoiseModel.uniform_depolarizing(1e-3).any_clifford_2q_rule,
+            measure_rules=NoiseModel.uniform_depolarizing(1e-3).measure_rules,
+            gate_rules=NoiseModel.uniform_depolarizing(1e-3).gate_rules,
+        ),
+        id="two_idle_channels_alike",
+    ),
 ]
 
 
@@ -152,6 +163,55 @@ def test_noise_the_arms_disagree_on_follows_the_moment_in_an_if() -> None:
         )
         in noisy
     )
+
+
+def test_a_qubit_only_one_arm_uses_idles_as_given_by_system_qubits() -> None:
+    # Qubit 2 is the highest index and only the IF arm touches it, so the
+    # resolved ELSE branch does not know it: pass the qubits explicitly.
+    c = ConditionalCircuit()
+    c.append("M", [0, 1])
+    c.append("TICK")
+    c.append_if(IfBlock(condition_recs=[1, 0], then_body=[stim.CircuitInstruction("H", [2])]))
+    c.append("H", [1])
+    noise_model = NoiseModel.uniform_depolarizing(1e-3)
+    for system_qubits in ({0, 1, 2}, {0, 1}):
+        noisy = noisy_conditional_circuit(noise_model, c, system_qubits=system_qubits)
+        for bit in (0, 1):
+            outcomes = {(0, 1): bit}
+            expected = noise_model.noisy_circuit(c.resolve(outcomes), system_qubits=system_qubits)
+            assert _canonical(noisy.resolve(outcomes)) == _canonical(expected)
+
+
+def test_the_noise_if_keeps_the_order_of_its_block_condition() -> None:
+    # A text reader keys a block by the first measurement its condition names,
+    # so the noise IF must name them in the same order as the block it follows.
+    c = ConditionalCircuit()
+    c.append("M", [0, 1, 2])
+    c.append("TICK")
+    c.append_if(
+        IfBlock(
+            condition_recs=[2, 0],
+            then_body=[stim.CircuitInstruction("CX", [3, 4])],
+            else_body=[stim.CircuitInstruction("H", [3])],
+        )
+    )
+    noise_model = NoiseModel.uniform_depolarizing(1e-3)
+    qubits = set(range(5))
+    text = noisy_conditional_circuit(noise_model, c, system_qubits=qubits).to_stim_text()
+    assert text.count("IF(rec[-1]^rec[-3])") == 3
+    for bit in (0, 1):
+        resolved = resolve_if_else_by_measurement(text, {2: bit})
+        expected = noise_model.noisy_circuit(c.resolve({(0, 2): bit}), system_qubits=qubits)
+        assert _canonical(resolved) == _canonical(expected)
+
+
+def test_an_if_block_inside_an_arm_acting_on_qubits_is_rejected() -> None:
+    c = ConditionalCircuit()
+    c.append("M", [0, 1])
+    inner = IfBlock(condition_recs=[1], then_body=[stim.CircuitInstruction("X", [3])])
+    c.append_if(IfBlock(condition_recs=[0], then_body=[stim.CircuitInstruction("H", [2]), inner]))
+    with pytest.raises(NotImplementedError, match="holds another IF block"):
+        noisy_conditional_circuit(NoiseModel.uniform_depolarizing(1e-3), c)
 
 
 def test_a_tick_inside_an_if_block_is_rejected() -> None:
