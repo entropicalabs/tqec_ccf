@@ -7,7 +7,7 @@ A relative ``rec[-k]`` reference at some point resolves to the absolute index
 ``num_measurements_seen - k``, then into that table.
 
 To inspect an ``IF/ELSE``-annotated circuit, first pick a branch with
-:func:`tools.resolve.resolve_if_else` to obtain a vanilla circuit, then use these
+:func:`tqec.compile.conditional.resolve.resolve_if_else` to obtain a vanilla circuit, then use these
 helpers. Working on a resolved circuit avoids the double-counting pitfall of
 counting both arms of an ``IF/ELSE`` block.
 """

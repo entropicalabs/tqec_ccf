@@ -134,3 +134,55 @@ def test_branches_measuring_differently_are_rejected(
     )
     with pytest.raises(ValueError, match="do not measure the same qubits"):
         c.to_stim_text()
+
+
+def _two_condition_circuit() -> ConditionalCircuit:
+    """Two blocks on measurements {0, 1}, one in relative form, and one on {2}."""
+    c = ConditionalCircuit()
+    c.append("M", [0, 1])
+    c.append_if(
+        IfBlock(
+            condition_recs=[0, 1],
+            then_body=[stim.CircuitInstruction("M", [2])],
+            else_body=[stim.CircuitInstruction("MX", [2])],
+        )
+    )
+    c.append_if(
+        IfBlock(
+            condition_recs=[2],
+            then_body=[stim.CircuitInstruction("X", [3])],
+        )
+    )
+    c.append_if(
+        IfBlock(
+            condition_recs=[-3, -2],
+            then_body=[stim.CircuitInstruction("Z", [4])],
+            else_body=[stim.CircuitInstruction("Y", [4])],
+        )
+    )
+    return c
+
+
+def test_conditions_are_absolute_and_distinct_in_order_of_first_use() -> None:
+    assert _two_condition_circuit().conditions == [(0, 1), (2,)]
+
+
+@pytest.mark.parametrize(
+    ("outcomes", "expected"),
+    [
+        ({(0, 1): 1, (2,): 1}, "M 0 1 2\nX 3\nZ 4"),
+        ({(0, 1): 0, (2,): 1}, "M 0 1\nMX 2\nX 3\nY 4"),
+        ({(0, 1): 1, (2,): 0}, "M 0 1 2\nZ 4"),
+    ],
+)
+def test_resolve_keeps_the_chosen_arm_of_every_block(
+    outcomes: dict[tuple[int, ...], int], expected: str
+) -> None:
+    assert _two_condition_circuit().resolve(outcomes) == _circuit(expected)
+
+
+def test_resolve_rejects_a_missing_or_invalid_outcome() -> None:
+    with pytest.raises(ValueError, match=r"No outcome given .* \[2\]"):
+        _two_condition_circuit().resolve({(0, 1): 1})
+    with pytest.raises(ValueError, match="must be 0 or 1"):
+        _two_condition_circuit().resolve({(0, 1): 2, (2,): 0})

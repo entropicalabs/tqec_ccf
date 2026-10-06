@@ -7,6 +7,7 @@ blocks plus XOR-normalized ``rec[-K]`` references.
 
 from tqec.compile.conditional.circuit import (
     CircuitEntry,
+    Condition,
     ConditionalCircuit,
     IfBlock,
     remap_entry_qubit_indices,
@@ -19,6 +20,7 @@ from tqec.compile.conditional.frame import ConditionId, PauliFrameTracker
 
 __all__ = [
     "CircuitEntry",
+    "Condition",
     "ConditionId",
     "ConditionalCircuit",
     "IfBlock",

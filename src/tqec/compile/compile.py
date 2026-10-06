@@ -484,6 +484,7 @@ def compile_block_graph(
         observable_builder=convention.triplet.observable_builder,
         conditional_observables=conditional_observables,
         conditional_abstract_observables=cond_obs_included,
+        z_offset=minz,
     )
 
     # 2. Add cubes to the graph

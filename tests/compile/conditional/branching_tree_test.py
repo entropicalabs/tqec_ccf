@@ -13,9 +13,9 @@ import re
 import pytest
 import stim
 
-from tests.tools.resolve_test import _assert_circuits_equivalent_modulo_detector_order
-from tools.resolve import resolve_if_else_by_measurement
+from tests.compile.conditional.resolve_test import _assert_circuits_equivalent_modulo_detector_order
 from tqec.compile.compile import _resolve_conditional_cubes, compile_block_graph
+from tqec.compile.conditional.resolve import resolve_if_else_by_measurement
 from tqec.compile.graph import TopologicalComputationGraph
 from tqec.compile.observables.abstract_observable import (
     AbstractObservable,
@@ -25,6 +25,7 @@ from tqec.computation.block_graph import BlockGraph
 from tqec.computation.correlation import CorrelationSurface, ZXEdge, ZXNode
 from tqec.computation.cube import ConditionalLeafCubeKind
 from tqec.utils.enums import Basis
+from tqec.utils.noise_model import NoiseModel
 from tqec.utils.position import Position3D
 
 
@@ -145,4 +146,24 @@ def test_every_branch_combination_round_trips(n: int, k: int) -> None:
         reference = _swapped(g, bits).generate_stim_circuit(k=k)
         _assert_circuits_equivalent_modulo_detector_order(
             resolved.flattened(), reference.flattened()
+        )
+
+
+@pytest.mark.parametrize(("n", "k"), _CASES)
+def test_every_branch_circuit_is_that_branch_compiled_on_its_own(n: int, k: int) -> None:
+    """``generate_branch_circuit`` gives each branch combination's own circuit, noisy or not."""
+    g = _branching_tree(n)
+    compiled = compile_block_graph(g, observables=None)
+    cubes = sorted((c.position for c in g.cubes if c.is_conditional), key=lambda p: p.z)
+    noise_model = NoiseModel.uniform_depolarizing(1e-3)
+    for bits in itertools.product((0, 1), repeat=n):
+        branches = dict(zip(cubes, bits, strict=True))
+        reference = _swapped(g, bits)
+        _assert_circuits_equivalent_modulo_detector_order(
+            compiled.generate_branch_circuit(k, branches).flattened(),
+            reference.generate_stim_circuit(k=k).flattened(),
+        )
+        _assert_circuits_equivalent_modulo_detector_order(
+            compiled.generate_branch_circuit(k, branches, noise_model=noise_model).flattened(),
+            reference.generate_stim_circuit(k=k, noise_model=noise_model).flattened(),
         )

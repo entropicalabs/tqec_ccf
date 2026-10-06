@@ -16,7 +16,7 @@ global qubit map.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Union
 
@@ -73,6 +73,14 @@ class IfBlock:
 
 
 CircuitEntry = Union[stim.CircuitInstruction, "IfBlock"]
+
+Condition = tuple[int, ...]
+"""An ``IF`` condition: the sorted absolute indices of the measurements it XORs.
+
+Absolute indices count from 0, the circuit's first measurement. Every ``IF``
+block a conditional cube emits reads the same measurements, so it has the same
+:data:`Condition` wherever it sits, unlike its rendered ``rec`` offsets.
+"""
 
 
 class ConditionalCircuit:
@@ -173,8 +181,95 @@ class ConditionalCircuit:
             circuit.append(entry)
         return circuit
 
+    @property
+    def conditions(self) -> list[Condition]:
+        """Return the distinct conditions of the ``IF`` blocks, in order of first use.
+
+        Blocks nested in either arm of another block are included.
+        """
+        found: dict[Condition, None] = {}
+
+        def visit(block: IfBlock, measurements_before: int) -> int | None:
+            found.setdefault(_absolute_condition(block, measurements_before))
+            return None
+
+        _walk_conditions(self._entries, 0, visit)
+        return list(found)
+
+    def resolve(self, outcomes: Mapping[Condition, int]) -> stim.Circuit:
+        """Return the ``stim.Circuit`` of one branch, picking an arm of every ``IF``.
+
+        Every ``rec`` offset stays valid in the result: the two arms of a block
+        perform the same measurements (the Equal Measurement Count invariant),
+        so the instructions around it see the same records whichever arm is
+        kept.
+
+        Args:
+            outcomes: for each condition (see :attr:`conditions`), the parity
+                of the measurements it reads: ``1`` keeps the ``IF`` arm of
+                every block with that condition, ``0`` the ``ELSE`` arm (or
+                nothing, for a block without one).
+
+        Returns:
+            the circuit of the chosen branch, without any ``IF`` block.
+
+        Raises:
+            ValueError: if a condition the circuit reaches is missing from
+                ``outcomes``, or an outcome is neither 0 nor 1.
+
+        """
+        circuit = stim.Circuit()
+
+        def choose(block: IfBlock, measurements_before: int) -> int | None:
+            condition = _absolute_condition(block, measurements_before)
+            if condition not in outcomes:
+                raise ValueError(f"No outcome given for the IF condition on {list(condition)}.")
+            outcome = outcomes[condition]
+            if outcome not in (0, 1):
+                raise ValueError(
+                    f"The outcome of the IF condition on {list(condition)} must be 0 "
+                    f"or 1, got {outcome}."
+                )
+            return outcome
+
+        _walk_conditions(self._entries, 0, choose, circuit.append)
+        return circuit
+
     def __repr__(self) -> str:
         return f"ConditionalCircuit({len(self._entries)} entries)"
+
+
+def _absolute_condition(block: IfBlock, measurements_before: int) -> Condition:
+    """Return the :data:`Condition` of ``block``, emitted after ``measurements_before``."""
+    if block.condition_recs[0] < 0:
+        return tuple(sorted(measurements_before + r for r in block.condition_recs))
+    return tuple(sorted(block.condition_recs))
+
+
+def _walk_conditions(
+    entries: list[CircuitEntry],
+    measurements_before: int,
+    visit: Callable[[IfBlock, int], int | None],
+    emit: Callable[[stim.CircuitInstruction], None] | None = None,
+) -> int:
+    """Walk ``entries`` in program order, calling ``visit`` on every ``IF`` block.
+
+    ``visit`` receives a block and the number of measurements before it, and
+    returns the arm to descend into (``1`` for ``IF``, ``0`` for ``ELSE``), or
+    ``None`` to descend into both. ``emit`` receives every instruction on the
+    path walked. Returns the number of measurements after ``entries``.
+    """
+    for entry in entries:
+        if isinstance(entry, IfBlock):
+            arm = visit(entry, measurements_before)
+            if arm in (None, 1):
+                _walk_conditions(entry.then_body, measurements_before, visit, emit)
+            if arm in (None, 0) and entry.else_body is not None:
+                _walk_conditions(entry.else_body, measurements_before, visit, emit)
+        elif emit is not None:
+            emit(entry)
+        measurements_before += len(_measured_qubits(entry))
+    return measurements_before
 
 
 def remap_entry_qubit_indices(
