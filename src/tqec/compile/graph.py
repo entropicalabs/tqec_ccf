@@ -607,6 +607,25 @@ class TopologicalComputationGraph:
                 "a simulator that supports it."
             )
 
+    def _require_no_conditional_cubes(self, alternative: str) -> None:
+        """Raise if the computation has a conditional cube.
+
+        A ``stim.Circuit`` has no ``IF``/``ELSE``, so building one for such a
+        computation would silently compile the branch-zero kind of every
+        conditional cube.
+
+        Raises:
+            TQECError: if the computation has a conditional cube.
+
+        """
+        if self._conditional_blocks:
+            positions = ", ".join(repr(p) for p in sorted(self._conditional_blocks, key=repr))
+            raise TQECError(
+                f"This computation has conditional cube(s) at {positions}, whose "
+                "two branches cannot both be represented as a stim.Circuit. Use "
+                f"{alternative} instead, which emits them as IF/ELSE blocks."
+            )
+
     def generate_stim_circuit(
         self,
         k: int,
@@ -652,13 +671,15 @@ class TopologicalComputationGraph:
             A compiled stim circuit.
 
         Raises:
-            TQECError: if the computation injects a state stim cannot represent.
-                Use :meth:`generate_stim_text` for those.
+            TQECError: if the computation injects a state stim cannot represent,
+                or has a conditional cube, whose branches a ``stim.Circuit``
+                cannot hold. Use :meth:`generate_stim_text` for both.
             NotImplementedError: if ``noiseless_injection`` is set and a
                 repeated round precedes an injection encoder.
 
         """
         self._require_representable_states("generate_stim_text")
+        self._require_no_conditional_cubes("generate_stim_text")
         return self._build_stim_circuit(
             k,
             noise_model,

@@ -73,3 +73,12 @@ def test_multi_conditional_same_z_layer_raises() -> None:
     cg = compile_block_graph(g, FIXED_BULK_CONVENTION, observables=None)
     with pytest.raises(TQECError, match="z=1"):
         cg.generate_conditional_stim_text(k=1)
+
+
+def test_generate_stim_circuit_refuses_a_conditional_cube() -> None:
+    # A stim.Circuit has no IF/ELSE: building one would silently keep only the
+    # branch-zero kind of the conditional cube.
+    g = _single_conditional_graph("XZX_XZZ")
+    cg = compile_block_graph(g, FIXED_BULK_CONVENTION, observables=None)
+    with pytest.raises(TQECError, match="generate_stim_text"):
+        cg.generate_stim_circuit(k=1)
