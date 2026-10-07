@@ -306,21 +306,45 @@ class InjectionMomentFinder(NodeWalker):
     cube needs --- a mismatched-schedule z-slice is flattened, so no ``REPEAT``
     block is emitted for it. Anything else raises rather than quietly returning
     indices that address the wrong moments.
+
+    A circuit with conditional cubes is flat instead:
+    :meth:`~tqec.compile.tree.node.LayerNode.generate_conditional_circuit` writes
+    out every repetition, so each one contributes its own moments and an encoder
+    may follow a repeated round. Pass ``flattened=True`` to index such a circuit.
     """
 
-    def __init__(self, k: int, qubit_map: QubitMap) -> None:
+    def __init__(self, k: int, qubit_map: QubitMap, flattened: bool = False) -> None:
         """Prepare to walk an annotated tree at scaling factor ``k``.
 
         Args:
             k: scaling factor.
             qubit_map: the global qubit map of the circuit the moments index.
+            flattened: whether the circuit the moments index writes out every
+                repetition of a repeated layer, as the conditional path does,
+                rather than holding it in a ``REPEAT`` block. Defaults to
+                ``False``.
 
         """
         self._k = k
         self._qubit_map = qubit_map
+        self._flattened = flattened
         self._moments = 0
         self._qubits: dict[int, frozenset[int]] = {}
         self._seen_repeat_block = False
+        # Flattened only: how many times the leaves being walked are written out.
+        self._repetitions: list[int] = [1]
+
+    @override
+    def enter_node(self, node: LayerNode) -> None:
+        if self._flattened and node.is_repeated:
+            repetitions = node.repetitions
+            assert repetitions is not None
+            self._repetitions.append(self._repetitions[-1] * repetitions.integer_eval(self._k))
+
+    @override
+    def exit_node(self, node: LayerNode) -> None:
+        if self._flattened and node.is_repeated:
+            self._repetitions.pop()
 
     @property
     def noiseless_qubits(self) -> dict[int, frozenset[int]]:
@@ -332,7 +356,7 @@ class InjectionMomentFinder(NodeWalker):
         if not node.is_leaf:
             # Pre-order DFS, so a repeated node is visited before the leaf it
             # repeats: the flag is set by the time that leaf is counted.
-            if node.is_repeated:
+            if node.is_repeated and not self._flattened:
                 self._seen_repeat_block = True
             return
         layout = node._layer
@@ -349,7 +373,19 @@ class InjectionMomentFinder(NodeWalker):
                 "have been annotated with their circuits."
             )
         count = circuit.get_circuit(include_qubit_coords=False).num_ticks + 1
+        conditional = node.get_annotations(self._k).conditional_circuit
+        if self._flattened and conditional is not None:
+            # A conditional leaf is emitted from its own circuit, which may
+            # not tick like its branch-zero one.
+            count = 1 + sum(
+                1 for entry in conditional.entries if getattr(entry, "name", None) == "TICK"
+            )
         if encoders:
+            if self._repetitions[-1] != 1:
+                raise NotImplementedError(
+                    "Leaving a state-injection encoder noiseless inside a repeated "
+                    "round is not supported."
+                )
             if self._seen_repeat_block:
                 raise NotImplementedError(
                     "Leaving the state-injection encoder noiseless is only "
@@ -364,7 +400,7 @@ class InjectionMomentFinder(NodeWalker):
             )
             for moment in range(self._moments, self._moments + count):
                 self._qubits[moment] = qubits
-        self._moments += count
+        self._moments += count * self._repetitions[-1]
 
     def _encoder_qubits(
         self, layout: LayoutLayer, pos: LayoutPosition2D, encoder: InjectionRawLayer

@@ -11,6 +11,7 @@ import stim
 from tests.compile.conditional._conditions import add_condition_source
 from tests.compile.conditional.branch_circuit_test import (
     _CONDITIONAL,
+    _injection_above_a_conditional_cube,
     _injection_beside_a_conditional_cube,
 )
 from tests.compile.conditional.branching_tree_test import _branching_tree
@@ -270,16 +271,23 @@ def test_noisy_stim_text_resolves_to_each_noisy_branch_circuit(graph: BlockGraph
         assert resolved.detector_error_model() == expected.detector_error_model()
 
 
+@pytest.mark.parametrize("k", [1, 2])
 @pytest.mark.parametrize("branch", [0, 1])
-def test_noiseless_injection_in_noisy_stim_text(branch: int) -> None:
+@pytest.mark.parametrize(
+    "graph",
+    [
+        pytest.param(_injection_beside_a_conditional_cube(), id="beside"),
+        pytest.param(_injection_above_a_conditional_cube(), id="above"),
+    ],
+)
+def test_noiseless_injection_in_noisy_stim_text(graph: BlockGraph, branch: int, k: int) -> None:
     noise_model = NoiseModel.uniform_depolarizing(1e-3)
-    graph = _injection_beside_a_conditional_cube()
     compiled = compile_block_graph(graph, FIXED_BULK_CONVENTION, observables=None)
-    text = compiled.generate_stim_text(1, noise_model=noise_model, noiseless_injection=True)
-    (condition,) = compiled._compile_conditional(1)[1].values()
+    text = compiled.generate_stim_text(k, noise_model=noise_model, noiseless_injection=True)
+    (condition,) = compiled._compile_conditional(k)[1].values()
     resolved = resolve_if_else_by_measurement(text, {min(condition): branch})
     expected = compiled.generate_branch_circuit(
-        1, {_CONDITIONAL: branch}, noise_model=noise_model, noiseless_injection=True
+        k, {_CONDITIONAL: branch}, noise_model=noise_model, noiseless_injection=True
     )
     assert _canonical(resolved) == _canonical(expected)
 

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import itertools
+
 import pytest
 
 from tests.compile.conditional.resolve_test import _assert_circuits_equivalent_modulo_detector_order
+from tqec.compile.blocks.positioning import LayoutPosition3D
 from tqec.compile.compile import compile_block_graph
 from tqec.compile.convention import FIXED_BULK_CONVENTION
 from tqec.compile.graph import TopologicalComputationGraph
@@ -83,36 +86,86 @@ def _injection_above_a_conditional_cube(state: str = "+") -> BlockGraph:
     return graph
 
 
-def test_noiseless_injection_after_a_conditional_cube_is_not_supported() -> None:
-    # A repeated round precedes the encoder, as on the plain path.
-    graph = _injection_above_a_conditional_cube()
-    compiled = compile_block_graph(graph, FIXED_BULK_CONVENTION, observables=None)
-    with pytest.raises(NotImplementedError, match="repeated round precedes it"):
-        compiled.generate_branch_circuit(
-            1,
-            {_CONDITIONAL: 0},
-            noise_model=NoiseModel.uniform_depolarizing(1e-3),
-            noiseless_injection=True,
+@pytest.mark.parametrize("k", [1, 2])
+@pytest.mark.parametrize("branch", [0, 1])
+def test_noiseless_injection_after_a_conditional_cube_and_a_repeated_round(
+    k: int, branch: int
+) -> None:
+    # The branch circuit writes every repetition out, so the encoder's moments
+    # are counted past each of them. A noisy encoder makes the column distance
+    # 1; exempting it restores 2k + 1, which no misplaced moment index does.
+    graph = _injection_above_a_conditional_cube(state="0")
+    top = BlockGraph("The column above the conditional cube")
+    top.add_cube(Position3D(0, 0, 3), "I", state="0")
+    top.add_cube(Position3D(0, 0, 4), "ZXZ")
+    top.add_pipe(Position3D(0, 0, 3), Position3D(0, 0, 4))
+    compiled = compile_block_graph(
+        graph, FIXED_BULK_CONVENTION, observables=top.find_correlation_surfaces()
+    )
+    noise = NoiseModel.uniform_depolarizing(1e-3)
+    for noiseless, distance in ((False, 1), (True, 2 * k + 1)):
+        circuit = compiled.generate_branch_circuit(
+            k, {_CONDITIONAL: branch}, noise_model=noise, noiseless_injection=noiseless
         )
+        error = circuit.shortest_graphlike_error(ignore_ungraphlike_errors=False)
+        assert len(error) == distance
+
+
+def _add_conditional_column(
+    graph: BlockGraph, x: int, top: int, lone: list[Position3D]
+) -> Position3D:
+    """Add a column at ``x`` ending at ``top`` in a cube conditioned on the ``lone`` cubes."""
+    column = [Position3D(x, 0, z) for z in range(top)]
+    for position in column:
+        graph.add_cube(position, "ZXZ")
+    for below, above in itertools.pairwise(column):
+        graph.add_pipe(below, above)
+    nodes = [ZXNode(p, Basis.Z) for p in lone]
+    condition = CorrelationSurface(span=frozenset(ZXEdge(n, n) for n in nodes))
+    conditional = Position3D(x, 0, top)
+    graph.add_cube(conditional, ConditionalLeafCubeKind.ZXZ_ZXX, condition=condition)
+    graph.add_pipe(column[-1], conditional)
+    return conditional
 
 
 def test_two_cubes_reading_the_same_measurements_take_the_same_branch() -> None:
     graph = _injection_beside_a_conditional_cube()
-    # A second column, whose conditional cube reads the same lone cube.
-    column = [Position3D(4, 0, z) for z in range(3)]
-    for position in column:
-        graph.add_cube(position, "ZXZ")
-    graph.add_pipe(column[0], column[1])
-    graph.add_pipe(column[1], column[2])
-    second = Position3D(4, 0, 3)
-    lone = ZXNode(Position3D(2, 0, 1), Basis.Z)
-    condition = CorrelationSurface(span=frozenset([ZXEdge(lone, lone)]))
-    graph.add_cube(second, ConditionalLeafCubeKind.ZXZ_ZXX, condition=condition)
-    graph.add_pipe(column[2], second)
+    second = _add_conditional_column(graph, 4, 3, [Position3D(2, 0, 1)])
     compiled = compile_block_graph(graph, FIXED_BULK_CONVENTION, observables=None)
     compiled.generate_branch_circuit(1, {_CONDITIONAL: 1, second: 1})
-    with pytest.raises(TQECError, match="same branch"):
+    with pytest.raises(TQECError, match="XOR of the conditions of cubes below it"):
         compiled.generate_branch_circuit(1, {_CONDITIONAL: 1, second: 0})
+
+
+def test_a_condition_that_is_the_xor_of_two_others_takes_the_xor_of_their_outcomes() -> None:
+    compiled = compile_block_graph(
+        _injection_beside_a_conditional_cube(), FIXED_BULK_CONVENTION, observables=None
+    )
+    a, b, c = (LayoutPosition3D.from_block_position(BlockPosition3D(x, 0, x)) for x in (1, 2, 3))
+    cube_conditions = {a: [3], b: [5, 7], c: [3, 5, 7]}
+    observable = (3, 5, 7)  # read by c, and by a and b together
+    for bit_a, bit_b in itertools.product((0, 1), repeat=2):
+        outcomes = compiled._condition_outcomes(
+            cube_conditions, {a: bit_a, b: bit_b, c: bit_a ^ bit_b}, [(3,), observable]
+        )
+        assert outcomes == {(3,): bit_a, observable: bit_a ^ bit_b}
+        with pytest.raises(TQECError, match=f"theirs, {bit_a ^ bit_b}"):
+            compiled._condition_outcomes(
+                cube_conditions, {a: bit_a, b: bit_b, c: 1 - (bit_a ^ bit_b)}, []
+            )
+    with pytest.raises(TQECError, match=r"\[5\], which are not an XOR"):
+        compiled._condition_outcomes(cube_conditions, {a: 0, b: 0, c: 0}, [(5,)])
+
+
+def test_branch_circuits_compile_once_for_the_same_circuits() -> None:
+    graph = _injection_beside_a_conditional_cube()
+    compiled = compile_block_graph(graph, FIXED_BULK_CONVENTION, observables=None)
+    noise = NoiseModel.uniform_depolarizing(1e-3)
+    branches = [{_CONDITIONAL: 0}, {_CONDITIONAL: 1}, {_CONDITIONAL: 0}]
+    together = compiled.generate_branch_circuits(1, branches, noise_model=noise)
+    alone = [compiled.generate_branch_circuit(1, b, noise_model=noise) for b in branches]
+    assert together == alone
+    assert together[0] != together[1]
 
 
 def test_a_cube_given_a_branch_twice_is_rejected() -> None:
