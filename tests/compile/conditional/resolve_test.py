@@ -1,4 +1,4 @@
-"""Unit tests for ``tools.resolve_if_else``."""
+"""Unit tests for :mod:`tqec.compile.conditional.resolve`."""
 
 from __future__ import annotations
 
@@ -8,9 +8,9 @@ import pytest
 import stim
 
 from tests.compile.conditional._conditions import add_condition_source
-from tools.resolve import resolve_if_else, resolve_if_else_by_measurement
 from tqec.compile.blocks.block import ConditionalBlock
 from tqec.compile.compile import _resolve_conditional_cubes, compile_block_graph
+from tqec.compile.conditional.resolve import resolve_if_else, resolve_if_else_by_measurement
 from tqec.compile.convention import FIXED_BULK_CONVENTION
 from tqec.compile.observables.abstract_observable import (
     compile_correlation_surface_to_abstract_observable,

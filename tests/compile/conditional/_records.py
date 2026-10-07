@@ -6,7 +6,7 @@ import re
 
 import stim
 
-from tools.resolve import resolve_if_else_by_order
+from tqec.compile.conditional.resolve import resolve_if_else_by_order
 
 _IF_OPEN = re.compile(r"^(\s*)IF\((rec\[-?\d+\](?:\^rec\[-?\d+\])*)\)\s*\{\s*$")
 # A DETECTOR with this argument marks an IF header in the resolved circuit.
