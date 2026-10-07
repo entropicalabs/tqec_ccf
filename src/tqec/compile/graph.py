@@ -595,18 +595,37 @@ class TopologicalComputationGraph:
 
     @staticmethod
     def _injection_noiseless_qubits(
-        tree: LayerTree, k: int, flattened: bool = False
+        tree: LayerTree, k: int, flattened: bool = False, moments: int | None = None
     ) -> dict[int, frozenset[int]]:
         """Return, for each moment an injection encoder occupies, the encoder's qubits.
 
-        ``tree`` must already have generated its circuit at scaling factor ``k``;
-        ``flattened`` tells whether that circuit writes out its repetitions, as
-        the conditional path does.
+        Args:
+            tree: the layer tree, which must already have generated its circuit
+                at scaling factor ``k``.
+            k: scaling factor.
+            flattened: whether that circuit writes out its repetitions, as the
+                conditional path does.
+            moments: if given, the number of moments of that circuit. The
+                moments the tree accounts for are checked against it, so that a
+                miscount raises instead of exempting the wrong moments.
+
+        Returns:
+            for each moment an encoder occupies, the encoder's qubit indices.
+
+        Raises:
+            TQECError: if ``moments`` is given and differs from the moments the
+                tree accounts for.
+
         """
         qubit_map = tree._get_annotation(k).qubit_map
         assert qubit_map is not None
         finder = InjectionMomentFinder(k, qubit_map, flattened=flattened)
         tree.walk(finder)
+        if moments is not None and finder.moments != moments:
+            raise TQECError(
+                f"Cannot locate the injection encoders: the layer tree accounts for "
+                f"{finder.moments} moments, but the circuit has {moments}."
+            )
         return finder.noiseless_qubits
 
     def _non_clifford_injection_states(self) -> frozenset[str]:
@@ -803,7 +822,10 @@ class TopologicalComputationGraph:
             NotImplementedError: if ``noiseless_injection`` is set and a
                 repeated round precedes an injection encoder, in a graph
                 without conditional cubes. With conditional cubes the text writes
-                every repetition out, so a preceding repeated round is fine.
+                every repetition out, so a preceding repeated round is fine. Also
+                if ``noise_model`` is given and the conditional circuit has a
+                shape :func:`~tqec.compile.conditional.noise.noisy_conditional_circuit`
+                cannot noise.
 
         """
         if self._conditional_blocks or self._conditional_abstract_observables:
@@ -816,7 +838,9 @@ class TopologicalComputationGraph:
             )
             if noise_model is not None:
                 noiseless_qubits = (
-                    self._injection_noiseless_qubits(tree, k, flattened=True)
+                    self._injection_noiseless_qubits(
+                        tree, k, flattened=True, moments=_num_moments(circuit)
+                    )
                     if noiseless_injection
                     else {}
                 )
@@ -1083,21 +1107,42 @@ class TopologicalComputationGraph:
     ) -> list[stim.Circuit]:
         """Generate the ``stim.Circuit`` of several branches, compiling only once.
 
-        The arguments, and the errors raised, are those of
-        :meth:`generate_branch_circuit`, except that ``branches`` lists one
-        mapping per circuit to generate.
+        Args:
+            k: scale factor of the templates.
+            branches: one mapping per circuit to generate, each giving the branch
+                of every conditional cube as in :meth:`generate_branch_circuit`.
+            noise_model: noise model to be applied to every branch circuit.
+            manhattan_radius: as in :meth:`generate_branch_circuit`.
+            detector_database: as in :meth:`generate_branch_circuit`.
+            database_path: as in :meth:`generate_branch_circuit`.
+            reschedule_measurements: as in :meth:`generate_branch_circuit`.
+            noiseless_injection: as in :meth:`generate_branch_circuit`.
 
         Returns:
             the circuit of each branch, in the order of ``branches``.
 
+        Raises:
+            TQECError: for any mapping of ``branches``, as
+                :meth:`generate_branch_circuit` does for its ``branches``, and
+                otherwise as :meth:`generate_branch_circuit` does.
+
         """
         self._require_representable_states("generate_stim_text")
         if not self._conditional_blocks:
+            if self._conditional_abstract_observables:
+                raise TQECError(
+                    "generate_branch_circuit: this computation has no conditional "
+                    "cube, so no branch fixes the condition of its conditional "
+                    "observable(s). generate_stim_circuit would leave them out; "
+                    "use generate_stim_text, which emits them as IF/ELSE blocks."
+                )
             raise TQECError(
                 "generate_branch_circuit: this computation has no conditional "
                 "cube. Use generate_stim_circuit instead."
             )
         requested = [self._requested_branches(mapping) for mapping in branches]
+        if not requested:
+            return []
         circuit, cube_conditions, tree = self._compile_conditional(
             k,
             manhattan_radius=manhattan_radius,
@@ -1106,7 +1151,7 @@ class TopologicalComputationGraph:
             reschedule_measurements=reschedule_measurements,
         )
         noiseless_qubits = (
-            self._injection_noiseless_qubits(tree, k, flattened=True)
+            self._injection_noiseless_qubits(tree, k, flattened=True, moments=_num_moments(circuit))
             if noise_model is not None and noiseless_injection
             else {}
         )
@@ -1114,6 +1159,11 @@ class TopologicalComputationGraph:
         for chosen in requested:
             outcomes = self._condition_outcomes(cube_conditions, chosen, circuit.conditions)
             branch_circuit = circuit.resolve(outcomes)
+            if noiseless_qubits and branch_circuit.num_ticks + 1 != _num_moments(circuit):
+                raise TQECError(
+                    "Cannot locate the injection encoders in a branch circuit: an "
+                    "IF block of the conditional circuit spans several moments."
+                )
             if noise_model is not None:
                 branch_circuit = noise_model.noisy_circuit(
                     branch_circuit, noiseless_qubits=noiseless_qubits
@@ -1132,6 +1182,11 @@ class TopologicalComputationGraph:
         """
         requested: dict[LayoutPosition3D, int] = {}
         for position, branch in branches.items():
+            if not isinstance(position, Position3D):
+                raise TQECError(
+                    "generate_branch_circuit: a conditional cube must be named by its "
+                    f"Position3D in the block graph, got {position!r}."
+                )
             layout_position = LayoutPosition3D.from_block_position(
                 BlockPosition3D(position.x, position.y, position.z - self._z_offset)
             )
@@ -1178,14 +1233,17 @@ class TopologicalComputationGraph:
 
         """
         span = _ParitySpan()
-        for layout_position in sorted(cube_conditions, key=lambda p: p.z):
+        added = sorted(cube_conditions, key=lambda p: p.z)
+        for layout_position in added:
             branch = requested[layout_position]
-            if not span.add(cube_conditions[layout_position], branch):
+            others = span.add(cube_conditions[layout_position], branch)
+            if others:
+                positions = self._conditional_cube_positions(added[i] for i in others)
                 raise TQECError(
                     "generate_branch_circuit: the condition of the conditional cube "
                     f"at {self._block_graph_position(layout_position)} is the XOR of "
-                    "the conditions of cubes below it, so its branch is the XOR of "
-                    f"theirs, {1 - branch}; it was given {branch}."
+                    f"the conditions of the cube(s) at {positions}, so its branch is "
+                    f"the XOR of theirs, {1 - branch}; it was given {branch}."
                 )
         outcomes: dict[Condition, int] = {}
         for condition in conditions:
@@ -1270,41 +1328,67 @@ class TopologicalComputationGraph:
         )
 
 
+def _num_moments(circuit: ConditionalCircuit) -> int:
+    """Return the number of moments of ``circuit``, the spans between its top-level ``TICK``s."""
+    return 1 + sum(1 for entry in circuit.entries if getattr(entry, "name", None) == "TICK")
+
+
 class _ParitySpan:
     """The span, over GF(2), of measurement parities whose outcomes are known.
 
     A parity is the set of measurements it XORs, stored as an integer with one
     bit per measurement index; elimination keeps one basis vector per leading
-    bit, together with its outcome.
+    bit, together with its outcome and the set of parities added that it is the
+    XOR of (as an integer with one bit per parity, in the order they were added).
     """
 
     def __init__(self) -> None:
-        self._basis: dict[int, tuple[int, int]] = {}
+        self._basis: dict[int, tuple[int, int, int]] = {}
+        self._added = 0
 
-    def _reduce(self, measurements: Iterable[int]) -> tuple[int, int]:
-        """Return what is left of a parity outside the span, and the outcome used up."""
+    def _reduce(self, measurements: Iterable[int]) -> tuple[int, int, int]:
+        """Reduce a parity against the span.
+
+        Returns:
+            what is left of the parity outside the span, the outcome of the
+            part inside it, and the parities added that make up that part.
+
+        """
         vector = 0
         for index in measurements:
             vector ^= 1 << index
         outcome = 0
+        parts = 0
         while vector:
             lead = vector.bit_length() - 1
             if lead not in self._basis:
                 break
-            basis_vector, basis_outcome = self._basis[lead]
+            basis_vector, basis_outcome, basis_parts = self._basis[lead]
             vector ^= basis_vector
             outcome ^= basis_outcome
-        return vector, outcome
+            parts ^= basis_parts
+        return vector, outcome, parts
 
-    def add(self, measurements: Iterable[int], outcome: int) -> bool:
-        """Add a parity with its outcome; return ``False`` if the span contradicts it."""
-        vector, implied = self._reduce(measurements)
+    def add(self, measurements: Iterable[int], outcome: int) -> list[int]:
+        """Add a parity with its outcome.
+
+        Returns:
+            the indices, in the order they were added, of the earlier parities
+            whose XOR is this one and whose outcomes contradict ``outcome``;
+            empty if there is no contradiction.
+
+        """
+        index = self._added
+        self._added += 1
+        vector, implied, parts = self._reduce(measurements)
         if not vector:
-            return implied == outcome
-        self._basis[vector.bit_length() - 1] = (vector, implied ^ outcome)
-        return True
+            if implied == outcome:
+                return []
+            return [i for i in range(index) if parts >> i & 1]
+        self._basis[vector.bit_length() - 1] = (vector, implied ^ outcome, parts ^ 1 << index)
+        return []
 
     def outcome(self, measurements: Iterable[int]) -> int | None:
         """Return the outcome of a parity in the span, or ``None`` if outside it."""
-        vector, outcome = self._reduce(measurements)
+        vector, outcome, _ = self._reduce(measurements)
         return None if vector else outcome

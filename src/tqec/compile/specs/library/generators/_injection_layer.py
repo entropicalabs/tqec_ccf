@@ -347,6 +347,11 @@ class InjectionMomentFinder(NodeWalker):
             self._repetitions.pop()
 
     @property
+    def moments(self) -> int:
+        """The number of moments of the circuit the walked tree generates."""
+        return self._moments
+
+    @property
     def noiseless_qubits(self) -> dict[int, frozenset[int]]:
         """For each moment an encoder occupies, the encoder's qubit indices."""
         return dict(self._qubits)
