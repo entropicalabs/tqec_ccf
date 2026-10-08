@@ -25,6 +25,9 @@ Modifications to the original code:
    REPEAT blocks (not before the block, the first instruction in the repeated
    inner block, and after the block).
 6. Re-phrase the docstrings and error messages slightly.
+7. A ``TICK`` at the edge of a ``REPEAT`` block (the first instruction of the
+   body, or the first one after the block) no longer opens an empty moment, so
+   noising a circuit and flattening it commute.
 
 """
 
@@ -404,11 +407,57 @@ class NoiseModel:
             immune_qubits = set()
         noiseless = noiseless_qubits if noiseless_qubits is not None else {}
 
+        return self._noisy_circuit(
+            circuit,
+            system_qubits=system_qubits,
+            immune_qubits=immune_qubits,
+            noiseless=noiseless,
+            starts_at_repeat_boundary=False,
+        )
+
+    def _noisy_circuit(
+        self,
+        circuit: stim.Circuit,
+        *,
+        system_qubits: set[int],
+        immune_qubits: set[int],
+        noiseless: Mapping[int, Set[int]],
+        starts_at_repeat_boundary: bool,
+    ) -> stim.Circuit:
+        """Implement :meth:`noisy_circuit`, for a whole circuit or a ``REPEAT`` body.
+
+        A moment ends at a ``TICK`` and at the edge of a ``REPEAT`` block. A
+        ``TICK`` right at such an edge --- the first instruction of a ``REPEAT``
+        body, as tqec emits them, or the first one after a block --- therefore
+        ends a moment that is already over: it is kept, but it does not open an
+        empty moment, which would idle every qubit for a time step that the
+        flattened circuit does not have.
+
+        Args:
+            circuit: the circuit to layer noise over.
+            system_qubits: as in :meth:`noisy_circuit`.
+            immune_qubits: as in :meth:`noisy_circuit`.
+            noiseless: as ``noiseless_qubits`` in :meth:`noisy_circuit`.
+            starts_at_repeat_boundary: whether ``circuit`` is the body of a
+                ``REPEAT`` block, so that its first instruction sits at an edge.
+
+        Returns:
+            The noisy version of the circuit.
+
+        """
         result = stim.Circuit()
+        at_boundary = starts_at_repeat_boundary
+        ticked = False
         for index, moment_split_ops in enumerate(
             _iter_split_op_moments(circuit, immune_qubits=immune_qubits)
         ):
-            if not result:
+            if at_boundary and isinstance(moment_split_ops, list) and not moment_split_ops:
+                # The TICK at a REPEAT edge: keep it, open no moment.
+                result.append("TICK", [], [])
+                at_boundary, ticked = False, True
+                continue
+            at_boundary = isinstance(moment_split_ops, stim.CircuitRepeatBlock)
+            if not result or ticked:
                 pass
             elif isinstance(moment_split_ops, stim.CircuitRepeatBlock):
                 pass
@@ -416,16 +465,19 @@ class NoiseModel:
                 pass
             else:
                 result.append("TICK", [], [])
+            ticked = False
             if isinstance(moment_split_ops, stim.CircuitRepeatBlock):
                 if index in noiseless:
                     raise ValueError(
                         f"noiseless_qubits names entry {index}, a REPEAT block; only "
                         "the moments outside REPEAT blocks can be exempted."
                     )
-                noisy_body = self.noisy_circuit(
+                noisy_body = self._noisy_circuit(
                     moment_split_ops.body_copy(),
                     system_qubits=system_qubits,
                     immune_qubits=immune_qubits,
+                    noiseless={},
+                    starts_at_repeat_boundary=True,
                 )
                 result.append(
                     stim.CircuitRepeatBlock(

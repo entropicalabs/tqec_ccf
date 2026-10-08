@@ -163,10 +163,7 @@ def test_every_branch_circuit_is_that_branch_compiled_on_its_own(n: int, k: int)
             compiled.generate_branch_circuit(k, branches).flattened(),
             reference.generate_stim_circuit(k=k).flattened(),
         )
-        # Noise the reference after flattening it: noisy_circuit gives a REPEAT
-        # body, which starts with a TICK, an extra moment of idling on every
-        # qubit per repetition, and the branch circuit has no REPEAT block.
         _assert_circuits_equivalent_modulo_detector_order(
             compiled.generate_branch_circuit(k, branches, noise_model=noise_model).flattened(),
-            noise_model.noisy_circuit(reference.generate_stim_circuit(k=k).flattened()),
+            reference.generate_stim_circuit(k=k, noise_model=noise_model).flattened(),
         )
