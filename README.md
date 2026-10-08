@@ -36,24 +36,27 @@ These blocks can then be combined to construct large-scale logical computations,
 This is [Entropica Labs](https://www.entropicalabs.com)' fork of [`tqec/tqec`](https://github.com/tqec/tqec).
 It adds the building blocks of non-Clifford computation by gate teleportation:
 
-- **Conditional cubes** (`ConditionalLeafCubeKind`): a cube whose kind is chosen at runtime by the parity
-  of a correlation surface measured earlier, e.g. the S correction after a T injection. A computation
+- **Conditional cubes** (`ConditionalLeafCubeKind`, in `tqec.computation.cube`): a cube whose kind is
+  chosen at runtime by the parity of a correlation surface measured earlier, e.g. the S correction
+  after a T injection. A computation
   compiles once to Stim text with `IF`/`ELSE` blocks (`generate_stim_text`), and to the ordinary
   `stim.Circuit` of any single branch (`generate_branch_circuit`), noisy or not.
-- **Conditional observables** (`ConditionalCorrelationSurface`): a logical observable whose shape depends
-  on a conditional cube's branch.
+- **Conditional observables** (`ConditionalCorrelationSurface`, in `tqec.computation.correlation`): a
+  logical observable whose shape depends on a conditional cube's branch.
 - **Y-basis measurement and initialisation** (`LeafCubeKind.Y_HALF_CUBE`, or `"Y"`), compiled natively
   following [Gidney's in-place Y-basis access](https://quantum-journal.org/papers/q-2024-04-08-1310/).
 - **State injection** (`LeafCubeKind.INJECTION`, or `"I"`): start a column in one of eight single-qubit
   states, including the magic states `T` and `T_DAG` (emitted by `generate_stim_text`, as stim has no T gate).
 
-Install it from this repository:
+Install it as described [below](#installation). To run the worked examples, clone the repository
+instead, since the notebooks are not part of the package:
 
 ```bash
-python -m pip install git+https://github.com/entropicalabs/tqec_ccf.git
+git clone https://github.com/entropicalabs/tqec_ccf.git && cd tqec_ccf
+uv sync && uv run --with jupyter jupyter lab notebooks/
 ```
 
-Worked examples, runnable from the `notebooks/` folder:
+The worked examples, in the `notebooks/` folder:
 
 - [`branching_tree.ipynb`](notebooks/branching_tree.ipynb): conditional cubes, branch circuits, noise and
   conditional observables;
@@ -66,17 +69,20 @@ README, and the documentation site it links to, are upstream's and describe the 
 
 ## Installation
 
-Currently, you need to install `tqec` from source with `pip` or [`uv`](https://docs.astral.sh/uv/):
+Currently, you need to install `tqec` from source with `pip` or [`uv`](https://docs.astral.sh/uv/).
+Both this fork and upstream install as the `tqec` package, so installing one replaces the other:
 
 **With pip:**
 ```bash
-python -m pip install git+https://github.com/tqec/tqec.git
+python -m pip install git+https://github.com/entropicalabs/tqec_ccf.git
 ```
 
 **With uv:**
 ```bash
-uv pip install git+https://github.com/tqec/tqec.git
+uv pip install git+https://github.com/entropicalabs/tqec_ccf.git
 ```
+
+Upstream, without this fork's additions, is at `git+https://github.com/tqec/tqec.git`.
 
 For a more detailed installation guide and common troubleshooting tips, see the [installation page](https://tqec.github.io/tqec/user_guide/installation.html) in the documentation.
 
