@@ -25,6 +25,9 @@ Modifications to the original code:
    REPEAT blocks (not before the block, the first instruction in the repeated
    inner block, and after the block).
 6. Re-phrase the docstrings and error messages slightly.
+7. A ``TICK`` at the edge of a ``REPEAT`` block (the first instruction of the
+   body, or the first one after the block) no longer opens an empty moment, so
+   noising a circuit and flattening it commute.
 
 """
 
@@ -391,6 +394,11 @@ class NoiseModel:
                 rather than modelled, such as a non-fault-tolerant state-injection
                 encoder sharing its moments with a neighbouring patch.
 
+        A ``TICK`` at the edge of a ``REPEAT`` block --- tqec starts every body
+        with one and follows every block with one --- ends the moment the edge
+        already ended, and opens no moment of its own. Noising a tqec circuit
+        and flattening it therefore commute.
+
         Returns:
             The noisy version of the circuit.
 
@@ -404,11 +412,78 @@ class NoiseModel:
             immune_qubits = set()
         noiseless = noiseless_qubits if noiseless_qubits is not None else {}
 
+        return self._noisy_circuit(
+            circuit,
+            system_qubits=system_qubits,
+            immune_qubits=immune_qubits,
+            noiseless=noiseless,
+            starts_at_repeat_boundary=False,
+        )
+
+    def _noisy_circuit(
+        self,
+        circuit: stim.Circuit,
+        *,
+        system_qubits: set[int],
+        immune_qubits: set[int],
+        noiseless: Mapping[int, Set[int]],
+        starts_at_repeat_boundary: bool,
+    ) -> stim.Circuit:
+        """Implement :meth:`noisy_circuit`, for a whole circuit or a ``REPEAT`` body.
+
+        A moment ends at a ``TICK`` and at the edge of a ``REPEAT`` block. A
+        ``TICK`` right at such an edge --- the first instruction of a ``REPEAT``
+        body, as tqec emits them, or the first one after a block --- therefore
+        ends a moment that is already over: it is kept, but it does not open an
+        empty moment, which would idle every qubit for a time step that the
+        flattened circuit does not have. The one exception is a single ``TICK``
+        between two blocks whose second body starts with a ``TICK``: flattened,
+        the two enclose a genuine empty moment, which is kept. Likewise,
+        annotations between an edge and its ``TICK`` belong to the moment the
+        edge closed, and get no noise of their own.
+
+        Not handled, and not emitted by tqec, which adds no ``TICK`` before a
+        repeated layer: a ``TICK`` right before a block whose body starts with
+        one. Flattened, only the first repetition then has an empty moment,
+        which a single noisy body cannot express.
+
+        Args:
+            circuit: the circuit to layer noise over.
+            system_qubits: as in :meth:`noisy_circuit`.
+            immune_qubits: as in :meth:`noisy_circuit`.
+            noiseless: as ``noiseless_qubits`` in :meth:`noisy_circuit`.
+            starts_at_repeat_boundary: whether ``circuit`` is the body of a
+                ``REPEAT`` block, so that its first instruction sits at an edge.
+
+        Returns:
+            The noisy version of the circuit.
+
+        """
         result = stim.Circuit()
-        for index, moment_split_ops in enumerate(
-            _iter_split_op_moments(circuit, immune_qubits=immune_qubits)
-        ):
-            if not result:
+        at_boundary = starts_at_repeat_boundary
+        ticked = False
+        moments = list(_iter_split_op_moments(circuit, immune_qubits=immune_qubits))
+        for index, moment_split_ops in enumerate(moments):
+            if at_boundary and isinstance(moment_split_ops, list):
+                if not moment_split_ops:
+                    # The TICK at a REPEAT edge: keep it. It opens no moment,
+                    # unless the next block's own leading TICK is the edge's.
+                    result.append("TICK", [], [])
+                    ticked = True
+                    if not _starts_at_tick_edge(moments, index + 1):
+                        at_boundary = False
+                        continue
+                if moment_split_ops and all(
+                    occurs_in_classical_control_system(op) for op in moment_split_ops
+                ):
+                    # Annotations at a REPEAT edge, before the TICK that ends
+                    # the moment: they belong to the moment the edge closed.
+                    for op in moment_split_ops:
+                        result.append(op)
+                    at_boundary = False
+                    continue
+            at_boundary = isinstance(moment_split_ops, stim.CircuitRepeatBlock)
+            if not result or ticked:
                 pass
             elif isinstance(moment_split_ops, stim.CircuitRepeatBlock):
                 pass
@@ -416,16 +491,19 @@ class NoiseModel:
                 pass
             else:
                 result.append("TICK", [], [])
+            ticked = False
             if isinstance(moment_split_ops, stim.CircuitRepeatBlock):
                 if index in noiseless:
                     raise ValueError(
                         f"noiseless_qubits names entry {index}, a REPEAT block; only "
                         "the moments outside REPEAT blocks can be exempted."
                     )
-                noisy_body = self.noisy_circuit(
+                noisy_body = self._noisy_circuit(
                     moment_split_ops.body_copy(),
                     system_qubits=system_qubits,
                     immune_qubits=immune_qubits,
+                    noiseless={},
+                    starts_at_repeat_boundary=True,
                 )
                 result.append(
                     stim.CircuitRepeatBlock(
@@ -453,6 +531,24 @@ class NoiseModel:
                 )
 
         return result
+
+
+def _starts_at_tick_edge(
+    moments: list[stim.CircuitRepeatBlock | list[stim.CircuitInstruction]], index: int
+) -> bool:
+    """Return whether ``moments[index]`` is a ``REPEAT`` block whose body starts with a ``TICK``.
+
+    Between two such blocks, a single ``TICK`` and the body's own leading one
+    enclose a genuine empty moment of the flattened circuit, so only one of them
+    can be the ``TICK`` of an edge.
+    """
+    if index >= len(moments):
+        return False
+    block = moments[index]
+    if not isinstance(block, stim.CircuitRepeatBlock):
+        return False
+    body = block.body_copy()
+    return len(body) > 0 and isinstance(body[0], stim.CircuitInstruction) and body[0].name == "TICK"
 
 
 def occurs_in_classical_control_system(op: stim.CircuitInstruction) -> bool:

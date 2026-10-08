@@ -19,8 +19,12 @@ Modifications to the original code:
 
 """
 
+import pytest
 import stim
 
+from tqec.compile.compile import compile_block_graph
+from tqec.computation.block_graph import BlockGraph
+from tqec.gallery import cnot, memory
 from tqec.utils.noise_model import (
     NoiseModel,
     _iter_split_op_moments,
@@ -217,3 +221,112 @@ def test_si_1000_repeat_block() -> None:
             DEPOLARIZE1(0.002) 4 5 6 7
         }
     """)
+
+
+def test_a_tick_at_a_repeat_edge_opens_no_idle_moment() -> None:
+    # tqec starts every REPEAT body with a TICK and follows a block with one.
+    # Each closes a moment the block edge already closed, so neither may add a
+    # moment of idling: the noisy circuit must be the noisy flattened circuit.
+    model = NoiseModel.uniform_depolarizing(1e-3)
+    circuit = stim.Circuit("""
+        R 0 1 2
+        TICK
+        H 0
+        REPEAT 3 {
+            TICK
+            CX 0 1
+            TICK
+            M 1
+        }
+        TICK
+        H 2
+    """)
+    noisy = model.noisy_circuit(circuit)
+    assert noisy.flattened() == model.noisy_circuit(circuit.flattened())
+    assert noisy == stim.Circuit("""
+        R 0 1 2
+        X_ERROR(0.001) 0 1 2
+        TICK
+        H 0
+        DEPOLARIZE1(0.001) 0 1 2
+        REPEAT 3 {
+            TICK
+            CX 0 1
+            DEPOLARIZE2(0.001) 0 1
+            DEPOLARIZE1(0.001) 2
+            TICK
+            M(0.001) 1
+            DEPOLARIZE1(0.001) 0 2
+        }
+        TICK
+        H 2
+        DEPOLARIZE1(0.001) 2 0 1
+    """)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(
+            "R 0 1\nREPEAT 2 {\nTICK\nH 0\n}\nTICK\nREPEAT 2 {\nTICK\nH 1\n}\nTICK\nM 0 1",
+            id="blocks_one_tick_apart",
+        ),
+        pytest.param(
+            "R 0 1\nREPEAT 2 {\nTICK\nH 0\n}\nREPEAT 2 {\nTICK\nH 1\n}\nTICK\nM 0 1",
+            id="blocks_back_to_back",
+        ),
+        pytest.param(
+            "R 0 1\nREPEAT 2 {\nTICK\nH 0\nTICK\nM 1\n}\nDETECTOR rec[-1]\nTICK\nM 1",
+            id="annotation_after_a_block",
+        ),
+        pytest.param(
+            "R 0 1\nTICK\nH 0\nREPEAT 2 {\nSHIFT_COORDS(0, 0, 1)\nTICK\nH 1\n}\nTICK\nM 0",
+            id="annotation_before_a_body_tick",
+        ),
+        pytest.param(
+            "R 0 1\nTICK\nH 0\nREPEAT 2 {\nTICK\nTICK\nX 1\n}\nTICK\nM 0",
+            id="empty_moment_in_a_body",
+        ),
+        pytest.param(
+            "R 0\nTICK\nH 0\nREPEAT 2 {\nREPEAT 2 {\nTICK\nH 0\n}\nTICK\nX 0\n}\nTICK\nM 0",
+            id="nested_block_first",
+        ),
+        pytest.param(
+            "R 0\nTICK\nH 0\nREPEAT 2 {\nTICK\nX 0\nREPEAT 2 {\nTICK\nH 0\n}\n}\nTICK\nM 0",
+            id="nested_block_last",
+        ),
+    ],
+)
+def test_noising_and_flattening_commute(text: str) -> None:
+    for model in (NoiseModel.uniform_depolarizing(1e-3), NoiseModel.si1000(1e-3)):
+        circuit = stim.Circuit(text)
+        nested = model.noisy_circuit(circuit).flattened()
+        flat = model.noisy_circuit(circuit.flattened())
+        # An annotation after a block lands after the noise of the moment it
+        # belongs to, rather than before it: same circuit, different text.
+        assert _without_annotations(nested) == _without_annotations(flat)
+        assert nested.detector_error_model() == flat.detector_error_model()
+
+
+def _without_annotations(circuit: stim.Circuit) -> stim.Circuit:
+    return stim.Circuit(
+        "\n".join(
+            str(inst)
+            for inst in circuit
+            if inst.name not in ("DETECTOR", "SHIFT_COORDS", "OBSERVABLE_INCLUDE")
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("graph", "k"),
+    [
+        pytest.param(memory(), 2, id="memory_k2"),
+        pytest.param(memory(), 3, id="memory_k3"),
+        pytest.param(cnot().fill_ports_for_minimal_simulation()[0].graph, 2, id="cnot_k2"),
+    ],
+)
+def test_a_noisy_compiled_circuit_is_its_noisy_flattened_circuit(graph: BlockGraph, k: int) -> None:
+    model = NoiseModel.uniform_depolarizing(1e-3)
+    circuit = compile_block_graph(graph, observables=None).generate_stim_circuit(k)
+    assert model.noisy_circuit(circuit).flattened() == model.noisy_circuit(circuit.flattened())
