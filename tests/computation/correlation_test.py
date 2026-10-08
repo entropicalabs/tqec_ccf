@@ -18,6 +18,7 @@ from tqec.gallery import memory
 from tqec.gallery.steane_encoding import steane_encoding
 from tqec.interop.pyzx.positioned import PositionedZX
 from tqec.utils.enums import Basis
+from tqec.utils.exceptions import TQECError
 from tqec.utils.position import Position3D
 
 
@@ -387,3 +388,24 @@ def test_an_isolated_cube_beside_a_column_is_a_surface_of_its_own() -> None:
     lone = ZXNode(Position3D(2, 0, 0), Basis.X)
     assert CorrelationSurface(frozenset({ZXEdge(lone, lone)})) in surfaces
     assert len(surfaces) == 2
+
+
+def test_a_component_without_leaves_is_reported() -> None:
+    # A ring of four cubes in the XY plane, beside a column.
+    graph = BlockGraph("A ring and a column")
+    ring = [Position3D(x, y, 0) for x, y in ((0, 0), (1, 0), (1, 1), (0, 1))]
+    for position in ring:
+        graph.add_cube(position, "ZZX")
+    for u, v in zip(ring, ring[1:] + ring[:1]):
+        graph.add_pipe(u, v)
+    _column(graph, 3)
+    with pytest.raises(TQECError, match="leaf"):
+        graph.find_correlation_surfaces()
+
+
+def test_disconnected_components_in_parallel() -> None:
+    graph = BlockGraph("Two columns")
+    _column(graph, 0)
+    _column(graph, 2, "ZXX")
+    zx = graph.to_zx_graph()
+    assert find_correlation_surfaces(zx, parallel=True) == find_correlation_surfaces(zx)

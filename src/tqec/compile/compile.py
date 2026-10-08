@@ -78,7 +78,7 @@ def _branch_independent_correlation_surfaces(
         )
 
     def lead(edges: frozenset[ZXEdge]) -> ZXEdge:
-        return max(edges, key=repr)
+        return max(edges)
 
     pivots: dict[ZXEdge, tuple[frozenset[ZXEdge], CorrelationSurface]] = {}
     avoiding: list[CorrelationSurface] = []
@@ -421,6 +421,9 @@ def compile_block_graph(
     # 0. Get the abstract observables to be included in the compiled circuit.
     obs_included: list[AbstractObservable] = []
     cond_obs_included: list[ConditionalAbstractObservable] = []
+    # Surfaces "auto" finds are valid by construction; one found beside a
+    # conditional cube cannot be re-checked on the graph, which PyZX cannot convert.
+    skip_validation = False
     if observables is not None:
         if observables == "auto":
             # Deliberately not ``block_graph.find_correlation_surfaces()``: that
@@ -431,6 +434,7 @@ def compile_block_graph(
             # measurement cap reads out at random by construction.
             if any(cube.is_conditional for cube in block_graph.cubes):
                 observables = list(_branch_independent_correlation_surfaces(block_graph))
+                skip_validation = True
             else:
                 observables = find_correlation_surfaces(block_graph.to_zx_graph())
         else:
@@ -517,7 +521,10 @@ def compile_block_graph(
             else:
                 obs_included.append(
                     compile_correlation_surface_to_abstract_observable(
-                        block_graph, surface, include_temporal_hadamard_pipes
+                        block_graph,
+                        surface,
+                        include_temporal_hadamard_pipes,
+                        _skip_validation=skip_validation,
                     )
                 )
 

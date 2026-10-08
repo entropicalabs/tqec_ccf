@@ -114,7 +114,8 @@ class _CorrelationSurfaceBase(MutableMapping[int, dict[int, Pauli]]):
         for u, v in zx_graph.edges():
             if u not in self:
                 # An edge of another connected component, which this surface
-                # leaves alone.
+                # leaves alone: then neither of its ends is in the surface.
+                assert v not in self
                 continue
             pauli_u = self[u][v]
             pauli_v = self[v][u]
@@ -275,6 +276,9 @@ def _find_correlation_surfaces_with_vertex_ordering(
             for surface in surfaces
         ]
 
+    # Reserved, unfinished feature (the public entry point refuses a vertex
+    # ordering). Unlike the path above it still combines the components of a
+    # subgraph by a product, and gets no surface for an isolated vertex.
     # partition the ZX graph and find correlation surface generators for each subgraph
     subgraphs, added_vertices_list = _partition_graph_from_vertices(zx_graph, vertex_ordering, True)
     if parallel and len(subgraphs) > 1:
@@ -355,13 +359,24 @@ def _find_correlation_surfaces(
     """Find the correlation surface generators for each connected component in the graph.
 
     A component made of a single isolated vertex has no leaf to start from and
-    is skipped: its only surface is a single node, which the caller adds.
+    is skipped: its only surface is a single node, which
+    :func:`~tqec.computation.correlation.find_correlation_surfaces` adds itself.
+
+    Raises:
+        TQECError: if a component of several vertices has no leaf.
+
     """
-    components = [
-        (component, min(v for v in component.vertices() if component.vertex_degree(v) == 1))
-        for component in _partition_graph_into_connected_components(zx_graph)
-        if component.num_vertices() > 1
-    ]
+    components = []
+    for component in _partition_graph_into_connected_components(zx_graph):
+        if component.num_vertices() == 1:
+            continue
+        leaves = [v for v in component.vertices() if component.vertex_degree(v) == 1]
+        if not leaves:
+            raise TQECError(
+                "Every connected component of the graph must contain at least one "
+                "leaf node to find correlation surfaces."
+            )
+        components.append((component, min(leaves)))
     if parallel and len(components) > 1:
         with multiprocessing.Pool() as pool:
             correlation_surfaces = pool.starmap(_find_correlation_surfaces_from_leaf, components)

@@ -95,14 +95,19 @@ def fill_ports_for_minimal_simulation(
             TQECWarning,
         )
 
-    correlation_surfaces = graph.find_correlation_surfaces()
+    identity = "I" * num_ports
+    # A surface that is the identity on every port (one of a component without
+    # ports, say) says nothing about the ports' stabilizers, which are what the
+    # simulations certify: keyed by stabilizer, such surfaces would also collapse
+    # onto one another.
     stab_to_surface: dict[str, CorrelationSurface] = {
-        s.external_stabilizer_on_graph(graph): s for s in correlation_surfaces
+        stabilizer: s
+        for s in graph.find_correlation_surfaces()
+        if (stabilizer := s.external_stabilizer_on_graph(graph)) != identity
     }
     generators = list(stab_to_surface.keys())
 
     if search_small_area_observables:
-        identity = "I" * num_ports
         # Need to collect all the possible correlation surfaces because we want
         # to find the generators with the smallest correlation surface area
         for stabilizer, comb in _iter_stabilizer_group(generators):
