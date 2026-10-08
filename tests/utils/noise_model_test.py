@@ -23,7 +23,8 @@ import pytest
 import stim
 
 from tqec.compile.compile import compile_block_graph
-from tqec.gallery import memory
+from tqec.computation.block_graph import BlockGraph
+from tqec.gallery import cnot, memory
 from tqec.utils.noise_model import (
     NoiseModel,
     _iter_split_op_moments,
@@ -263,8 +264,69 @@ def test_a_tick_at_a_repeat_edge_opens_no_idle_moment() -> None:
     """)
 
 
-@pytest.mark.parametrize("k", [2, 3])
-def test_noisy_memory_is_the_noisy_flattened_memory(k: int) -> None:
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(
+            "R 0 1\nREPEAT 2 {\nTICK\nH 0\n}\nTICK\nREPEAT 2 {\nTICK\nH 1\n}\nTICK\nM 0 1",
+            id="blocks_one_tick_apart",
+        ),
+        pytest.param(
+            "R 0 1\nREPEAT 2 {\nTICK\nH 0\n}\nREPEAT 2 {\nTICK\nH 1\n}\nTICK\nM 0 1",
+            id="blocks_back_to_back",
+        ),
+        pytest.param(
+            "R 0 1\nREPEAT 2 {\nTICK\nH 0\nTICK\nM 1\n}\nDETECTOR rec[-1]\nTICK\nM 1",
+            id="annotation_after_a_block",
+        ),
+        pytest.param(
+            "R 0 1\nTICK\nH 0\nREPEAT 2 {\nSHIFT_COORDS(0, 0, 1)\nTICK\nH 1\n}\nTICK\nM 0",
+            id="annotation_before_a_body_tick",
+        ),
+        pytest.param(
+            "R 0 1\nTICK\nH 0\nREPEAT 2 {\nTICK\nTICK\nX 1\n}\nTICK\nM 0",
+            id="empty_moment_in_a_body",
+        ),
+        pytest.param(
+            "R 0\nTICK\nH 0\nREPEAT 2 {\nREPEAT 2 {\nTICK\nH 0\n}\nTICK\nX 0\n}\nTICK\nM 0",
+            id="nested_block_first",
+        ),
+        pytest.param(
+            "R 0\nTICK\nH 0\nREPEAT 2 {\nTICK\nX 0\nREPEAT 2 {\nTICK\nH 0\n}\n}\nTICK\nM 0",
+            id="nested_block_last",
+        ),
+    ],
+)
+def test_noising_and_flattening_commute(text: str) -> None:
+    for model in (NoiseModel.uniform_depolarizing(1e-3), NoiseModel.si1000(1e-3)):
+        circuit = stim.Circuit(text)
+        nested = model.noisy_circuit(circuit).flattened()
+        flat = model.noisy_circuit(circuit.flattened())
+        # An annotation after a block lands after the noise of the moment it
+        # belongs to, rather than before it: same circuit, different text.
+        assert _without_annotations(nested) == _without_annotations(flat)
+        assert nested.detector_error_model() == flat.detector_error_model()
+
+
+def _without_annotations(circuit: stim.Circuit) -> stim.Circuit:
+    return stim.Circuit(
+        "\n".join(
+            str(inst)
+            for inst in circuit
+            if inst.name not in ("DETECTOR", "SHIFT_COORDS", "OBSERVABLE_INCLUDE")
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("graph", "k"),
+    [
+        pytest.param(memory(), 2, id="memory_k2"),
+        pytest.param(memory(), 3, id="memory_k3"),
+        pytest.param(cnot().fill_ports_for_minimal_simulation()[0].graph, 2, id="cnot_k2"),
+    ],
+)
+def test_a_noisy_compiled_circuit_is_its_noisy_flattened_circuit(graph: BlockGraph, k: int) -> None:
     model = NoiseModel.uniform_depolarizing(1e-3)
-    circuit = compile_block_graph(memory()).generate_stim_circuit(k)
+    circuit = compile_block_graph(graph, observables=None).generate_stim_circuit(k)
     assert model.noisy_circuit(circuit).flattened() == model.noisy_circuit(circuit.flattened())

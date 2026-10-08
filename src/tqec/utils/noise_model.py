@@ -394,6 +394,11 @@ class NoiseModel:
                 rather than modelled, such as a non-fault-tolerant state-injection
                 encoder sharing its moments with a neighbouring patch.
 
+        A ``TICK`` at the edge of a ``REPEAT`` block --- tqec starts every body
+        with one and follows every block with one --- ends the moment the edge
+        already ended, and opens no moment of its own. Noising a tqec circuit
+        and flattening it therefore commute.
+
         Returns:
             The noisy version of the circuit.
 
@@ -431,7 +436,16 @@ class NoiseModel:
         body, as tqec emits them, or the first one after a block --- therefore
         ends a moment that is already over: it is kept, but it does not open an
         empty moment, which would idle every qubit for a time step that the
-        flattened circuit does not have.
+        flattened circuit does not have. The one exception is a single ``TICK``
+        between two blocks whose second body starts with a ``TICK``: flattened,
+        the two enclose a genuine empty moment, which is kept. Likewise,
+        annotations between an edge and its ``TICK`` belong to the moment the
+        edge closed, and get no noise of their own.
+
+        Not handled, and not emitted by tqec, which adds no ``TICK`` before a
+        repeated layer: a ``TICK`` right before a block whose body starts with
+        one. Flattened, only the first repetition then has an empty moment,
+        which a single noisy body cannot express.
 
         Args:
             circuit: the circuit to layer noise over.
@@ -448,14 +462,26 @@ class NoiseModel:
         result = stim.Circuit()
         at_boundary = starts_at_repeat_boundary
         ticked = False
-        for index, moment_split_ops in enumerate(
-            _iter_split_op_moments(circuit, immune_qubits=immune_qubits)
-        ):
-            if at_boundary and isinstance(moment_split_ops, list) and not moment_split_ops:
-                # The TICK at a REPEAT edge: keep it, open no moment.
-                result.append("TICK", [], [])
-                at_boundary, ticked = False, True
-                continue
+        moments = list(_iter_split_op_moments(circuit, immune_qubits=immune_qubits))
+        for index, moment_split_ops in enumerate(moments):
+            if at_boundary and isinstance(moment_split_ops, list):
+                if not moment_split_ops:
+                    # The TICK at a REPEAT edge: keep it. It opens no moment,
+                    # unless the next block's own leading TICK is the edge's.
+                    result.append("TICK", [], [])
+                    ticked = True
+                    if not _starts_at_tick_edge(moments, index + 1):
+                        at_boundary = False
+                        continue
+                if moment_split_ops and all(
+                    occurs_in_classical_control_system(op) for op in moment_split_ops
+                ):
+                    # Annotations at a REPEAT edge, before the TICK that ends
+                    # the moment: they belong to the moment the edge closed.
+                    for op in moment_split_ops:
+                        result.append(op)
+                    at_boundary = False
+                    continue
             at_boundary = isinstance(moment_split_ops, stim.CircuitRepeatBlock)
             if not result or ticked:
                 pass
@@ -505,6 +531,24 @@ class NoiseModel:
                 )
 
         return result
+
+
+def _starts_at_tick_edge(
+    moments: list[stim.CircuitRepeatBlock | list[stim.CircuitInstruction]], index: int
+) -> bool:
+    """Return whether ``moments[index]`` is a ``REPEAT`` block whose body starts with a ``TICK``.
+
+    Between two such blocks, a single ``TICK`` and the body's own leading one
+    enclose a genuine empty moment of the flattened circuit, so only one of them
+    can be the ``TICK`` of an edge.
+    """
+    if index >= len(moments):
+        return False
+    block = moments[index]
+    if not isinstance(block, stim.CircuitRepeatBlock):
+        return False
+    body = block.body_copy()
+    return len(body) > 0 and isinstance(body[0], stim.CircuitInstruction) and body[0].name == "TICK"
 
 
 def occurs_in_classical_control_system(op: stim.CircuitInstruction) -> bool:
