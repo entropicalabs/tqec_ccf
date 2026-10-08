@@ -420,11 +420,15 @@ def find_correlation_surfaces(
         )
     zx_graph = graph.g
     _check_spiders_are_supported(zx_graph)
-    # Edge case: single node graph
-    if zx_graph.num_vertices() == 1:
-        v = next(iter(zx_graph.vertices()))
-        node = ZXNode(graph[v], zx_to_basis(zx_graph, v).flipped())
-        return [CorrelationSurface(frozenset({ZXEdge(node, node)}))]
+    # An isolated node (a lone cube) is its own component; its only surface is
+    # the node itself, in the basis it is initialised and measured in.
+    isolated = [v for v in zx_graph.vertices() if zx_graph.vertex_degree(v) == 0]
+    surfaces = [
+        CorrelationSurface(frozenset({ZXEdge(node, node)}))
+        for node in (ZXNode(graph[v], zx_to_basis(zx_graph, v).flipped()) for v in isolated)
+    ]
+    if zx_graph.num_vertices() == len(isolated):
+        return sorted(surfaces, key=lambda x: sorted(x.span))
 
     leaves = {v for v in zx_graph.vertices() if zx_graph.vertex_degree(v) == 1}
     if not leaves:
@@ -432,16 +436,14 @@ def find_correlation_surfaces(
             "The graph must contain at least one leaf node to find correlation surfaces."
         )
 
-    # sort the correlation surfaces by area
-    return sorted(
-        (
-            cs.to_immutable_public_representation(graph)
-            for cs in _find_correlation_surfaces_with_vertex_ordering(
-                zx_graph, vertex_ordering, parallel
-            )
-        ),
-        key=lambda x: sorted(x.span),
+    surfaces.extend(
+        cs.to_immutable_public_representation(graph)
+        for cs in _find_correlation_surfaces_with_vertex_ordering(
+            zx_graph, vertex_ordering, parallel
+        )
     )
+    # sort the correlation surfaces by area
+    return sorted(surfaces, key=lambda x: sorted(x.span))
 
 
 def reduce_observables_to_minimal_generators(

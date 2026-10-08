@@ -112,6 +112,10 @@ class _CorrelationSurfaceBase(MutableMapping[int, dict[int, Pauli]]):
         zx_nodes: dict[tuple[int, Basis], ZXNode] = {}
         bases = list(Basis)
         for u, v in zx_graph.edges():
+            if u not in self:
+                # An edge of another connected component, which this surface
+                # leaves alone.
+                continue
             pauli_u = self[u][v]
             pauli_v = self[v][u]
             edge_is_hadamard = is_hadamard(zx_graph, (u, v))
@@ -261,11 +265,15 @@ def _find_correlation_surfaces_with_vertex_ordering(
 ) -> list[_CorrelationSurfaceView]:
     """Find the correlation surfaces based on a given vertex ordering."""
     if vertex_ordering is None:
-        return list(
-            _product_of_disconnected_correlation_surfaces(
-                _find_correlation_surfaces(zx_graph, parallel)
-            )
-        )
+        # Connected components are independent: a surface of one, left alone on
+        # the others, is a surface of the whole graph. So their generating sets
+        # together generate the graph's surfaces; a product would instead force
+        # every surface to span every component.
+        return [
+            _CorrelationSurfaceView(surface)
+            for surfaces in _find_correlation_surfaces(zx_graph, parallel)
+            for surface in surfaces
+        ]
 
     # partition the ZX graph and find correlation surface generators for each subgraph
     subgraphs, added_vertices_list = _partition_graph_from_vertices(zx_graph, vertex_ordering, True)
@@ -344,10 +352,15 @@ def _find_correlation_surfaces_with_vertex_ordering(
 def _find_correlation_surfaces(
     zx_graph: GraphS, parallel: bool = False
 ) -> list[list[_CorrelationSurface]]:
-    """Find the correlation surface generators for each connected component in the graph."""
+    """Find the correlation surface generators for each connected component in the graph.
+
+    A component made of a single isolated vertex has no leaf to start from and
+    is skipped: its only surface is a single node, which the caller adds.
+    """
     components = [
         (component, min(v for v in component.vertices() if component.vertex_degree(v) == 1))
         for component in _partition_graph_into_connected_components(zx_graph)
+        if component.num_vertices() > 1
     ]
     if parallel and len(components) > 1:
         with multiprocessing.Pool() as pool:

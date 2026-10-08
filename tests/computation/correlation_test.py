@@ -359,3 +359,31 @@ def test_correlation_representations_conversion(
             surface._to_mutable_graph_representation(pg).to_immutable_public_representation(pg)
             == surface
         )
+
+
+def _column(graph: BlockGraph, x: int, kind: str = "ZXZ") -> None:
+    graph.add_cube(Position3D(x, 0, 0), kind)
+    graph.add_cube(Position3D(x, 0, 1), kind)
+    graph.add_pipe(Position3D(x, 0, 0), Position3D(x, 0, 1))
+
+
+def test_disconnected_components_have_their_own_surfaces() -> None:
+    # A surface of one component, left alone on the others, is a surface of
+    # the graph: each column is an observable of its own, not only their XOR.
+    graph = BlockGraph("Two columns")
+    _column(graph, 0)
+    _column(graph, 2, "ZXX")
+    surfaces = graph.find_correlation_surfaces()
+    assert sorted(sorted({p.x for p in s.positions}) for s in surfaces) == [[0], [2]]
+    for surface in surfaces:
+        _check_correlation_surface_validity(surface, graph.to_zx_graph())
+
+
+def test_an_isolated_cube_beside_a_column_is_a_surface_of_its_own() -> None:
+    graph = BlockGraph("A column and a lone cube")
+    _column(graph, 0)
+    graph.add_cube(Position3D(2, 0, 0), "ZXX")
+    surfaces = graph.find_correlation_surfaces()
+    lone = ZXNode(Position3D(2, 0, 0), Basis.X)
+    assert CorrelationSurface(frozenset({ZXEdge(lone, lone)})) in surfaces
+    assert len(surfaces) == 2
