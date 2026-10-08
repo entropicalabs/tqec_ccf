@@ -103,6 +103,11 @@ on its own. The following restrictions apply:
   ``XZX_XZZ``) exist; a pair that changes the spatial boundaries does not;
 * at most one conditional cube per ``z``-layer;
 * a conditional cube's branches may not differ inside a repeated round;
+* ``compile_block_graph(..., observables="auto")`` only finds the observables
+  that touch no conditional cube, which are deterministic whatever branch each
+  cube takes. One that crosses a conditional cube depends on its branch: it is
+  left out, with a warning, and must be given explicitly as a
+  :class:`~tqec.computation.correlation.ConditionalCorrelationSurface`;
 * the condition must read at least one measurement. A surface that only crosses
   data qubits a temporal pipe carries on is rejected;
 * a :class:`~tqec.computation.correlation.ConditionalCorrelationSurface` must be
