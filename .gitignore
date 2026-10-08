@@ -200,3 +200,7 @@ benchmarks/data/
 
 # debug
 debug
+
+# Local working files: scratch material and notebook outputs
+scratch/
+notebooks/output/

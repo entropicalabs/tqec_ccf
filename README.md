@@ -31,6 +31,39 @@ These blocks can then be combined to construct large-scale logical computations,
   </a>
 </p>
 
+## This fork
+
+This is [Entropica Labs](https://www.entropicalabs.com)' fork of [`tqec/tqec`](https://github.com/tqec/tqec).
+It adds the building blocks of non-Clifford computation by gate teleportation:
+
+- **Conditional cubes** (`ConditionalLeafCubeKind`): a cube whose kind is chosen at runtime by the parity
+  of a correlation surface measured earlier, e.g. the S correction after a T injection. A computation
+  compiles once to Stim text with `IF`/`ELSE` blocks (`generate_stim_text`), and to the ordinary
+  `stim.Circuit` of any single branch (`generate_branch_circuit`), noisy or not.
+- **Conditional observables** (`ConditionalCorrelationSurface`): a logical observable whose shape depends
+  on a conditional cube's branch.
+- **Y-basis measurement and initialisation** (`LeafCubeKind.Y_HALF_CUBE`, or `"Y"`), compiled natively
+  following [Gidney's in-place Y-basis access](https://quantum-journal.org/papers/q-2024-04-08-1310/).
+- **State injection** (`LeafCubeKind.INJECTION`, or `"I"`): start a column in one of eight single-qubit
+  states, including the magic states `T` and `T_DAG` (emitted by `generate_stim_text`, as stim has no T gate).
+
+Install it from this repository:
+
+```bash
+python -m pip install git+https://github.com/entropicalabs/tqec_ccf.git
+```
+
+Worked examples, runnable from the `notebooks/` folder:
+
+- [`branching_tree.ipynb`](notebooks/branching_tree.ipynb): conditional cubes, branch circuits, noise and
+  conditional observables;
+- [`y_cube_example.ipynb`](notebooks/y_cube_example.ipynb): the Y-half cube, and an `S`-gate observable;
+- [`injection.ipynb`](notebooks/injection.ipynb): state injection.
+
+What is not supported yet is listed in
+[`docs/user_guide/current_limitations.rst`](docs/user_guide/current_limitations.rst). The rest of this
+README, and the documentation site it links to, are upstream's and describe the features the two share.
+
 ## Installation
 
 Currently, you need to install `tqec` from source with `pip` or [`uv`](https://docs.astral.sh/uv/):
