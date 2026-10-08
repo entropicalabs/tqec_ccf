@@ -26,6 +26,7 @@ from tqec.computation.block_graph import BlockGraph
 from tqec.computation.correlation import (
     ConditionalCorrelationSurface,
     CorrelationSurface,
+    ZXEdge,
     find_correlation_surfaces,
 )
 from tqec.computation.cube import ConditionalLeafCubeKind, Cube, LeafCubeKind
@@ -39,6 +40,66 @@ _DEFAULT_SCALABLE_QUBIT_SHAPE: Final = PhysicalQubitScalable2D(
 )
 
 _DEFAULT_BLOCK_REPETITIONS: LinearFunction = LinearFunction(2, -1)
+
+
+def _branch_independent_correlation_surfaces(
+    block_graph: BlockGraph,
+) -> list[CorrelationSurface]:
+    """Return a generating set of the correlation surfaces that touch no conditional cube.
+
+    A surface is valid when it is valid at every cube it spans, and its validity
+    at a cube depends on that cube's kind alone. So a surface of the graph with
+    every conditional cube fixed to its first branch that touches none of them
+    is a surface of the graph whatever branch each cube takes. One that touches
+    a conditional cube reads it in a basis that depends on the branch, and can
+    only be a :class:`ConditionalCorrelationSurface`.
+
+    The surfaces found on the first-branch graph generate all of its surfaces,
+    but the ones among them that avoid the conditional cubes need not generate
+    all of those that do: two that both cross a cube can XOR to one that does
+    not. Gaussian elimination over GF(2), on the edges incident to the
+    conditional cubes, recovers a generating set of the surfaces that avoid them.
+
+    Args:
+        block_graph: a graph with conditional cubes and no open port.
+
+    Returns:
+        a generating set of the surfaces of ``block_graph`` that touch no
+        conditional cube.
+
+    """
+    conditional = {cube.position for cube in block_graph.cubes if cube.is_conditional}
+
+    def crossing(surface: CorrelationSurface) -> frozenset[ZXEdge]:
+        return frozenset(
+            edge
+            for edge in surface.span
+            if edge.u.position in conditional or edge.v.position in conditional
+        )
+
+    def lead(edges: frozenset[ZXEdge]) -> ZXEdge:
+        return max(edges)
+
+    pivots: dict[ZXEdge, tuple[frozenset[ZXEdge], CorrelationSurface]] = {}
+    avoiding: list[CorrelationSurface] = []
+    branch_zero = _resolve_conditional_cubes(block_graph, 0)
+    for found in find_correlation_surfaces(branch_zero.to_zx_graph()):
+        surface, edges = found, crossing(found)
+        while edges and lead(edges) in pivots:
+            pivot_edges, pivot_surface = pivots[lead(edges)]
+            edges, surface = edges ^ pivot_edges, surface ^ pivot_surface
+        if edges:
+            pivots[lead(edges)] = (edges, surface)
+        elif surface.span:
+            avoiding.append(surface)
+    if pivots:
+        warnings.warn(
+            f'observables="auto" leaves out {len(pivots)} independent correlation '
+            "surface(s) that cross a conditional cube: they depend on its branch. "
+            "Give them explicitly, as ConditionalCorrelationSurface.",
+            stacklevel=3,
+        )
+    return avoiding
 
 
 def _resolve_conditional_cubes(
@@ -281,8 +342,13 @@ def compile_block_graph(
         observables: correlation surfaces that should be compiled into
             observables and included in the compiled circuit.
             If set to ``"auto"``, the correlation surfaces will be automatically
-            determined from the block graph. If a list of correlation surfaces
-            is provided, only those surfaces will be compiled into observables
+            determined from the block graph. With conditional cubes, those are
+            the surfaces that touch no conditional cube, which are observables
+            whichever branch each cube takes; one that crosses a conditional
+            cube depends on its branch and must be given explicitly, as a
+            :class:`~tqec.computation.correlation.ConditionalCorrelationSurface`.
+            If a list of correlation surfaces is provided, only those surfaces
+            will be compiled into observables
             and included in the compiled circuit. If set to ``None``, no
             observables will be included in the compiled circuit. Entries may be
             :class:`~tqec.computation.correlation.ConditionalCorrelationSurface`;
@@ -355,6 +421,9 @@ def compile_block_graph(
     # 0. Get the abstract observables to be included in the compiled circuit.
     obs_included: list[AbstractObservable] = []
     cond_obs_included: list[ConditionalAbstractObservable] = []
+    # Surfaces "auto" finds are valid by construction; one found beside a
+    # conditional cube cannot be re-checked on the graph, which PyZX cannot convert.
+    skip_validation = False
     if observables is not None:
         if observables == "auto":
             # Deliberately not ``block_graph.find_correlation_surfaces()``: that
@@ -363,7 +432,11 @@ def compile_block_graph(
             # ``"auto"`` means "include whatever deterministic observables exist",
             # and a computation may legitimately have none -- a Y-basis
             # measurement cap reads out at random by construction.
-            observables = find_correlation_surfaces(block_graph.to_zx_graph())
+            if any(cube.is_conditional for cube in block_graph.cubes):
+                observables = list(_branch_independent_correlation_surfaces(block_graph))
+                skip_validation = True
+            else:
+                observables = find_correlation_surfaces(block_graph.to_zx_graph())
         else:
             observables = [cs.shift_by(dz=-minz) for cs in observables]
         include_temporal_hadamard_pipes = convention.name == "fixed_bulk"
@@ -448,7 +521,10 @@ def compile_block_graph(
             else:
                 obs_included.append(
                     compile_correlation_surface_to_abstract_observable(
-                        block_graph, surface, include_temporal_hadamard_pipes
+                        block_graph,
+                        surface,
+                        include_temporal_hadamard_pipes,
+                        _skip_validation=skip_validation,
                     )
                 )
 

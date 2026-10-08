@@ -18,6 +18,7 @@ from tqec.gallery import memory
 from tqec.gallery.steane_encoding import steane_encoding
 from tqec.interop.pyzx.positioned import PositionedZX
 from tqec.utils.enums import Basis
+from tqec.utils.exceptions import TQECError
 from tqec.utils.position import Position3D
 
 
@@ -359,3 +360,52 @@ def test_correlation_representations_conversion(
             surface._to_mutable_graph_representation(pg).to_immutable_public_representation(pg)
             == surface
         )
+
+
+def _column(graph: BlockGraph, x: int, kind: str = "ZXZ") -> None:
+    graph.add_cube(Position3D(x, 0, 0), kind)
+    graph.add_cube(Position3D(x, 0, 1), kind)
+    graph.add_pipe(Position3D(x, 0, 0), Position3D(x, 0, 1))
+
+
+def test_disconnected_components_have_their_own_surfaces() -> None:
+    # A surface of one component, left alone on the others, is a surface of
+    # the graph: each column is an observable of its own, not only their XOR.
+    graph = BlockGraph("Two columns")
+    _column(graph, 0)
+    _column(graph, 2, "ZXX")
+    surfaces = graph.find_correlation_surfaces()
+    assert sorted(sorted({p.x for p in s.positions}) for s in surfaces) == [[0], [2]]
+    for surface in surfaces:
+        _check_correlation_surface_validity(surface, graph.to_zx_graph())
+
+
+def test_an_isolated_cube_beside_a_column_is_a_surface_of_its_own() -> None:
+    graph = BlockGraph("A column and a lone cube")
+    _column(graph, 0)
+    graph.add_cube(Position3D(2, 0, 0), "ZXX")
+    surfaces = graph.find_correlation_surfaces()
+    lone = ZXNode(Position3D(2, 0, 0), Basis.X)
+    assert CorrelationSurface(frozenset({ZXEdge(lone, lone)})) in surfaces
+    assert len(surfaces) == 2
+
+
+def test_a_component_without_leaves_is_reported() -> None:
+    # A ring of four cubes in the XY plane, beside a column.
+    graph = BlockGraph("A ring and a column")
+    ring = [Position3D(x, y, 0) for x, y in ((0, 0), (1, 0), (1, 1), (0, 1))]
+    for position in ring:
+        graph.add_cube(position, "ZZX")
+    for u, v in zip(ring, ring[1:] + ring[:1]):
+        graph.add_pipe(u, v)
+    _column(graph, 3)
+    with pytest.raises(TQECError, match="leaf"):
+        graph.find_correlation_surfaces()
+
+
+def test_disconnected_components_in_parallel() -> None:
+    graph = BlockGraph("Two columns")
+    _column(graph, 0)
+    _column(graph, 2, "ZXX")
+    zx = graph.to_zx_graph()
+    assert find_correlation_surfaces(zx, parallel=True) == find_correlation_surfaces(zx)
